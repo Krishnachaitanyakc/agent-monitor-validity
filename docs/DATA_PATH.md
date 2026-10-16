@@ -4,9 +4,10 @@ One command turns pinned AgentRewardBench (ARB) files into three JSONL files: wh
 
 ## Run it
 
-From a clone of the repository, on branch `datapath-arb-v1`, in the repository root:
+From a clone of the repository, in the repository root. The command installs a file-open guard (`datapath.fence`) before it reads anything; set `SPAR_FENCE_CONFIG` to a local JSON file that names any further folders and files to guard (keys: `label_files`, `fenced_dirs`, `fenced_files`, `archive_dirs`, `transcript_dirs`, `test_output_dirs`, `eval_output_dirs`, `join_dirs`). No paths are kept in the repository.
 
 ```bash
+export SPAR_FENCE_CONFIG=/path/to/local/fence_config.json
 python3 scripts/arb_datapath.py run --data-root ~/spar169-arb-data --out ~/spar169-arb-data/out/dev5-$(date +%Y%m%d-%H%M%S) \
   --trajectory webarena/GenericAgent-gpt-4o-2024-11-20/webarena.370 \
   --trajectory webarena/GenericAgent-anthropic_claude-3.7-sonnet/webarena.427 \
@@ -45,6 +46,20 @@ python3 tests/mutations.py
 3. **Normalize,** one trajectory at a time in trace-key order, so memory holds one trajectory. Fifteen runs, fourteen of them at the 31-step maximum, peaked at 0.46 GB.
 4. **Labels, development split only.** The label store skips every row whose task is not in the development split before it accesses any label field. Evaluation labels cannot be read in this version: `load_labels` refuses every split other than development, with or without a lock file, before it opens the file. The runner will restore that path only after it validates complete prediction records bound to the frozen panel and run manifest.
 5. **Checks.** Validation, leakage and determinism, all written to `report.json`.
+
+## The file-open guard
+
+`datapath.fence.install(profile, data_root, config)` adds a Python audit hook that raises `PermissionError` when the process opens a guarded path. It sees only file opens made inside a Python process that installs it; it does not see other processes, native code that opens files without Python, or directory listings.
+
+| Profile | Guards |
+|---|---|
+| `label_free` | the label file, any `annotations.csv.part` and any `judgments` folder under the data root, and the config's fenced folders and files, archive and transcript folders |
+| `dev_only` | the above, plus trajectories and screenshots of tasks outside the development split (by task ID from `data/splits.csv`) and named test outputs |
+| `pre_join` | the above, plus named evaluation output and join folders |
+
+Only three readers may open the label file: `fetch.fetch_file` (download and hash check, and the only code that may touch `annotations.csv.part`), `labels.load_labels` for the development split with no lock file, and `labels.annotation_structure`.
+
+Callers: `scripts/arb_datapath.py run` installs `label_free` before reading anything and `dev_only` once the split file is verified. `--owner-label-free` keeps only `label_free`, for the data owner's own steps on evaluation data. Later scripts install `dev_only` (the evidence packer and the pilot runner) or `pre_join` (the panel draw, the evaluation runner, the ending-category, heuristic, readings and rerun scripts, the lock and the review tooling) when run on development or synthetic data, and `label_free` with the owner flag on evaluation data. `report.json` records the installed profiles and the config file's SHA-256.
 
 ## The three records
 
