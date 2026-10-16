@@ -1,6 +1,6 @@
 # AgentRewardBench data path
 
-One command turns pinned AgentRewardBench (ARB) files into three JSONL files: what a detector may see, where each record came from, and the released labels, kept apart. Standard library only; tested on Python 3.9, 3.11 and 3.13, with byte-identical outputs.
+One command turns pinned AgentRewardBench (ARB) files into three JSONL files: what a detector may see, where each record came from, and the released labels, kept apart. Standard library only; tested on Python 3.11 and 3.13, with byte-identical outputs.
 
 ## Run it
 
@@ -15,7 +15,7 @@ python3 scripts/arb_datapath.py run --data-root ~/spar169-arb-data --out ~/spar1
   --trajectory workarena/GenericAgent-anthropic_claude-3.7-sonnet/workarena.servicenow.navigate-and-order-apple-mac-book-pro15-l2
 ```
 
-The first run downloads about 29 MB, 17 MB of data and 12 MB of file listings, and takes about 35 seconds on a home connection. It prints one line per trajectory and ends with `ALL CHECKS PASS`; the exit code is 0 only then. On Oct 8, 2026 these five gave:
+The first run downloads about 29 MB, 17 MB of data and 12 MB of file listings, and takes about 35 seconds on a home connection. It prints one line per trajectory and ends with `ALL CHECKS PASS`; the exit code is 0 only then. `--out` must be a new folder: the run writes everything to a staging folder beside it and publishes it to `--out` in one rename only after every check passes, so a failed or repeated run never overwrites or truncates an earlier output set. On Oct 8, 2026 these five gave the hashes below, and the same command gave them again on Oct 15 with the current code; `report.json` also records the code commit the run used.
 
 | Output | SHA-256 |
 |---|---|
@@ -29,21 +29,21 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies ten deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies fourteen deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests
 python3 tests/mutations.py
 ```
 
-`--data-root` and `--out` must be outside the repository; the command refuses otherwise. ARB's terms do not allow re-hosting its trajectories or screenshots, so nothing derived from them is committed.
+`--data-root` and `--out` must be outside the repository; the command refuses otherwise. As a project policy, nothing derived from ARB's trajectories or screenshots is committed or re-hosted. ARB's own Terms of Use, which derivatives must carry, are reproduced in [ARB_TERMS_OF_USE.md](ARB_TERMS_OF_USE.md).
 
 ## What it does
 
 1. **Pinned listings.** The file listings of `data/`, `cleaned/` and `screenshots/` at revision `b6d17e646009d6cb63d5dd7be78807b680693f61` are fetched once and cached under `<data-root>/listing/<revision>/`.
 2. **Hash-checked downloads.** Every file resolves against that revision and lands under `<data-root>/raw/` at its dataset path. It is accepted only if it matches the listing: the SHA-256 for files stored in Git LFS, which are all 27,299 screenshots and 747 trajectories, and the Git blob SHA-1 for the rest, which are the `data/` files and the other 555 trajectories, including all five above. A download goes to a `.part` file and is moved into place only after it passes. A file on disk that fails is downloaded again once; if the new copy also fails, the run stops.
 3. **Normalize,** one trajectory at a time in trace-key order, so memory holds one trajectory. Fifteen runs, fourteen of them at the 31-step maximum, peaked at 0.46 GB.
-4. **Labels, development split only.** The label store skips every row whose task is not in the development split before it accesses any label field. Test-split labels need a lock file that names the locked predictions file and its SHA-256; the file must exist with that hash, and only test runs with a prediction in it are unlocked. The lock is committed after inference and before the label join.
+4. **Labels, development split only.** The label store skips every row whose task is not in the development split before it accesses any label field. Evaluation labels cannot be read in this version: `load_labels` refuses every split other than development, with or without a lock file, before it opens the file. The runner will restore that path only after it validates complete prediction records bound to the frozen panel and run manifest.
 5. **Checks.** Validation, leakage and determinism, all written to `report.json`.
 
 ## The three records
@@ -52,10 +52,10 @@ python3 tests/mutations.py
 
 - `trace_key`: a plain hash of the trace ID. The readable ID names the agent, so it stays in provenance. The key is opaque to a reader but not secret: hashing the public trace IDs inverts it.
 - `task.goal`, plus any image URLs found in the goal. These benchmarks state a task's constraints inside the goal, which is kept verbatim apart from the hostname rewrite below.
-- `events`, in step order. Each holds the agent's `action` and `reasoning`, `url`, `open_pages_urls`, `focused_element`, `last_action_error`, an `observation` with the screenshot's dimensions and PNG status, the full and pruned accessibility trees, and the element properties. The last event is the final observation and normally has no action.
-- ARB hosts each WebArena and VisualWebArena site twice, and the agents split across the two copies: in the 11 development runs checked, GPT-4o and Claude used `-xl-1` and Qwen and Llama used `-xl-2`. The copy suffix is rewritten to the site name in every text field, for example `wa-forum-xl-2.mcgill-nlp.org` becomes `wa-forum.mcgill-nlp.org`. Each rewrite is counted in provenance, the source file's hash still pins the original bytes, and screenshot pixels are not altered.
+- `events`, in step order. Each holds the agent's `action` and `reasoning`, `url`, `open_pages_urls`, `focused_element`, `last_action_error`, an `observation` with the screenshot's dimensions and PNG status, the full and pruned accessibility trees, and the element properties. The last event is the final observation and normally has no action. Every screenshot path must name this trajectory's benchmark, agent, task and step number; any other path stops the run before output. Element properties must have their supported shapes: `bbox` null or exactly four numbers, `visibility` a number, `clickable` and `set_of_marks` booleans.
+- ARB hosts each WebArena and VisualWebArena site twice, and the agents split across the two copies: in the 11 development runs checked, GPT-4o and Claude used `-xl-1` and Qwen and Llama used `-xl-2`. The copy suffix is rewritten to the site name in every text field, for example `wa-forum-xl-2.mcgill-nlp.org` becomes `wa-forum.mcgill-nlp.org`. Each rewrite is counted in provenance, and the source file's hash still pins the original bytes. Screenshot pixels are not altered, so the suffix can stay visible where a page prints a URL in the image, as in one development run.
 
-Screenshots are held by reference: the view records each one's dimensions and PNG status, and the evidence packer in the next PR attaches each hash-checked PNG by trace key and step, so judges see every screenshot. The monitor view is the fenced pool every detector draws from; the protocol's judge view is a narrower, deterministic selection from it, made and tested by the packer.
+Screenshots are held by reference: the view records each one's dimensions and PNG status, and the evidence packer, in a later PR, attaches each hash-checked PNG by trace key and step, so judges see every screenshot. The monitor view is the fenced pool every detector draws from; the protocol's judge view is a narrower, deterministic selection from it, made and tested by the packer.
 
 **Provenance** (`provenance.jsonl`): the readable `trace_id`, benchmark, agent, raw and normalized task IDs, split, `source_url`, the source file's revision, bytes and SHA-256, each screenshot's path, SHA-256 and bytes, event and action counts, the number of hostname rewrites, how the run ended (development runs only, below), and which source fields were dropped and why. Screenshot hashes and byte counts are file bookkeeping, not evidence, so they stay here.
 
@@ -86,7 +86,7 @@ Only fields named in the schema are copied, so a new top-level or step field fro
 | V4 screenshots | a referenced screenshot is missing or is not a valid PNG: signature, chunk CRCs, a 13-byte IHDR first, positive dimensions, IDAT that decompresses to the expected size, IEND last with nothing after it |
 | V5 missingness | never; reports empty-field counts |
 | V6 labels | a primary or secondary label value is outside ARB's vocabulary, or a development record has no label |
-| L0 allowlist | any key at any level is not in the schema |
+| L0 allowlist | any key at any level is not in the schema, or an element property has an unsupported shape |
 | L1 forbidden keys | a fenced or label key appears at any depth |
 | L2 forbidden text | a fenced field name or the label file's name appears anywhere |
 | L3 identifiers | the agent name, model name, trace ID, raw or normalized task ID, or the `task_<n>/` folder of a goal image appears anywhere, or a hosted-site copy suffix appears in any case, also after URL-unquoting |
@@ -94,9 +94,9 @@ Only fields named in the schema are copied, so a new top-level or step field fro
 | L5 package | the pip package that bundles ARB's labels is importable in the interpreter running the check; the judge runner must run the same check in its own environment |
 | determinism | normalizing a trajectory twice gives different bytes |
 
-L3 fails on image-goal VisualWebArena tasks, whose goal names the task folder of the input image. The frozen protocol excludes those tasks.
+L3 fails on image-goal VisualWebArena tasks, whose goal names the task folder of the input image. The agreed scope excludes those tasks.
 
-The 32 unit tests plant canary strings in the reward field, the agent's prompts and two test-split label rows, one with a `.resized` task ID, and check that none reaches any output file. A spy on the CSV rows checks that no field of a test-split row except its task ID is accessed. `tests/mutations.py` holds the ten deliberate breaks, each an exact one-line edit: reading one or all fields of a test row before the split check, copying the agent's prompts into the view, removing the allowlist, skipping the hostname rewrite, putting screenshot hashes back in the view, checking LFS or Git blob downloads by size only, unlocking test runs without a prediction, and checking hostnames without URL-unquoting.
+The 39 unit tests plant canary strings in the reward field, the agent's prompts and two test-split label rows, one with a `.resized` task ID, and check that none reaches any output file. A spy on the CSV rows checks that `load_labels` accesses no field of a test-split row except its task ID; `annotation_structure` reads every row's keys and annotator name for its label-free counts, never a label field. `tests/mutations.py` holds the fourteen deliberate breaks, each an exact one-line edit: reading one or all fields of a test row before the split check, copying the agent's prompts into the view, removing the allowlist, skipping the hostname rewrite, putting screenshot hashes back in the view, checking LFS or Git blob downloads by size only, re-enabling evaluation label unlocking, publishing into an existing output folder, writing outputs without staging, checking only the first screenshot, accepting any element property value, and checking hostnames without URL-unquoting.
 
 For test runs, the console and the report summary show only whether the checks passed, not lengths or endings.
 
@@ -106,15 +106,15 @@ The monitor view keeps identifiers out of the text a judge reads: no agent or mo
 
 Cues a judge can see in the evidence itself:
 
-1. **How a run ended.** A run either ends with an agent message, reaches the 30-action cap, or ends early without a message. In BrowserGym 0.13.3, an early end in WebArena or VisualWebArena means the checker scored the run above zero, or, at reward 0, that a tab left the benchmark's sites. In WorkArena 0.4.1 L2, it means every subtask validated, or, at reward 0, that a subtask stopped the episode. Harness errors can also end a run. WorkArena L1 and AssistantBench were not checked. On the 20 development runs checked so far, all three early endings had a checker reward of 1. Provenance records `ending` as `agent_message`, `step_cap` or `environment` for development runs only, and leaves it empty for test runs, since it mostly stands in for the checker's verdict. That restriction is procedural: a test run's events still let anyone work out how it ended. Never select or order trajectories on it.
+1. **How a run ended.** A run either ends with an agent message, reaches the 30-action cap, or ends early without a message. In BrowserGym 0.13.3, an early end in WebArena or VisualWebArena means the checker scored the run above zero, or, at reward 0, that a tab left the benchmark's sites. In WorkArena 0.4.1 L2, it means every subtask validated, or, at reward 0, that a subtask stopped the episode. Harness errors can also end a run. WorkArena L1 and AssistantBench were not checked. On the 20 development runs checked so far, all three early endings had a checker reward of 1. Provenance records `ending` as `agent_message`, `step_cap` or `environment` for development runs only, and leaves it empty for test runs, since it mostly stands in for the checker's verdict. That restriction is procedural: a test run's events still let anyone work out how it ended. Runs are kept as recorded whatever their ending. The ending categories used in the study, including an unknown category, will be defined on development data from label-free trace evidence and frozen before evaluation; they are applied without evaluation labels and reported descriptively after the predictions are locked. Trajectories are never selected on how well their endings predict the labels.
 2. **Claude runs carry no free-text reasoning.** In all six Claude 3.7 Sonnet runs checked, `reasoning` only repeats the action inside `<action>` tags. The other three agents write free text. The field therefore hints at the agent and gives judges less evidence on Claude runs.
 
 ## Not done yet
 
 - The evidence packer and the pack checks that build each judge's input from the monitor view.
-- The predictions lock checks the predictions hash; the runner PR adds the configuration hash to the same lock.
-- The status-only check that removes Unsure primary labels at eligibility returns counts and an eligibility mask only; it is described in the pilot setup and logged as exposure.
+- Evaluation label unlocking, which the runner restores after validating complete prediction records, valid verdicts and model roles, and their binding to the frozen panel and run manifest.
+- Unsure or missing primary labels are handled at the label join (proposed): excluded from the error-based quantities and reported by count. No test label field is read before the join.
 - The README, charter and codebook still describe the earlier three-mentee design. A separate docs PR reconciles them before the main run, as the brief asks, and retires the multi-source `scripts/collect_traces.py` stub.
 
-- Template IDs are not in ARB's metadata. Selecting one task per template needs a join with the original WebArena and VisualWebArena task configs, pinned to a commit. That is the next PR.
-- VisualWebArena goal images are referenced by URL on a McGill host that returned HTTP 530 on Oct 8. The same relative path exists in the VisualWebArena GitHub repository. The frozen protocol excludes image-goal tasks, so this matters only if that rule changes.
+- Template IDs are not in ARB's metadata. The task-to-template mapping, joined label-free from the original WebArena and VisualWebArena configs pinned to a commit, and the counts behind 243 eligible tasks and 209 templates go to review with the setup materials. The working rule is one trajectory per eligible task.
+- VisualWebArena goal images are referenced by URL on a McGill host that returned HTTP 530 on Oct 8. The same relative path exists in the VisualWebArena GitHub repository. The agreed scope excludes image-goal tasks, so this matters only if that rule changes.
