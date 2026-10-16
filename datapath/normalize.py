@@ -64,15 +64,14 @@ def normalize(source: dict, data_root: Path, task_id: str, split: str, split_gro
               source_record: dict = None, verified_paths: set = None):
     """Return (monitor_view, provenance) for one parsed cleaned-trajectory JSON.
 
-    ``task_id`` is the raw task ID from the cleaned file name; it must match the
-    screenshot directory the steps point to. Screenshots are read from
+    ``task_id`` is the raw task ID from the cleaned file name. Every screenshot a step
+    points to must name this trajectory's benchmark, agent, task and step number;
+    otherwise ``ValueError`` is raised before anything is returned. Screenshots are read from
     ``data_root / <dataset path>``; when ``verified_paths`` is given, a screenshot not
     in it is treated as missing even if a file exists on disk.
     """
     benchmark, agent = source["benchmark"], source["agent"]
-    from_steps = _task_id_from_steps(source)
-    if from_steps is not None and from_steps != task_id:
-        raise ValueError(f"task_id {task_id!r} does not match screenshot directory {from_steps!r}")
+    check_screenshot_paths(source, task_id)
     tid = trace_id(benchmark, agent, task_id)
     key = trace_key(tid)
     deid = _Deid()
@@ -168,13 +167,31 @@ def ending_type(events: list) -> str:
     return "environment"
 
 
-def _task_id_from_steps(source: dict):
-    """The raw task ID named by the screenshot directory, or None if no step has a screenshot."""
-    for step in source.get("steps", []):
+_SHOT_PATH = re.compile(
+    r"(?:^|/)screenshots/(?P<benchmark>[^/]+)/(?P<agent>[^/]+)/(?P<task>[^/]+)"
+    r"/screenshot_step_(?P<step>\d+)\.png$")
+
+
+def check_screenshot_paths(source: dict, task_id: str) -> None:
+    """Raise ValueError unless every step's screenshot belongs to this trajectory and step.
+
+    The path must have the form .../screenshots/<benchmark>/<agent>/<task>/screenshot_step_<n>.png,
+    with the trajectory's own benchmark, agent and raw task ID, and n equal to the step number.
+    """
+    steps = source.get("steps", [])
+    for step in steps:
         sp = step.get("screenshot_path")
-        if sp:
-            return Path(sp).parent.name
-    return None
+        if not sp:
+            continue
+        m = _SHOT_PATH.search(sp)
+        if m is None:
+            raise ValueError(f"step {step.get('num')}: unexpected screenshot path {sp!r}")
+        expected = {"benchmark": source.get("benchmark"), "agent": source.get("agent"),
+                    "task": task_id, "step": str(step.get("num"))}
+        wrong = {k: m.group(k) for k in expected if m.group(k) != expected[k]}
+        if wrong:
+            raise ValueError(f"step {step.get('num')}: screenshot {sp!r} does not belong to "
+                             f"this trajectory and step (mismatched {sorted(wrong)})")
 
 
 def serialize(record: dict) -> str:

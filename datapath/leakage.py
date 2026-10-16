@@ -1,7 +1,8 @@
 """Checks that labels, rewards and evaluator verdicts cannot enter the monitor view.
 
 - L0 allowlist: every key at every level of a monitor-view record is one the schema
-  defines, so an unknown field cannot ride along;
+  defines, so an unknown field cannot ride along, and every element property has its
+  supported shape (see ``element_shape_errors``);
 - L1 no fenced or label key at any depth;
 - L2 no fenced field name or label-file name anywhere in the serialized record;
 - L3 no agent or task identifier: agent name, model name, trace ID, raw and normalized
@@ -40,6 +41,29 @@ ALLOWED = {
 }
 
 
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def element_shape_errors(props: dict) -> list:
+    """Shape problems in one element's properties.
+
+    Supported shapes: ``bbox`` is null or a list of exactly 4 numbers; ``visibility`` is a
+    number; ``clickable`` and ``set_of_marks`` are booleans. Booleans do not count as numbers.
+    """
+    errors = []
+    if "bbox" in props:
+        b = props["bbox"]
+        if not (b is None or (isinstance(b, list) and len(b) == 4 and all(_is_number(x) for x in b))):
+            errors.append("bbox")
+    if "visibility" in props and not _is_number(props["visibility"]):
+        errors.append("visibility")
+    for k in ("clickable", "set_of_marks"):
+        if k in props and not isinstance(props[k], bool):
+            errors.append(k)
+    return errors
+
+
 def _walk_keys(obj, path=""):
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -65,6 +89,7 @@ def _unexpected_keys(rec: dict) -> list:
                 bad.append(f"/events[{i}]/elements/{bid}")
                 continue
             bad += [f"/events[{i}]/elements/{bid}/{k}" for k in props if k not in ALLOWED["element"]]
+            bad += [f"/events[{i}]/elements/{bid}/{k} (shape)" for k in element_shape_errors(props)]
     return bad
 
 

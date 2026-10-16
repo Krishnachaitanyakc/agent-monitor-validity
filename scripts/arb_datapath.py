@@ -11,20 +11,26 @@ check -> outputs. Every file is checked against the pinned listing's hash; files
 already on disk are re-checked, not downloaded again. Trajectories are processed one at
 a time in trace-key order, so memory stays at one trajectory.
 
-Outputs, written under --out (never commit them; ARB's terms do not allow re-hosting):
+Outputs go to a staging folder next to --out and are published to --out in one rename,
+only after every check passes; --out must not exist yet, so no run ever overwrites or
+truncates an earlier output set. They are never committed (the project does not re-host
+ARB data):
   monitor_view.jsonl        what a detector may see, one record per trajectory
   provenance.jsonl          source pointers, hashes, split, screenshot files, dropped fields
   labels/labels_dev.jsonl   released labels, development-split records only
   report.json               every check, output hashes, and the run settings
 
 The three JSONL files are byte-identical across runs on the same inputs. The exit code
-is 0 only if every check passes.
+is 0 only if every check passes; otherwise nothing is published, and the staging folder
+with its report.json is left for inspection.
 """
 
 import argparse
 import hashlib
 import json
+import os
 import platform
+import subprocess
 import sys
 from pathlib import Path
 
@@ -70,9 +76,41 @@ class _Digest:
         return self.h.hexdigest()
 
 
+def _code_version() -> dict:
+    """The repository commit the run used, and whether the working tree had changes."""
+    try:
+        commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], check=True,
+                                capture_output=True, text=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"], check=True,
+                                    capture_output=True, text=True).stdout.strip())
+        return {"commit": commit, "uncommitted_changes": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": "unknown", "uncommitted_changes": None}
+
+
 def run(args) -> int:
     data_root = _outside_repo(Path(args.data_root), "--data-root")
     out = _outside_repo(Path(args.out), "--out")
+    if out.exists():
+        raise SystemExit(f"--out {out} already exists; outputs are never overwritten, "
+                         "so choose a new folder")
+    staging = out.parent / f".{out.name}.staging-{os.getpid()}"
+    try:
+        all_ok = _run_into(args, data_root, staging)
+    except BaseException:
+        print(f"run failed; nothing was published to {out}; partial files are in {staging}",
+              file=sys.stderr)
+        raise
+    if not all_ok:
+        print(f"CHECKS FAILED; nothing was published to {out}; the report is {staging / 'report.json'}")
+        return 1
+    staging.rename(out)
+    print(f"ALL CHECKS PASS; outputs published to {out}")
+    return 0
+
+
+def _run_into(args, data_root: Path, out: Path) -> bool:
+    """Run the whole data path, writing every output into ``out``; return whether all checks pass."""
     raw_root, listing_dir = data_root / "raw", data_root / "listing"
     specs = [_parse_spec(s) for s in args.trajectory]
     if not specs:
@@ -172,6 +210,7 @@ def run(args) -> int:
             "dataset": C.DATASET, "revision": C.REVISION,
             "schema_version": SCHEMA_VERSION, "normalizer_version": NORMALIZER_VERSION,
             "python": platform.python_version(), "trajectories": args.trajectory,
+            "code": _code_version(),
         },
         "outputs_sha256": hashes,
         "inputs": {"listing_files_sha256": {
@@ -212,8 +251,7 @@ def run(args) -> int:
           f"leakage: {sum(c['ok'] for c in leak_checks)}/{len(leak_checks)} records, "
           f"runtime {'ok' if runtime_check['ok'] else 'FAIL'}; "
           f"determinism: {'ok' if determinism_ok else 'FAIL'}")
-    print(f"{'ALL CHECKS PASS' if all_ok else 'CHECKS FAILED'}; outputs in {out}")
-    return 0 if all_ok else 1
+    return all_ok
 
 
 def main() -> int:
@@ -223,7 +261,8 @@ def main() -> int:
     r = sub.add_parser("run", help="fetch, normalize, label (dev only), validate, check")
     r.add_argument("--data-root", required=True,
                    help="local data directory outside the repository")
-    r.add_argument("--out", required=True, help="output directory outside the repository")
+    r.add_argument("--out", required=True,
+                   help="new output directory outside the repository; must not exist yet")
     r.add_argument("--trajectory", action="append", default=[],
                    help="benchmark/agent/task_id, repeatable")
     args = parser.parse_args()

@@ -1,64 +1,40 @@
 """The separate label store.
 
-Released human labels live only here, never in a monitor-view record. Two rules:
+Released human labels live only here, never in a monitor-view record. Three rules:
 
 1. Primary row. When a trajectory has several annotation rows, the first row in file
    order is the primary label, which is the rule ARB's own scorer applies. Later rows
    are kept as ``secondary_labels`` with their annotator, never used as the reference.
-2. Split guard. Rows whose task is not in an allowed split are skipped *before any
+2. Split guard. Rows whose task is not in the development split are skipped *before any
    label field is accessed*. The CSV reader still parses every row into memory; the
-   guard is that no code touches a test row's label fields. By default only the development split is allowed. Test-split
-   labels can be read only after the evaluation predictions are locked: the caller
-   passes a lock file naming the predictions file and its SHA-256, and the file must
-   exist with that hash. Only test runs with a locked prediction are unlocked, matched
-   by ``trace_key`` before any label field is accessed. The lock file is committed
-   after inference and before the label join (protocol section 11).
+   guard is that no code touches a test row's label fields.
+3. No evaluation labels. ``load_labels`` refuses any split other than development, with
+   or without a lock file. Reading evaluation labels comes back only in the runner, after
+   it validates complete prediction records bound to the frozen panel and run manifest.
 """
 
 import csv
-import json
 from pathlib import Path
 
 from . import constants as C
-from .fetch import sha256_file
 from .ids import Splits, normalize_task_id, trace_id, trace_key
 
 
 class LockedSplitError(PermissionError):
-    """Raised when test-split labels are requested without a predictions lock."""
-
-
-def _check_lock(lock_file) -> set:
-    """Verify the lock and return the trace keys of the locked predictions."""
-    if lock_file is None:
-        raise LockedSplitError("test-split labels need a predictions lock file")
-    lock = Path(lock_file)
-    if not lock.exists():
-        raise LockedSplitError(f"lock file {lock} does not exist")
-    content = json.loads(lock.read_text(encoding="utf-8"))
-    pred, want = content.get("predictions_path"), content.get("predictions_sha256")
-    if not pred or not want:
-        raise LockedSplitError(f"lock file {lock} needs predictions_path and predictions_sha256")
-    pred = Path(pred) if Path(pred).is_absolute() else lock.parent / pred
-    if not pred.exists() or sha256_file(pred) != want:
-        raise LockedSplitError(f"predictions file {pred} is missing or does not match the lock")
-    keys = set()
-    for line in pred.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            key = json.loads(line).get("trace_key")
-            if not key:
-                raise LockedSplitError(f"a prediction in {pred} has no trace_key")
-            keys.add(key)
-    if not keys:
-        raise LockedSplitError(f"predictions file {pred} holds no predictions")
-    return keys
+    """Raised when labels outside the development split are requested."""
 
 
 def load_labels(annotations_csv: Path, splits: Splits, allowed_splits=("dev",),
                 lock_file=None) -> dict:
-    """Return {trace_key: label record} for trajectories in the allowed splits."""
-    allowed = set(allowed_splits)
-    locked = _check_lock(lock_file) if allowed - {"dev"} else set()
+    """Return {trace_key: label record} for development-split trajectories.
+
+    ``allowed_splits`` must be exactly ("dev",) and ``lock_file`` must be None; anything
+    else raises ``LockedSplitError`` before the label file is opened.
+    """
+    if tuple(allowed_splits) != ("dev",) or lock_file is not None:
+        raise LockedSplitError("evaluation label unlocking is disabled; only the development "
+                               "split can be read")
+    allowed = {"dev"}
     out, counts = {}, {}
     with open(annotations_csv, newline="", encoding="utf-8") as f:
         for i, row in enumerate(csv.DictReader(f)):
@@ -68,8 +44,6 @@ def load_labels(annotations_csv: Path, splits: Splits, allowed_splits=("dev",),
             # matching the 'agent' field of the cleaned trajectory.
             tid = trace_id(row["benchmark"], row["model_name"], row["task_id"])
             key = trace_key(tid)
-            if splits.split(row["task_id"]) != "dev" and key not in locked:
-                continue                      # test run without a locked prediction
             counts[key] = counts.get(key, 0) + 1
             if key in out:                    # first row in file order stays primary
                 out[key]["secondary_labels"].append(

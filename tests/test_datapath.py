@@ -209,6 +209,18 @@ class TestNormalize(FixtureCase):
         with self.assertRaises(ValueError):
             normalize(t, self.raw, "webarena.9", "dev", "webarena")
 
+    def test_every_screenshot_must_belong_to_this_trajectory_and_step(self):
+        bench, rel, t = self.fx["trajs"]["webarena.1"]
+        other_task = f"trajectories/screenshots/webarena/{AGENT}/webarena.2/screenshot_step_2.png"
+        other_agent = "trajectories/screenshots/webarena/GenericAgent-other/webarena.1/screenshot_step_2.png"
+        other_bench = f"trajectories/screenshots/visualwebarena/{AGENT}/webarena.1/screenshot_step_2.png"
+        wrong_step = f"trajectories/screenshots/webarena/{AGENT}/webarena.1/screenshot_step_0.png"
+        for path in (other_task, other_agent, other_bench, wrong_step):
+            tampered = json.loads(json.dumps(t))
+            tampered["steps"][2]["screenshot_path"] = path    # the first screenshot is unchanged
+            with self.assertRaises(ValueError, msg=path):
+                normalize(tampered, self.raw, "webarena.1", "dev", "webarena")
+
     def test_deterministic_bytes(self):
         a, pa = self.norm()
         b, pb = self.norm()
@@ -255,6 +267,22 @@ class TestLeakage(FixtureCase):
             result = leakage.check_record(v, ids)
             self.assertFalse(result["ok"], check)
             self.assertTrue(result[check], check)
+
+    def test_element_property_shapes(self):
+        view, _ = self.norm()
+        cases = [({"bbox": {"checker_score": 1}}, False), ({"bbox": None}, True),
+                 ({"bbox": [0, 0, 10]}, False), ({"bbox": [0, 0, 10, 10]}, True),
+                 ({"bbox": [0, 0, 10, True]}, False), ({"visibility": "1"}, False),
+                 ({"visibility": True}, False), ({"visibility": 0.5}, True),
+                 ({"clickable": 1}, False), ({"set_of_marks": None}, False),
+                 ({"clickable": True, "set_of_marks": False}, True)]
+        for props, ok in cases:
+            v = json.loads(serialize(view))
+            v["events"][0]["elements"]["12"] = props
+            result = leakage.check_record(v)
+            self.assertEqual(result["ok"], ok, props)
+            if not ok:
+                self.assertTrue(result["L0_unexpected_keys"], props)
 
     def test_element_ids_are_data_not_field_names(self):
         view, _ = self.norm()
@@ -306,32 +334,28 @@ class TestLabels(FixtureCase):
             test_keys = {k for tid, k in accessed if tid == test_task}
             self.assertEqual(test_keys, {"task_id"}, test_task)
 
-    def test_test_split_needs_lock(self):
+    def test_evaluation_label_unlocking_is_disabled(self):
         f = self.raw / C.LABEL_FILE
-        with self.assertRaises(labels_mod.LockedSplitError):
-            labels_mod.load_labels(f, self.splits, allowed_splits=("dev", "test"))
-        lock = self.tmp / "lock.json"
-        lock.write_text(json.dumps({"predictions_sha256": "abc"}))
-        with self.assertRaises(labels_mod.LockedSplitError):          # no predictions file named
-            labels_mod.load_labels(f, self.splits, allowed_splits=("test",), lock_file=lock)
-        (self.tmp / "pred.jsonl").write_text("{}\n")
-        lock.write_text(json.dumps({"predictions_path": "pred.jsonl", "predictions_sha256": "abc"}))
-        with self.assertRaises(labels_mod.LockedSplitError):          # hash does not match
-            labels_mod.load_labels(f, self.splits, allowed_splits=("test",), lock_file=lock)
-        (self.tmp / "pred.jsonl").write_text("{}\n")
-        lock.write_text(json.dumps({"predictions_path": "pred.jsonl", "predictions_sha256":
-                                    hashlib.sha256(b"{}\n").hexdigest()}))
-        with self.assertRaises(labels_mod.LockedSplitError):          # prediction without a key
-            labels_mod.load_labels(f, self.splits, allowed_splits=("test",), lock_file=lock)
-        self.make_lock()
-        store = labels_mod.load_labels(f, self.splits, allowed_splits=("test",), lock_file=lock)
-        self.assertEqual(len(store), 2)
+        # A correctly hashed predictions file holding only a trace_key and no verdict.
+        bare_pred = self.tmp / "pred_bare.jsonl"
+        bare_pred.write_text(json.dumps(
+            {"trace_key": trace_key(trace_id("webarena", AGENT, "webarena.2"))}) + "\n")
+        bare = self.tmp / "lock_bare.json"
+        bare.write_text(json.dumps({"predictions_path": "pred_bare.jsonl", "predictions_sha256":
+                                    hashlib.sha256(bare_pred.read_bytes()).hexdigest()}))
+        complete = self.make_lock()     # complete prediction records with verdicts
+        for kwargs in ({"allowed_splits": ("test",), "lock_file": bare},
+                       {"allowed_splits": ("test",), "lock_file": complete},
+                       {"allowed_splits": ("dev", "test"), "lock_file": complete},
+                       {"allowed_splits": ("dev", "test")},
+                       {"allowed_splits": ("dev",), "lock_file": complete}):
+            with self.assertRaises(labels_mod.LockedSplitError, msg=str(kwargs)):
+                labels_mod.load_labels(f, self.splits, **kwargs)
 
-    def test_lock_unlocks_only_predicted_runs(self):
-        lock = self.make_lock(runs=(("webarena", "webarena.2"),))
-        store = labels_mod.load_labels(self.raw / C.LABEL_FILE, self.splits,
-                                       allowed_splits=("test",), lock_file=lock)
-        self.assertEqual([r["task_id_normalized"] for r in store.values()], ["webarena.2"])
+    def test_refusal_comes_before_the_label_file_is_opened(self):
+        missing = self.tmp / "no_such_annotations.csv"
+        with self.assertRaises(labels_mod.LockedSplitError):
+            labels_mod.load_labels(missing, self.splits, allowed_splits=("test",))
 
     def test_primary_row_is_first_in_file_order(self):
         store = labels_mod.load_labels(self.raw / C.LABEL_FILE, self.splits)
@@ -344,11 +368,17 @@ class TestLabels(FixtureCase):
                          [("a2", "Unsuccessful")])
 
     def test_label_values_validated(self):
-        store = labels_mod.load_labels(self.raw / C.LABEL_FILE, self.splits,
-                                       allowed_splits=("test",), lock_file=self.make_lock())
+        bad = self.tmp / "annotations_bad.csv"
+        with open(bad, "w", newline="") as fh:
+            w = csv.writer(fh, lineterminator="\n")
+            w.writerow(HEADER)
+            w.writerow(["a1", "webarena", "webarena.1", AGENT, "x", "Maybe", "No",
+                        "4. Completely Optimal", "No"])
+        store = labels_mod.load_labels(bad, self.splits)
         result = validate.validate_labels(store, set(store))
         self.assertFalse(result["ok"])
-        self.assertEqual(len(result["bad_values"]), 8)
+        key = trace_key(trace_id("webarena", AGENT, "webarena.1"))
+        self.assertEqual(result["bad_values"], [(key, 0, "trajectory_success")])
 
     def test_annotation_structure_is_label_free(self):
         s = labels_mod.annotation_structure(self.raw / C.LABEL_FILE, self.splits)
@@ -478,6 +508,65 @@ class TestRunnerOffline(FixtureCase):
         self.assertEqual(report["inputs"]["files_redownloaded_after_failed_check"], 0)
         self.assertEqual(report["inputs"]["files_downloaded"], 0)
         self.assertEqual(report["inputs"]["listings_read_from_cache"], ["data", "cleaned", "screenshots"])
+
+    def _snapshot(self, folder: Path) -> dict:
+        return {str(f.relative_to(folder)): f.read_bytes() for f in sorted(folder.rglob("*")) if f.is_file()}
+
+    def _quiet_run(self, runner, out, specs):
+        args = SimpleNamespace(data_root=str(self.tmp), out=str(out), trajectory=specs)
+        with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("network")), \
+                mock.patch("sys.stdout", new=io.StringIO()), mock.patch("sys.stderr", new=io.StringIO()):
+            return runner.run(args)
+
+    def test_failed_rerun_never_touches_a_good_output_set(self):
+        runner = self._load_runner()
+        out = self.tmp / "good"
+        self.assertEqual(self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"]), 0)
+        before = self._snapshot(out)
+        with self.assertRaises((SystemExit, Exception)):
+            self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.404"])
+        self.assertEqual(self._snapshot(out), before)
+        self.assertTrue(json.loads((out / "report.json").read_text())["ok"])
+
+    def test_existing_output_folder_is_refused(self):
+        runner = self._load_runner()
+        out = self.tmp / "exists"
+        out.mkdir()
+        with self.assertRaises(SystemExit) as cm:
+            self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"])
+        self.assertIn("already exists", str(cm.exception))
+        self.assertEqual(list(out.iterdir()), [])
+
+    def test_failed_run_publishes_nothing(self):
+        runner = self._load_runner()
+        out = self.tmp / "fresh"
+        with self.assertRaises(Exception):
+            self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1", f"webarena/{AGENT}/webarena.404"])
+        self.assertFalse(out.exists())
+
+    def test_foreign_screenshot_is_rejected_before_any_output(self):
+        runner = self._load_runner()
+        bench, rel, t = self.fx["trajs"]["webarena.1"]
+        tampered = json.loads(json.dumps(t))
+        tampered["steps"][1]["screenshot_path"] = (     # another development task's screenshot
+            f"trajectories/screenshots/visualwebarena/{AGENT}/visualwebarena.resized.3/screenshot_step_1.png")
+        (self.raw / rel).write_text(json.dumps(tampered))
+        listing = self.tmp / "listing" / C.REVISION / "cleaned.json"
+        entries = [listing_entry(self.raw, e["path"]) if e["path"] == rel else e
+                   for e in json.loads(listing.read_text())]
+        listing.write_text(json.dumps(entries))
+        out = self.tmp / "foreign"
+        with self.assertRaises(ValueError):
+            self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"])
+        self.assertFalse(out.exists())
+
+    def test_report_records_the_code_commit(self):
+        runner = self._load_runner()
+        out = self.tmp / "commit"
+        self.assertEqual(self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"]), 0)
+        code = json.loads((out / "report.json").read_text())["settings"]["code"]
+        self.assertIn("commit", code)
+        self.assertIn("uncommitted_changes", code)
 
     def test_refuses_paths_inside_repo(self):
         runner = self._load_runner()
