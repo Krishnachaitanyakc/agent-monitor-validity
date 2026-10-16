@@ -4,7 +4,7 @@ One command turns pinned AgentRewardBench (ARB) files into three JSONL files: wh
 
 ## Run it
 
-From a clone of the repository, in the repository root. The command installs a file-open guard (`datapath.fence`) before it reads anything; set `SPAR_FENCE_CONFIG` to a local JSON file that names any further folders and files to guard (keys: `label_files`, `fenced_dirs`, `fenced_files`, `archive_dirs`, `transcript_dirs`, `test_output_dirs`, `eval_output_dirs`, `join_dirs`). No paths are kept in the repository.
+From a clone of the repository, in the repository root. The command installs a file-open guard (`datapath.fence`) before it reads anything, and stops unless `SPAR_FENCE_CONFIG` names a local JSON file listing the further folders and files to guard (keys: `label_files`, `fenced_dirs`, `fenced_files`, `judgment_dirs`, `archive_dirs`, `transcript_dirs`, `test_output_dirs`, `eval_output_dirs`, `join_dirs`; each a list of paths). No paths are kept in the repository.
 
 ```bash
 export SPAR_FENCE_CONFIG=/path/to/local/fence_config.json
@@ -30,7 +30,7 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies seventeen deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies twenty-five deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests
@@ -49,15 +49,17 @@ python3 tests/mutations.py
 
 ## The file-open guard
 
-`datapath.fence.install(profile, data_root, config)` adds a Python audit hook that raises `PermissionError` when the process opens a guarded path. It sees only file opens made inside a Python process that installs it; it does not see other processes, native code that opens files without Python, or directory listings.
+`datapath.fence.install(profile, data_root, config)` adds a Python audit hook that raises `PermissionError` when the process opens a guarded path or requests a guarded dataset URL through `urllib`. It sees only what happens inside a Python process that installs it. It does not see other processes, native code that opens files without Python, directory listings, opens made relative to a directory file descriptor, or deliberate changes to the guard inside the process.
 
 | Profile | Guards |
 |---|---|
-| `label_free` | the label file, any `annotations.csv.part` and any `judgments` folder under the data root, and the config's fenced folders and files, archive and transcript folders |
-| `dev_only` | the above, plus trajectories and screenshots of tasks outside the development split (by task ID from `data/splits.csv`) and named test outputs |
+| `label_free` | the label file, any `annotations.csv.part` and any `judgments` folder under the data root; the config's label files, fenced folders and files, judgment folders, archive and transcript folders; and dataset URLs under `judgments/`, or for the label file outside the download |
+| `dev_only` | the above, plus trajectories and screenshots of tasks outside the development split (by task ID from `data/splits.csv`), including partial downloads and their dataset URLs, and named test outputs |
 | `pre_join` | the above, plus named evaluation output and join folders |
 
-Only three readers may open the label file: `fetch.fetch_file` (download and hash check, and the only code that may touch `annotations.csv.part`), `labels.load_labels` for the development split with no lock file, and `labels.annotation_structure`.
+Paths are compared without regard to letter case, and the label files are also recognized by file identity, so a hard link or a case variant is guarded too.
+
+Only three readers may open the label file, and only when they are the code that calls `open`: `fetch.fetch_file`, through its hash check and its download (the only code that may touch `annotations.csv.part`); `labels.load_labels`, for the development split alone with no lock file and a split table whose development tasks match the data root's own `splits.csv`; and `labels.annotation_structure`. A substituted helper, a stand-in split table or a callback running inside one of them is refused.
 
 Callers: `scripts/arb_datapath.py run` installs `label_free` before reading anything and `dev_only` once the split file is verified. `--owner-label-free` keeps only `label_free`, for the data owner's own steps on evaluation data. Later scripts install `dev_only` (the evidence packer and the pilot runner) or `pre_join` (the panel draw, the evaluation runner, the ending-category, heuristic, readings and rerun scripts, the lock and the review tooling) when run on development or synthetic data, and `label_free` with the owner flag on evaluation data. `report.json` records the installed profiles and the config file's SHA-256.
 
@@ -111,7 +113,7 @@ Only fields named in the schema are copied, so a new top-level or step field fro
 
 L3 fails on image-goal VisualWebArena tasks, whose goal names the task folder of the input image. The agreed scope excludes those tasks.
 
-The 44 unit tests plant canary strings in the reward field, the agent's prompts and two test-split label rows, one with a `.resized` task ID, and check that none reaches any output file. A spy on the CSV rows checks that `load_labels` accesses no field of a test-split row except its task ID; `annotation_structure` reads every row's keys and annotator name for its label-free counts, never a label field. `tests/mutations.py` holds the seventeen deliberate breaks, each an exact one-line edit: reading one or all fields of a test row before the split check, copying the agent's prompts into the view, removing the allowlist, skipping the hostname rewrite, putting screenshot hashes back in the view, checking LFS or Git blob downloads by size only, re-enabling evaluation label unlocking, publishing into an existing output folder, writing outputs without staging, fetching screenshots before checking whose they are, accepting nested values in text fields, accepting non-finite numbers, checking only the first screenshot, accepting any element property value, and checking hostnames without URL-unquoting.
+The 52 unit tests (eight of them for the guard, each run in a fresh process) plant canary strings in the reward field, the agent's prompts and two test-split label rows, one with a `.resized` task ID, and check that none reaches any output file. A spy on the CSV rows checks that `load_labels` accesses no field of a test-split row except its task ID; `annotation_structure` reads every row's keys and annotator name for its label-free counts, never a label field. `tests/mutations.py` holds the twenty-five deliberate breaks, each an exact one-line edit: reading one or all fields of a test row before the split check, copying the agent's prompts into the view, removing the allowlist, skipping the hostname rewrite, putting screenshot hashes back in the view, checking LFS or Git blob downloads by size only, re-enabling evaluation label unlocking, publishing into an existing output folder, writing outputs without staging, fetching screenshots before checking whose they are, accepting nested values in text fields, accepting non-finite numbers, checking only the first screenshot, accepting any element property value, checking hostnames without URL-unquoting, removing either guard install from the command, letting any caller open the label file, trusting the caller's split table, recognizing the label file by path only, comparing paths case-sensitively, ignoring dataset URL requests, and running without the fence config.
 
 For test runs, the console and the report summary show only whether the checks passed, not lengths or endings.
 

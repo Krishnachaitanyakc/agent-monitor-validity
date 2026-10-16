@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -140,6 +141,8 @@ class FixtureCase(unittest.TestCase):
         self.fx = build_fixture(self.tmp)
         self.raw = self.fx["raw"]
         self.splits = Splits(self.raw / "data/splits.csv")
+        self.fence_config = self.tmp / "fence_config.json"
+        self.fence_config.write_text("{}")
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
@@ -526,7 +529,8 @@ class TestRunnerOffline(FixtureCase):
         specs = [f"webarena/{AGENT}/webarena.1", f"webarena/{AGENT}/webarena.2",
                  f"visualwebarena/{AGENT}/visualwebarena.resized.3"]
         outs = []
-        with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("network")):
+        with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("network")), \
+                mock.patch.dict(os.environ, {"SPAR_FENCE_CONFIG": str(self.fence_config)}):
             for name in ("o1", "o2"):
                 out = self.tmp / name
                 # Owner mode: this run includes an evaluation-split trajectory on purpose.
@@ -568,6 +572,7 @@ class TestRunnerOffline(FixtureCase):
     def _quiet_run(self, runner, out, specs):
         args = SimpleNamespace(data_root=str(self.tmp), out=str(out), trajectory=specs)
         with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("network")), \
+                mock.patch.dict(os.environ, {"SPAR_FENCE_CONFIG": str(self.fence_config)}), \
                 mock.patch("sys.stdout", new=io.StringIO()), mock.patch("sys.stderr", new=io.StringIO()):
             return runner.run(args)
 

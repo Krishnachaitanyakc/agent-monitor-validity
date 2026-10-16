@@ -99,7 +99,8 @@ def run(args) -> int:
     if out.exists():
         raise SystemExit(f"--out {out} already exists; outputs are never overwritten, "
                          "so choose a new folder")
-    fence.install("label_free", data_root, fence.load_config())
+    fence_config = fence.load_config(required=True)
+    fence.install("label_free", data_root, fence_config)
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{out.name}.staging-", dir=out.parent))
     try:
@@ -138,7 +139,7 @@ def _run_into(args, data_root: Path, out: Path) -> bool:
     meta_records = [fetch.fetch_file(p, raw_root, index.get(p))
                     for p in C.META_FILES + (C.LABEL_FILE,)]
     if not getattr(args, "owner_label_free", False):
-        fence.install("dev_only", data_root, fence.load_config())
+        fence.install("dev_only", data_root, fence.load_config(required=True))
     splits = Splits(raw_root / "data/splits.csv")
     dev_store = load_labels(raw_root / C.LABEL_FILE, splits, allowed_splits=("dev",))
 
