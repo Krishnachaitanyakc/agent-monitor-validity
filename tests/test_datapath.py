@@ -529,7 +529,9 @@ class TestRunnerOffline(FixtureCase):
         with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("network")):
             for name in ("o1", "o2"):
                 out = self.tmp / name
-                args = SimpleNamespace(data_root=str(self.tmp), out=str(out), trajectory=specs)
+                # Owner mode: this run includes an evaluation-split trajectory on purpose.
+                args = SimpleNamespace(data_root=str(self.tmp), out=str(out), trajectory=specs,
+                                       owner_label_free=True)
                 with mock.patch("sys.stdout", new=io.StringIO()):
                     self.assertEqual(runner.run(args), 0)
                 outs.append(out)

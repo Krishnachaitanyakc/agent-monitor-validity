@@ -58,6 +58,12 @@ MUTATIONS = [
      "bad += []"),
     ("check hostnames without URL-unquoting", "datapath/leakage.py",
      "for t in (text, unquoted)", "for t in (text,)"),
+    ("remove the label guard from the data-path command", "scripts/arb_datapath.py",
+     '    fence.install("label_free", data_root, fence.load_config())', "    pass"),
+    ("remove the development-only guard from the data-path command", "scripts/arb_datapath.py",
+     '        fence.install("dev_only", data_root, fence.load_config())', "        pass"),
+    ("let any caller open the label file", "datapath/fence.py",
+     'if kind == "label" and _called_by_reviewed_reader(fetch_only=False):', 'if kind == "label":'),
 ]
 
 
