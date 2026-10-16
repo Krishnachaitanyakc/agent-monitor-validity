@@ -18,13 +18,14 @@ The label store itself is checked by unit tests with a canary value.
 import ast
 import importlib.util
 import inspect
+import json
+import math
 import re
 import urllib.parse
 
 from . import constants as C
 from . import normalize as normalize_module
 from .ids import normalize_task_id
-from .normalize import serialize
 
 # Any trace of a hosted-site copy suffix, in any case, also after URL-unquoting. Broader
 # than the rewrite on purpose, so a form the rewrite misses fails the check.
@@ -42,14 +43,20 @@ ALLOWED = {
 
 
 def _is_number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """A finite number: an int of at most 2**53 in size, or a finite float; never a bool."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return abs(v) <= 2 ** 53
+    return isinstance(v, float) and math.isfinite(v)
 
 
 def element_shape_errors(props: dict) -> list:
     """Shape problems in one element's properties.
 
     Supported shapes: ``bbox`` is null or a list of exactly 4 numbers; ``visibility`` is a
-    number; ``clickable`` and ``set_of_marks`` are booleans. Booleans do not count as numbers.
+    number; ``clickable`` and ``set_of_marks`` are booleans. Numbers must be finite, and
+    booleans do not count as numbers.
     """
     errors = []
     if "bbox" in props:
@@ -84,7 +91,13 @@ def _unexpected_keys(rec: dict) -> list:
         shot = obs.get("screenshot") or {}
         bad += [f"/events[{i}]/observation/screenshot/{k}" for k in shot
                 if k not in ALLOWED["screenshot"]]
-        for bid, props in (e.get("elements") or {}).items():
+        elements = e.get("elements")
+        if elements is None:
+            elements = {}
+        if not isinstance(elements, dict):
+            bad.append(f"/events[{i}]/elements")
+            continue
+        for bid, props in elements.items():
             if not isinstance(props, dict):
                 bad.append(f"/events[{i}]/elements/{bid}")
                 continue
@@ -98,7 +111,9 @@ def check_record(rec: dict, identity_strings=()) -> dict:
     # Direct children of an element map are element ids (data, not field names).
     keys = [(p, k) for p, k in _walk_keys(rec) if not p.rsplit("/", 1)[0].endswith("/elements")]
     l1 = [p for p, k in keys if k in C.FORBIDDEN_KEYS]
-    text = serialize(rec)
+    # A tolerant encoding for scanning only: non-finite numbers are caught by the shape check,
+    # and the strict serializer refuses to write them.
+    text = json.dumps(rec, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     l2 = [s for s in C.FORBIDDEN_SUBSTRINGS if s in text]
     l3 = sorted({s for s in identity_strings if s and s in text})
     unquoted = urllib.parse.unquote(urllib.parse.unquote(text))

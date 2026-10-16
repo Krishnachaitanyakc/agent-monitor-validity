@@ -32,6 +32,7 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,7 +42,7 @@ from datapath import NORMALIZER_VERSION, constants as C  # noqa: E402
 from datapath import fetch, leakage, validate  # noqa: E402
 from datapath.ids import Splits, trace_id, trace_key  # noqa: E402
 from datapath.labels import annotation_structure, load_labels  # noqa: E402
-from datapath.normalize import SCHEMA_VERSION, normalize, serialize  # noqa: E402
+from datapath.normalize import SCHEMA_VERSION, check_screenshot_paths, normalize, serialize  # noqa: E402
 
 
 def _parse_spec(spec: str):
@@ -94,12 +95,17 @@ def run(args) -> int:
     if out.exists():
         raise SystemExit(f"--out {out} already exists; outputs are never overwritten, "
                          "so choose a new folder")
-    staging = out.parent / f".{out.name}.staging-{os.getpid()}"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{out.name}.staging-", dir=out.parent))
     try:
         all_ok = _run_into(args, data_root, staging)
     except BaseException:
-        print(f"run failed; nothing was published to {out}; partial files are in {staging}",
-              file=sys.stderr)
+        if not any(staging.iterdir()):
+            staging.rmdir()
+            print(f"run failed; nothing was published to {out}", file=sys.stderr)
+        else:
+            print(f"run failed; nothing was published to {out}; partial files are in {staging}",
+                  file=sys.stderr)
         raise
     if not all_ok:
         print(f"CHECKS FAILED; nothing was published to {out}; the report is {staging / 'report.json'}")
@@ -146,6 +152,7 @@ def _run_into(args, data_root: Path, out: Path) -> bool:
         source = json.loads((raw_root / path).read_text(encoding="utf-8"))
         if source.get("benchmark") != bench or source.get("agent") != agent:
             raise ValueError(f"{path}: header names {source.get('benchmark')}/{source.get('agent')}")
+        check_screenshot_paths(source, task_id)     # before any screenshot is fetched or opened
         referenced, verified = set(), set()
         for step in source.get("steps", []):
             if step.get("screenshot_path"):

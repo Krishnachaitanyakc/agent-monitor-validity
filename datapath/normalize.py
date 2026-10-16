@@ -54,6 +54,8 @@ class _Deid:
     def __call__(self, v):
         if v is None:
             return None
+        if isinstance(v, (dict, list, tuple)):
+            raise ValueError(f"nested {type(v).__name__} in a text field")
         v = v if isinstance(v, str) else str(v)
         v, n = HOST_COPY.subn(r"\1\2", v)
         self.count += n
@@ -99,7 +101,7 @@ def normalize(source: dict, data_root: Path, task_id: str, split: str, split_gro
             "action": deid(step.get("action")),
             "reasoning": deid(step.get("reasoning")),
             "url": deid(step.get("url")),
-            "open_pages_urls": [deid(u) for u in step.get("open_pages_urls") or []],
+            "open_pages_urls": [deid(u) for u in _url_list(step.get("open_pages_urls"))],
             "focused_element": deid(step.get("focused_element")),
             "last_action_error": deid(step.get("last_action_error")),
             "observation": {
@@ -169,7 +171,16 @@ def ending_type(events: list) -> str:
 
 _SHOT_PATH = re.compile(
     r"(?:^|/)screenshots/(?P<benchmark>[^/]+)/(?P<agent>[^/]+)/(?P<task>[^/]+)"
-    r"/screenshot_step_(?P<step>\d+)\.png$")
+    r"/screenshot_step_(?P<step>[0-9]+)\.png\Z")
+
+
+def _url_list(v) -> list:
+    """``open_pages_urls`` must be absent, null or a list."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ValueError(f"open_pages_urls is a {type(v).__name__}, not a list")
+    return v
 
 
 def check_screenshot_paths(source: dict, task_id: str) -> None:
@@ -183,8 +194,8 @@ def check_screenshot_paths(source: dict, task_id: str) -> None:
         sp = step.get("screenshot_path")
         if not sp:
             continue
-        m = _SHOT_PATH.search(sp)
-        if m is None:
+        m = _SHOT_PATH.search(sp) if isinstance(sp, str) else None
+        if m is None or any(seg in (".", "..") for seg in sp.split("/")):
             raise ValueError(f"step {step.get('num')}: unexpected screenshot path {sp!r}")
         expected = {"benchmark": source.get("benchmark"), "agent": source.get("agent"),
                     "task": task_id, "step": str(step.get("num"))}
@@ -195,5 +206,9 @@ def check_screenshot_paths(source: dict, task_id: str) -> None:
 
 
 def serialize(record: dict) -> str:
-    """Canonical one-line JSON (sorted keys) so identical inputs give identical bytes."""
-    return json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    """Canonical one-line JSON (sorted keys) so identical inputs give identical bytes.
+
+    Non-finite numbers (NaN, infinity) are not valid JSON and raise ValueError.
+    """
+    return json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False)

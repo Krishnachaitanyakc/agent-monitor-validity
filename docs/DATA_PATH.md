@@ -7,7 +7,7 @@ One command turns pinned AgentRewardBench (ARB) files into three JSONL files: wh
 From a clone of the repository, on branch `datapath-arb-v1`, in the repository root:
 
 ```bash
-python3 scripts/arb_datapath.py run --data-root ~/spar169-arb-data --out ~/spar169-arb-data/out/dev5 \
+python3 scripts/arb_datapath.py run --data-root ~/spar169-arb-data --out ~/spar169-arb-data/out/dev5-$(date +%Y%m%d-%H%M%S) \
   --trajectory webarena/GenericAgent-gpt-4o-2024-11-20/webarena.370 \
   --trajectory webarena/GenericAgent-anthropic_claude-3.7-sonnet/webarena.427 \
   --trajectory webarena/GenericAgent-gpt-4o-2024-11-20/webarena.344 \
@@ -15,7 +15,7 @@ python3 scripts/arb_datapath.py run --data-root ~/spar169-arb-data --out ~/spar1
   --trajectory workarena/GenericAgent-anthropic_claude-3.7-sonnet/workarena.servicenow.navigate-and-order-apple-mac-book-pro15-l2
 ```
 
-The first run downloads about 29 MB, 17 MB of data and 12 MB of file listings, and takes about 35 seconds on a home connection. It prints one line per trajectory and ends with `ALL CHECKS PASS`; the exit code is 0 only then. `--out` must be a new folder: the run writes everything to a staging folder beside it and publishes it to `--out` in one rename only after every check passes, so a failed or repeated run never overwrites or truncates an earlier output set. On Oct 8, 2026 these five gave the hashes below, and the same command gave them again on Oct 15 with the current code; `report.json` also records the code commit the run used.
+The first run downloads about 29 MB, 17 MB of data and 12 MB of file listings, and takes about 35 seconds on a home connection. It prints one line per trajectory and ends with `ALL CHECKS PASS`; the exit code is 0 only then. `--out` must be a new folder: the run writes everything to a staging folder beside it and publishes it to `--out` in one rename only after every check passes, so a failed or repeated run never overwrites or truncates an earlier output set. On Oct 8, 2026 these five gave the hashes below; on Oct 15 the same five trajectories, run with the current code into a new `--out`, gave the same hashes. `report.json` also records the code commit the run used.
 
 | Output | SHA-256 |
 |---|---|
@@ -29,7 +29,7 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies fourteen deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies seventeen deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests
@@ -52,7 +52,7 @@ python3 tests/mutations.py
 
 - `trace_key`: a plain hash of the trace ID. The readable ID names the agent, so it stays in provenance. The key is opaque to a reader but not secret: hashing the public trace IDs inverts it.
 - `task.goal`, plus any image URLs found in the goal. These benchmarks state a task's constraints inside the goal, which is kept verbatim apart from the hostname rewrite below.
-- `events`, in step order. Each holds the agent's `action` and `reasoning`, `url`, `open_pages_urls`, `focused_element`, `last_action_error`, an `observation` with the screenshot's dimensions and PNG status, the full and pruned accessibility trees, and the element properties. The last event is the final observation and normally has no action. Every screenshot path must name this trajectory's benchmark, agent, task and step number; any other path stops the run before output. Element properties must have their supported shapes: `bbox` null or exactly four numbers, `visibility` a number, `clickable` and `set_of_marks` booleans.
+- `events`, in step order. Each holds the agent's `action` and `reasoning`, `url`, `open_pages_urls`, `focused_element`, `last_action_error`, an `observation` with the screenshot's dimensions and PNG status, the full and pruned accessibility trees, and the element properties. The last event is the final observation and normally has no action. Every screenshot path must name this trajectory's benchmark, agent, task and step number, with no `.` or `..` segment; any other path stops the run before any screenshot is fetched and before anything is published. Text fields must be text: a nested mapping or list in the goal, an action, the reasoning, a URL, the focused element, the last action error or a tree stops the run, and `open_pages_urls` must be a list. Element properties must have their supported shapes: `bbox` null or exactly four finite numbers, `visibility` a finite number, `clickable` and `set_of_marks` booleans. Non-finite numbers are never written: the serializer refuses them.
 - ARB hosts each WebArena and VisualWebArena site twice, and the agents split across the two copies: in the 11 development runs checked, GPT-4o and Claude used `-xl-1` and Qwen and Llama used `-xl-2`. The copy suffix is rewritten to the site name in every text field, for example `wa-forum-xl-2.mcgill-nlp.org` becomes `wa-forum.mcgill-nlp.org`. Each rewrite is counted in provenance, and the source file's hash still pins the original bytes. Screenshot pixels are not altered, so the suffix can stay visible where a page prints a URL in the image, as in one development run.
 
 Screenshots are held by reference: the view records each one's dimensions and PNG status, and the evidence packer, in a later PR, attaches each hash-checked PNG by trace key and step, so judges see every screenshot. The monitor view is the fenced pool every detector draws from; the protocol's judge view is a narrower, deterministic selection from it, made and tested by the packer.
@@ -96,7 +96,7 @@ Only fields named in the schema are copied, so a new top-level or step field fro
 
 L3 fails on image-goal VisualWebArena tasks, whose goal names the task folder of the input image. The agreed scope excludes those tasks.
 
-The 39 unit tests plant canary strings in the reward field, the agent's prompts and two test-split label rows, one with a `.resized` task ID, and check that none reaches any output file. A spy on the CSV rows checks that `load_labels` accesses no field of a test-split row except its task ID; `annotation_structure` reads every row's keys and annotator name for its label-free counts, never a label field. `tests/mutations.py` holds the fourteen deliberate breaks, each an exact one-line edit: reading one or all fields of a test row before the split check, copying the agent's prompts into the view, removing the allowlist, skipping the hostname rewrite, putting screenshot hashes back in the view, checking LFS or Git blob downloads by size only, re-enabling evaluation label unlocking, publishing into an existing output folder, writing outputs without staging, checking only the first screenshot, accepting any element property value, and checking hostnames without URL-unquoting.
+The 44 unit tests plant canary strings in the reward field, the agent's prompts and two test-split label rows, one with a `.resized` task ID, and check that none reaches any output file. A spy on the CSV rows checks that `load_labels` accesses no field of a test-split row except its task ID; `annotation_structure` reads every row's keys and annotator name for its label-free counts, never a label field. `tests/mutations.py` holds the seventeen deliberate breaks, each an exact one-line edit: reading one or all fields of a test row before the split check, copying the agent's prompts into the view, removing the allowlist, skipping the hostname rewrite, putting screenshot hashes back in the view, checking LFS or Git blob downloads by size only, re-enabling evaluation label unlocking, publishing into an existing output folder, writing outputs without staging, fetching screenshots before checking whose they are, accepting nested values in text fields, accepting non-finite numbers, checking only the first screenshot, accepting any element property value, and checking hostnames without URL-unquoting.
 
 For test runs, the console and the report summary show only whether the checks passed, not lengths or endings.
 

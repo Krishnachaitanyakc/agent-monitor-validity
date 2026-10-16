@@ -29,7 +29,9 @@ def load_labels(annotations_csv: Path, splits: Splits, allowed_splits=("dev",),
     """Return {trace_key: label record} for development-split trajectories.
 
     ``allowed_splits`` must be exactly ("dev",) and ``lock_file`` must be None; anything
-    else raises ``LockedSplitError`` before the label file is opened.
+    else raises ``LockedSplitError`` before the label file is opened. ``splits`` must be
+    built from the hash-checked ``data/splits.csv``, since it decides which rows are
+    development rows.
     """
     if tuple(allowed_splits) != ("dev",) or lock_file is not None:
         raise LockedSplitError("evaluation label unlocking is disabled; only the development "

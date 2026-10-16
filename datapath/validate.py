@@ -8,7 +8,7 @@ Checks (each reported as pass/fail with details):
 - V4 screenshots: every event points to a screenshot that exists and is a valid PNG.
 - V5 missingness: counts of empty values per event field (reported, not failed).
 - V6 labels: values are in ARB's vocabulary, and every development-split monitor-view
-  record joins exactly one label (test-split records have no label until the lock).
+  record joins exactly one label (test-split records never get a label in this data path).
 """
 
 from . import constants as C

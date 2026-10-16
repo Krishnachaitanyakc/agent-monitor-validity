@@ -204,6 +204,41 @@ class TestNormalize(FixtureCase):
         self.assertEqual(prov["screenshots_present"], 0)
         self.assertEqual(view["events"][0]["observation"]["screenshot"], {"missing": True})
 
+    def test_nested_values_in_text_fields_are_rejected(self):
+        bench, rel, t = self.fx["trajs"]["webarena.1"]
+        nested = {"checker_score": 1}
+        cases = [("goal", None)] + [(f, 1) for f in ("action", "reasoning", "url", "focused_element",
+                                                     "last_action_error", "axtree", "axtree_pruned")]
+        for field, step in cases:
+            tampered = json.loads(json.dumps(t))
+            if step is None:
+                tampered[field] = nested
+            else:
+                tampered["steps"][step][field] = nested
+            with self.assertRaises(ValueError, msg=field):
+                normalize(tampered, self.raw, "webarena.1", "dev", "webarena")
+        for value in (nested, [nested], "https://h/"):
+            tampered = json.loads(json.dumps(t))
+            tampered["steps"][1]["open_pages_urls"] = value
+            with self.assertRaises(ValueError, msg=str(value)):
+                normalize(tampered, self.raw, "webarena.1", "dev", "webarena")
+
+    def test_screenshot_paths_with_dot_segments_or_newlines_are_rejected(self):
+        bench, rel, t = self.fx["trajs"]["webarena.1"]
+        good = f"trajectories/screenshots/webarena/{AGENT}/webarena.1/screenshot_step_1.png"
+        for path in (good + "\n", f"trajectories/screenshots/webarena/{AGENT}/../{AGENT}/webarena.1/screenshot_step_1.png",
+                     f"trajectories/screenshots/webarena/./{AGENT}/webarena.1/screenshot_step_1.png"):
+            tampered = json.loads(json.dumps(t))
+            tampered["steps"][1]["screenshot_path"] = path
+            with self.assertRaises(ValueError, msg=repr(path)):
+                normalize(tampered, self.raw, "webarena.1", "dev", "webarena")
+
+    def test_non_finite_numbers_cannot_be_serialized(self):
+        with self.assertRaises(ValueError):
+            serialize({"x": float("nan")})
+        with self.assertRaises(ValueError):
+            serialize({"x": [float("inf")]})
+
     def test_task_id_must_match_screenshot_directory(self):
         bench, rel, t = self.fx["trajs"]["webarena.1"]
         with self.assertRaises(ValueError):
@@ -275,7 +310,9 @@ class TestLeakage(FixtureCase):
                  ({"bbox": [0, 0, 10, True]}, False), ({"visibility": "1"}, False),
                  ({"visibility": True}, False), ({"visibility": 0.5}, True),
                  ({"clickable": 1}, False), ({"set_of_marks": None}, False),
-                 ({"clickable": True, "set_of_marks": False}, True)]
+                 ({"clickable": True, "set_of_marks": False}, True),
+                 ({"bbox": [float("nan"), 0, 10, 10]}, False), ({"visibility": float("inf")}, False),
+                 ({"bbox": [0, 0, 10, 2 ** 60]}, False)]
         for props, ok in cases:
             v = json.loads(serialize(view))
             v["events"][0]["elements"]["12"] = props
@@ -283,6 +320,15 @@ class TestLeakage(FixtureCase):
             self.assertEqual(result["ok"], ok, props)
             if not ok:
                 self.assertTrue(result["L0_unexpected_keys"], props)
+
+    def test_element_map_that_is_not_a_mapping_fails_cleanly(self):
+        view, _ = self.norm()
+        for value in ([1, 2], "x"):
+            v = json.loads(serialize(view))
+            v["events"][0]["elements"] = value
+            result = leakage.check_record(v)
+            self.assertFalse(result["ok"])
+            self.assertIn("/events[0]/elements", result["L0_unexpected_keys"])
 
     def test_element_ids_are_data_not_field_names(self):
         view, _ = self.norm()
@@ -354,8 +400,13 @@ class TestLabels(FixtureCase):
 
     def test_refusal_comes_before_the_label_file_is_opened(self):
         missing = self.tmp / "no_such_annotations.csv"
-        with self.assertRaises(labels_mod.LockedSplitError):
-            labels_mod.load_labels(missing, self.splits, allowed_splits=("test",))
+        lock = self.make_lock()
+        for kwargs in ({"allowed_splits": ("test",)},
+                       {"allowed_splits": ("test",), "lock_file": lock},
+                       {"allowed_splits": ("dev", "test")},
+                       {"allowed_splits": ("dev",), "lock_file": lock}):
+            with self.assertRaises(labels_mod.LockedSplitError, msg=str(kwargs)):
+                labels_mod.load_labels(missing, self.splits, **kwargs)
 
     def test_primary_row_is_first_in_file_order(self):
         store = labels_mod.load_labels(self.raw / C.LABEL_FILE, self.splits)
@@ -548,15 +599,32 @@ class TestRunnerOffline(FixtureCase):
         runner = self._load_runner()
         bench, rel, t = self.fx["trajs"]["webarena.1"]
         tampered = json.loads(json.dumps(t))
-        tampered["steps"][1]["screenshot_path"] = (     # another development task's screenshot
-            f"trajectories/screenshots/visualwebarena/{AGENT}/visualwebarena.resized.3/screenshot_step_1.png")
+        foreign = f"screenshots/webarena/{AGENT}/webarena.2/screenshot_step_1.png"   # an evaluation task's
+        (self.raw / foreign).unlink()                  # not on disk, so any fetch would hit the network
+        tampered["steps"][1]["screenshot_path"] = "trajectories/" + foreign
         (self.raw / rel).write_text(json.dumps(tampered))
         listing = self.tmp / "listing" / C.REVISION / "cleaned.json"
         entries = [listing_entry(self.raw, e["path"]) if e["path"] == rel else e
                    for e in json.loads(listing.read_text())]
         listing.write_text(json.dumps(entries))
         out = self.tmp / "foreign"
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError):           # raised before any fetch; the network is blocked
+            self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"])
+        self.assertFalse(out.exists())
+        self.assertFalse((self.raw / foreign).exists())
+
+    def test_non_finite_element_value_publishes_nothing(self):
+        runner = self._load_runner()
+        bench, rel, t = self.fx["trajs"]["webarena.1"]
+        tampered = json.loads(json.dumps(t))
+        tampered["steps"][1]["extra_element_properties"]["12"]["bbox"] = [float("nan"), 0, 10, 10]
+        (self.raw / rel).write_text(json.dumps(tampered))
+        listing = self.tmp / "listing" / C.REVISION / "cleaned.json"
+        entries = [listing_entry(self.raw, e["path"]) if e["path"] == rel else e
+                   for e in json.loads(listing.read_text())]
+        listing.write_text(json.dumps(entries))
+        out = self.tmp / "nan"
+        with self.assertRaises(ValueError):            # the strict serializer refuses NaN
             self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"])
         self.assertFalse(out.exists())
 
@@ -565,8 +633,8 @@ class TestRunnerOffline(FixtureCase):
         out = self.tmp / "commit"
         self.assertEqual(self._quiet_run(runner, out, [f"webarena/{AGENT}/webarena.1"]), 0)
         code = json.loads((out / "report.json").read_text())["settings"]["code"]
-        self.assertIn("commit", code)
-        self.assertIn("uncommitted_changes", code)
+        self.assertRegex(code["commit"], r"\A(?:[0-9a-f]{40}|unknown)\Z")
+        self.assertIn(code["uncommitted_changes"], (True, False, None))
 
     def test_refuses_paths_inside_repo(self):
         runner = self._load_runner()
