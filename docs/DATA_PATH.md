@@ -49,6 +49,8 @@ python3 tests/mutations.py
 
 ## The file-open guard
 
+The guard's purpose is narrow: to stop accidental opens of guarded files and dataset URLs in the workflow this document describes. It is not a record of earlier access, and it cannot show that the evaluation data was never read.
+
 `datapath.fence.install(profile, data_root, config)` adds a Python audit hook that raises `PermissionError` when the process opens a guarded path or requests a guarded dataset URL through `urllib`. It sees only what happens inside a Python process that installs it. It does not see other processes, native code that opens files without Python, directory listings, opens made relative to a directory file descriptor, or deliberate changes to the guard inside the process.
 
 | Profile | Guards |
