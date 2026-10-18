@@ -8,3 +8,8 @@ venv/
 dist/
 build/
 .ipynb_checkpoints/
+
+# AgentRewardBench data and anything derived from it: its terms forbid re-hosting.
+# scripts/arb_datapath.py also refuses data or output folders inside the repository.
+data/
+out/
