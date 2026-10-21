@@ -7,7 +7,11 @@
 
 Steps: file listings -> metadata and label file -> each trajectory and its screenshots
 -> normalize -> development-split labels -> validate -> leakage checks -> determinism
-check -> outputs. Every file is checked against the pinned listing's hash; files
+check -> outputs. A file-open guard (datapath.fence) is installed first: the label
+profile before anything is read, and the development-only profile once the split file
+is verified, so evaluation trajectories and screenshots cannot be opened. The
+--owner-label-free flag keeps only the label profile; it is for the data owner's own
+steps on evaluation data. Every file is checked against the pinned listing's hash; files
 already on disk are re-checked, not downloaded again. Trajectories are processed one at
 a time in trace-key order, so memory stays at one trajectory.
 
@@ -39,7 +43,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from datapath import NORMALIZER_VERSION, constants as C  # noqa: E402
-from datapath import fetch, leakage, validate  # noqa: E402
+from datapath import fence, fetch, leakage, validate  # noqa: E402
 from datapath.ids import Splits, trace_id, trace_key  # noqa: E402
 from datapath.labels import annotation_structure, load_labels  # noqa: E402
 from datapath.normalize import SCHEMA_VERSION, check_screenshot_paths, normalize, serialize  # noqa: E402
@@ -95,6 +99,8 @@ def run(args) -> int:
     if out.exists():
         raise SystemExit(f"--out {out} already exists; outputs are never overwritten, "
                          "so choose a new folder")
+    fence_config = fence.load_config(required=True)
+    fence.install("label_free", data_root, fence_config)
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{out.name}.staging-", dir=out.parent))
     try:
@@ -132,6 +138,8 @@ def _run_into(args, data_root: Path, out: Path) -> bool:
         index.update(fetch.listing_index(fetch.fetch_listing(top, listing_dir)))
     meta_records = [fetch.fetch_file(p, raw_root, index.get(p))
                     for p in C.META_FILES + (C.LABEL_FILE,)]
+    if not getattr(args, "owner_label_free", False):
+        fence.install("dev_only", data_root, fence.load_config(required=True))
     splits = Splits(raw_root / "data/splits.csv")
     dev_store = load_labels(raw_root / C.LABEL_FILE, splits, allowed_splits=("dev",))
 
@@ -218,6 +226,9 @@ def _run_into(args, data_root: Path, out: Path) -> bool:
             "schema_version": SCHEMA_VERSION, "normalizer_version": NORMALIZER_VERSION,
             "python": platform.python_version(), "trajectories": args.trajectory,
             "code": _code_version(),
+            "fence": {"profiles": fence.installed_profiles(),
+                      "config_sha256": (fetch.sha256_file(Path(os.environ[fence.CONFIG_ENV]).expanduser())
+                                        if os.environ.get(fence.CONFIG_ENV) else None)},
         },
         "outputs_sha256": hashes,
         "inputs": {"listing_files_sha256": {
@@ -272,6 +283,8 @@ def main() -> int:
                    help="new output directory outside the repository; must not exist yet")
     r.add_argument("--trajectory", action="append", default=[],
                    help="benchmark/agent/task_id, repeatable")
+    r.add_argument("--owner-label-free", action="store_true",
+                   help="data owner only: guard the label files but allow evaluation trajectories")
     args = parser.parse_args()
     return run(args)
 
