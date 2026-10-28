@@ -84,12 +84,23 @@ class TestActed(unittest.TestCase):
         self.assertEqual(d["tree_lines"][0]["attributes"], "value='red mug', clickable, visible, focused")
         self.assertIsNone(d["properties"])
 
-    def test_nonvisible_keeps_the_properties_exactly(self):
+    def test_nonvisible_needs_visibility_zero_and_keeps_the_properties_exactly(self):
         d = self.one("click('42')", elements={"12": dict(VISIBLE), "42": dict(OFFSCREEN)})
         self.assertEqual(d["status"], "nonvisible")
         self.assertEqual(d["tree_lines"], [])
         self.assertEqual(d["properties"], OFFSCREEN)
         self.assertEqual(json.dumps(d["properties"], sort_keys=True), json.dumps(OFFSCREEN, sort_keys=True))
+        no_box = {"visibility": 0, "bbox": None, "clickable": False, "set_of_marks": False}
+        d = self.one("upload_file('536', 'a.jpg')", elements={"536": dict(no_box)})
+        self.assertEqual((d["status"], d["properties"]), ("nonvisible", no_box))
+
+    def test_not_in_tree_when_the_properties_record_another_visibility(self):
+        for props in (dict(VISIBLE), dict(OFFSCREEN, visibility=0.5), {"bbox": None, "clickable": True},
+                      dict(OFFSCREEN, visibility=None), dict(OFFSCREEN, visibility=False)):
+            d = self.one("click('42')", elements={"42": props})
+            self.assertEqual(d["status"], "not_in_tree", props)
+            self.assertEqual(d["tree_lines"], [])
+            self.assertEqual(d["properties"], props)
 
     def test_absent(self):
         d = self.one("click('780')")
@@ -97,8 +108,10 @@ class TestActed(unittest.TestCase):
 
     def test_missing_from_the_tree_and_present_but_nonvisible_stay_distinct(self):
         missing = self.one("click('42')", elements={})
-        listed = self.one("click('42')", elements={"42": dict(OFFSCREEN)})
-        self.assertEqual((missing["status"], listed["status"]), ("absent", "nonvisible"))
+        hidden = self.one("click('42')", elements={"42": dict(OFFSCREEN)})
+        shown = self.one("click('42')", elements={"42": dict(VISIBLE)})
+        self.assertEqual((missing["status"], hidden["status"], shown["status"]),
+                         ("absent", "nonvisible", "not_in_tree"))
 
     def test_ambiguous_keeps_every_line_and_chooses_none(self):
         tree = TREE + "\n\t[12] link 'Buy again', clickable"
@@ -137,9 +150,21 @@ class TestActed(unittest.TestCase):
                              ("scroll(0, 300)", "scroll"), ("send_msg_to_user('3')", "send_msg_to_user"),
                              ("noop(wait_ms=2000)", "noop"), ("tab_focus(0)", "tab_focus"),
                              ("go_back()", "go_back"), ("report_infeasible('no')", "report_infeasible"),
+                             ("mouse_click(10, 20)", "mouse_click"),
+                             ("keyboard_press('Enter')", "keyboard_press"),
                              ("click()", "click")):
             self.assertEqual(acted.describe_action(action, TREE, {}),
                              [{"status": "no_target", "functions": [name]}], action)
+        for name in sorted(acted.NO_TARGET_ACTIONS):
+            self.assertEqual(acted.describe_action(f"{name}()", TREE, {}),
+                             [{"status": "no_target", "functions": [name]}], name)
+        self.assertFalse(acted.NO_TARGET_ACTIONS & set(acted.ELEMENT_PARAMS))
+
+    def test_unknown_functions_are_unparsed(self):
+        for action in ("clik('12')", "submit()", "print('12')", "click('12')\nsubmit()",
+                       "scroll(0, 200)\nwait(1)", "exit(3)"):
+            self.assertEqual(acted.describe_action(action, TREE, {"12": dict(VISIBLE)}),
+                             [{"status": "unparsed"}], action)
 
     def test_unparseable_actions(self):
         for action in ("click('12'", "click(12)", "click(x)", "x = click('12')", "click('12') + 1",
@@ -148,10 +173,8 @@ class TestActed(unittest.TestCase):
             self.assertEqual(acted.describe_action(action, TREE, {}), [{"status": "unparsed"}], action)
 
     def test_actions_are_never_evaluated(self):
-        action = "click(__import__('sys').exit(3))"
-        self.assertEqual(acted.describe_action(action, TREE, {}), [{"status": "unparsed"}])
-        self.assertEqual(acted.describe_action("exit(3)", TREE, {}),
-                         [{"status": "no_target", "functions": ["exit"]}])
+        for action in ("click(__import__('sys').exit(3))", "exit(3)", "__import__('sys').exit(3)"):
+            self.assertEqual(acted.describe_action(action, TREE, {}), [{"status": "unparsed"}], action)
 
     def test_tree_line_shapes(self):
         cases = {
@@ -200,6 +223,7 @@ class TestPack(unittest.TestCase):
             # (step 0 elements, step 1 tree, step 1 elements, expected status at step 0)
             ({}, later, {"77": dict(VISIBLE)}, "absent"),
             ({"77": dict(OFFSCREEN)}, later, {"77": dict(VISIBLE)}, "nonvisible"),
+            ({"77": dict(VISIBLE)}, later, {"77": dict(VISIBLE)}, "not_in_tree"),
             ({}, TREE, {"77": dict(VISIBLE)}, "absent"),
         ]
         for e0, t1, e1, status in cases:
@@ -214,7 +238,8 @@ class TestPack(unittest.TestCase):
         self.assertEqual(P.build_pack(view)["steps"][1]["acted_elements"][0]["status"], "absent")
 
     def test_deterministic_canonical_bytes(self):
-        view = _two_steps("drag_and_drop('12', '42')", step0_elements={"42": dict(OFFSCREEN), "12": dict(VISIBLE)})
+        view = _two_steps("drag_and_drop('12', '42')",
+                          step0_elements={"42": dict(OFFSCREEN), "12": dict(VISIBLE)})
         a = P.serialize(P.build_pack(view))
         b = P.serialize(P.build_pack(json.loads(json.dumps(view))))
         self.assertEqual(a, b)
@@ -402,11 +427,11 @@ class TestPackCommand(FixtureCase):
         self.assertEqual(set(report["hashes"]), {"pinned_source", "normalized", "packs"})
         self.assertEqual(report["hashes"]["normalized"]["monitor_view.jsonl"],
                          hashlib.sha256((self.inputs / "monitor_view.jsonl").read_bytes()).hexdigest())
-        # The fixture's full trees carry no element lines, and its element properties list '12'
-        # only: click('0') is absent, and each click('12') is nonvisible.
+        # The fixture's full trees carry no element lines, and its element properties list only
+        # '12', at visibility 1: click('0') is absent, and each click('12') is not_in_tree.
         self.assertEqual(report["acted_element_status_counts"],
-                         {"resolved": 0, "ambiguous": 0, "nonvisible": 2, "absent": 1, "no_target": 0,
-                          "unparsed": 0})
+                         {"resolved": 0, "ambiguous": 0, "nonvisible": 0, "not_in_tree": 2, "absent": 1,
+                          "no_target": 0, "unparsed": 0})
         self.assertEqual(report["final_tree_truncation_counts"], {"cut_by_packer": 0, "kept_whole": 2})
         lines = [json.loads(x) for x in (self.tmp / "p1" / "packs.jsonl").read_text().splitlines()]
         self.assertEqual([x["trace_key"] for x in lines], list(report["hashes"]["packs"]["pack_sha256"]))

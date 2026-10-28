@@ -30,7 +30,7 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies thirty-six deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies thirty-eight deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests
@@ -132,7 +132,9 @@ Cues a judge can see in the evidence itself:
 
 The first part of the evidence packer is in `judge/`: [judge/acted.py](../judge/acted.py) reads what each action acted on from the observation of the step that chose it, and [judge/pack.py](../judge/pack.py) builds one pack per monitor-view record, the bytes every judge reads, with its hash and a private image manifest built from provenance. `scripts/build_packs.py` runs it over a data-path output with the `dev_only` guard installed. Packs are versioned separately (`pack-0.1`); the pack layer does not change the normalized records or their hashes. [PACK_WALKTHROUGH.md](PACK_WALKTHROUGH.md) follows two development steps through it.
 
-`tests/test_pack.py` adds 32 tests, and `tests/mutations.py` eleven breaks: looking up acted elements in the next step's tree or element properties, reporting a nonvisible target as absent, resolving an ambiguous ID to one line, dropping the key sort from the pack bytes, putting screenshot paths and hashes into the pack, cutting the final tree without a marker, removing the guard install from the pack command, packing evaluation-split records, publishing into an existing folder, and writing without staging.
+Each element an action names gets one status: `resolved` or `ambiguous` when one or several tree lines carry its ID, `nonvisible` when no tree line does and the element properties record visibility 0, `not_in_tree` when no tree line does and the properties list another visibility, and `absent` when the step has no record of it. An action that names no element is `no_target`; one that does not parse, or calls a function that is not a known BrowserGym action, is `unparsed`.
+
+`tests/test_pack.py` adds 34 tests, and `tests/mutations.py` thirteen breaks: looking up acted elements in the next step's tree or element properties, reporting a nonvisible target as absent, reporting a target listed at another visibility as nonvisible, accepting calls to unknown functions, resolving an ambiguous ID to one line, dropping the key sort from the pack bytes, putting screenshot paths and hashes into the pack, cutting the final tree without a marker, removing the guard install from the pack command, packing evaluation-split records, publishing into an existing folder, and writing without staging.
 
 ## Not done yet
 

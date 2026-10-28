@@ -40,9 +40,11 @@ FIELD_NOTES = {
         "The elements this step's action names, looked up in this step's own accessibility "
         "tree and element properties, which describe the page the agent saw when it chose the "
         "action. resolved: one tree line has the ID. ambiguous: several do, and all are listed. "
-        "nonvisible: no tree line has the ID, but the element properties list it. absent: this "
-        "step has no record of the ID. no_target: the action names no element. unparsed: the "
-        "action could not be read. Null when the step has no action."),
+        "nonvisible: no tree line has the ID, and the element properties record visibility 0 "
+        "for it. not_in_tree: no tree line has the ID, and the element properties list it with "
+        "another visibility. absent: this step has no record of the ID. no_target: the action "
+        "names no element. unparsed: the action could not be read, or calls a function that is "
+        "not a known browser action. Null when the step has no action."),
     "error_reported_for_previous_action": (
         "The error recorded in this step's observation, exactly as recorded. It reports the "
         "outcome of the previous step's action, not of this step's action."),

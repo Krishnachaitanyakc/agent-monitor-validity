@@ -10,12 +10,13 @@ Each element ID gets one status:
 
 - `resolved`: exactly one tree line carries the ID.
 - `ambiguous`: several lines do. All are kept and none is chosen.
-- `nonvisible`: no tree line does, but the element properties list the ID. The properties are kept exactly.
+- `nonvisible`: no tree line does, and the element properties record visibility 0 for the ID.
+- `not_in_tree`: no tree line does, and the element properties list the ID with another visibility.
 - `absent`: the step has no record of the ID.
 
-An action that names no element is `no_target`, and one that does not parse is `unparsed`. Actions are parsed with `ast`, never evaluated.
+For `nonvisible` and `not_in_tree`, the properties are kept exactly. An action that names no element is `no_target`. One that does not parse, or calls a function that is not a known BrowserGym action, is `unparsed`. Actions are parsed with `ast`, never evaluated.
 
-On the 19 development runs, the 378 actions that name an element give 355 `resolved`, 16 `nonvisible` and 7 `absent`, and 36 actions name no element. None is ambiguous or unparsed. In all 23 unresolved cases, the next step's error shows the action failed.
+On the 19 development runs, the 378 actions that name an element give 355 `resolved`, 16 `nonvisible` and 7 `absent`, and 36 actions name no element. None is `not_in_tree`, ambiguous or unparsed. In all 23 unresolved cases, the next step's error shows the action failed.
 
 ## Example 1: `t48af8c4`, step 16, target absent
 
@@ -45,44 +46,41 @@ Its `extra_element_properties` hold 438 entries, none for 780. No step of this r
 
 **Next step.** Step 17 records `ValueError: Could not find element with bid "780"`.
 
-## Example 2: `tc6972c6`, step 11, target nonvisible
+## Example 2: `teb636bf`, step 9, target nonvisible
 
-Provenance maps trace key `tc6972c60b3fe054c` to development task `assistantbench.improved.validation.11`, normalized `assistantbench.validation.11`. The goal is "Which Vanguard ETF had the highest pct increase between 2013 and 2023: VGT, MGK, or VONG?"
+Provenance maps trace key `teb636bfda261ff79` to development task `visualwebarena.419`, a text-goal task. The goal asks for a forum post carrying a full-sized image from the shopping site.
 
-**Source step.** Step 11 is Google's unusual-traffic page, and the action is `click('42')`. The whole tree has five element lines:
-
-```
-	[8] separator '', visible, orientation='horizontal'
-	[10] Section '', visible
-		[a] IframePresentational 'reCAPTCHA', visible
-	[21] separator '', visible, orientation='horizontal'
-	[26] link 'Why did this happen?', clickable, visible
-```
-
-The element properties do list 42: `{"visibility": 0.0, "bbox": [1, -10009, 20, 20], "clickable": false, "set_of_marks": false}`. One step earlier, on the Google home page, step 10's tree had `[42] image '', visible`. The lookup does not use it.
-
-**Monitor view.** Step 11 has the same action, tree, `elements` and URL.
-
-**Pack.** An excerpt of step 11:
+**Source step.** Step 9 shows a product image full screen on the shopping site, and the action is `upload_file('536', 'ps4_slim_skins_deadpool.jpg')`. Its tree has 119 element lines and none is 536. Near its end:
 
 ```
-{"step": 11, "action": "click('42')",
- "acted_elements": [{"call": 0, "function": "click", "parameter": "bid", "element_id": "42",
+	[1587] button 'Exit fullscreen', visible, focused
+	[1815] image 'Image', clickable, visible
+```
+
+The 1,817 element properties do list 536: `{"visibility": 0.0, "bbox": null, "clickable": false, "set_of_marks": false}`. Three steps earlier, on the forum's submission page in another tab, step 6's tree had `[536] option 'gaming', selected=False`. The lookup does not use it.
+
+**Monitor view.** Step 9 has the same action, tree and `elements`. Only the URL's hostname copy suffix is rewritten.
+
+**Pack.** An excerpt of step 9:
+
+```
+{"step": 9, "action": "upload_file('536', 'ps4_slim_skins_deadpool.jpg')",
+ "acted_elements": [{"call": 0, "function": "upload_file", "parameter": "bid", "element_id": "536",
                      "status": "nonvisible", "tree_lines": [],
-                     "properties": {"bbox": [1, -10009, 20, 20], "clickable": false,
+                     "properties": {"bbox": null, "clickable": false,
                                     "set_of_marks": false, "visibility": 0.0}}],
- "error_reported_for_previous_action": "", "screenshot": "image-11", ...}
+ "error_reported_for_previous_action": "", "screenshot": "image-9", ...}
 ```
 
-**Next step.** Step 12 records `Error: Locator.click: Element is outside of the viewport`, with a call log showing the locator resolved to `<div bid="42" ...>`. The agent clicked 42 eleven times in this run, each `nonvisible`, and 44 six times, each `absent`.
+**Next step.** Step 10 records `TimeoutError: Locator.click: Timeout 500ms exceeded.`, with a call log showing the locator resolved to a `<span bid="536" ...>` and "element is not visible". The agent repeated the upload at steps 10 to 13, each `nonvisible`.
 
 ## What the judges receive
 
-Every judge receives the same pack bytes, canonical JSON with sorted keys. The pack hashes are `c58533881ab9c2119ce65c5047a017782b40c8f762e549ae1308fffc4d0a56bd` for `t48af8c4` and `d639fb62001de8da04590422620fd9024dfd3b79f0c284651ce75c0629e8998f` for `tc6972c6`. Runs on Python 3.13 and 3.11 gave byte-identical `packs.jsonl` and `image_manifest.jsonl`. The provider-specific request wrapping comes in the next part, with its own request hashes.
+Every judge receives the same pack bytes, canonical JSON with sorted keys. Pack hashes are `457bd48a6734f659d493365053119b13d6e8338fb00901e10ce0416e4d745e5d` for `t48af8c4` and `8f2d7406daeb730e9472c404ab7a887a0344b2037b37e1dca98f29c71bc74c1b` for `teb636bf`. Runs on Python 3.13 and 3.11 gave byte-identical `packs.jsonl` and `image_manifest.jsonl`. Provider-specific request wrapping, with its own request hashes, comes in the next part.
 
 The reasoning appears as `reasoning_claimed_by_agent`, and the pack's `field_notes` call it the agent's own claim. A pack carries no trace key, path, task ID, agent or model name, screenshot hash or byte count. A screenshot is an opaque reference such as `image-16`, which the private `image_manifest.jsonl` maps to the dataset path and SHA-256 from provenance. `report.json` keeps three hash layers apart: pinned source hashes from the data path, normalized output hashes and pack hashes.
 
-The final tree is capped at 32,000 characters: the first 19,200 and the last 12,800, joined by a marker. `packer_truncation` records the original length and the kept head and tail. It describes the packer's cut, not how the run ended, which the pack does not carry. No final tree in these 19 runs exceeds the cap.
+The final tree is capped at 32,000 characters: the first 19,200 and the last 12,800, joined by a marker. `packer_truncation` records the original length and the kept head and tail. It records the packer's cut, not how the run ended. No final tree in these 19 runs exceeds the cap.
 
 ## How reference labels stay separate
 

@@ -7,19 +7,24 @@ them up there and nowhere else. The error recorded at step t + 1 reports how act
 went; it is not used here.
 
 An action is parsed with ``ast`` and never evaluated. It counts as parsed only when every
-statement is one plain call, no call is nested inside another, and every element ID
-argument is a string literal. Each element ID argument gives one descriptor:
+statement is one plain call to a known BrowserGym action (``ELEMENT_PARAMS`` or
+``NO_TARGET_ACTIONS``), no call is nested inside another, and every element ID argument
+is a string literal. Each element ID argument gives one descriptor:
 
 - ``resolved``: exactly one tree line carries the ID. The line is kept as recorded, with
   its role, name and remaining attributes, and the element properties if listed.
 - ``ambiguous``: more than one tree line carries the ID. Every line is kept; none is chosen.
-- ``nonvisible``: no tree line carries the ID, but the element properties list it. The
-  properties (bbox, visibility, clickable, set_of_marks) are kept exactly.
+- ``nonvisible``: no tree line carries the ID, and the element properties record
+  visibility 0 for it.
+- ``not_in_tree``: no tree line carries the ID, and the element properties list it with
+  any other visibility value, or none.
 - ``absent``: the step has no record of the ID at all.
 
-An action that names no element gives one ``no_target`` descriptor listing its calls, and
-an action that does not parse gives one ``unparsed`` descriptor. The caller keeps the
-action text as recorded in both cases.
+For ``nonvisible`` and ``not_in_tree`` the properties (bbox, visibility, clickable,
+set_of_marks) are kept exactly. An action that names no element gives one ``no_target``
+descriptor listing its calls, and an action that does not parse, including one that calls
+an unknown function, gives one ``unparsed`` descriptor. The caller keeps the action text as
+recorded in both cases.
 """
 
 import ast
@@ -27,9 +32,10 @@ import copy
 import re
 import warnings
 
-RESOLVED, AMBIGUOUS, NONVISIBLE, ABSENT = "resolved", "ambiguous", "nonvisible", "absent"
+RESOLVED, AMBIGUOUS, ABSENT = "resolved", "ambiguous", "absent"
+NONVISIBLE, NOT_IN_TREE = "nonvisible", "not_in_tree"
 NO_TARGET, UNPARSED = "no_target", "unparsed"
-STATUSES = (RESOLVED, AMBIGUOUS, NONVISIBLE, ABSENT, NO_TARGET, UNPARSED)
+STATUSES = (RESOLVED, AMBIGUOUS, NONVISIBLE, NOT_IN_TREE, ABSENT, NO_TARGET, UNPARSED)
 
 # BrowserGym action functions that take element IDs, and the parameters that hold them,
 # in positional order.
@@ -38,6 +44,15 @@ ELEMENT_PARAMS = {
     "select_option": ("bid",), "clear": ("bid",), "focus": ("bid",), "press": ("bid",),
     "upload_file": ("bid",), "drag_and_drop": ("from_bid", "to_bid"),
 }
+# BrowserGym actions that name no element: navigation, tabs, messages, waiting, scrolling,
+# and the coordinate mouse and keyboard actions.
+NO_TARGET_ACTIONS = frozenset({
+    "goto", "go_back", "go_forward", "new_tab", "tab_close", "tab_focus", "noop", "scroll",
+    "send_msg_to_user", "report_infeasible",
+    "mouse_move", "mouse_up", "mouse_down", "mouse_click", "mouse_dblclick",
+    "mouse_drag_and_drop", "mouse_upload_file",
+    "keyboard_down", "keyboard_up", "keyboard_press", "keyboard_type", "keyboard_insert_text",
+})
 
 # A BrowserGym tree line: indentation, [id], role, an optional quoted name, then nothing,
 # a value= or the comma-separated attributes.
@@ -72,6 +87,8 @@ def parse_calls(action: str):
         if any(k.arg is None for k in call.keywords):
             return None
         name = call.func.id
+        if name not in ELEMENT_PARAMS and name not in NO_TARGET_ACTIONS:
+            return None
         targets = []
         for i, param in enumerate(ELEMENT_PARAMS.get(name, ())):
             if i < len(call.args):
@@ -121,6 +138,12 @@ def parse_line(line: str) -> dict:
     return out
 
 
+def _zero_visibility(props) -> bool:
+    """Whether element properties record visibility 0 (a number, never a boolean)."""
+    v = props.get("visibility") if isinstance(props, dict) else None
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == 0
+
+
 def describe_target(call_index: int, function: str, parameter: str, element_id: str,
                     axtree, elements) -> dict:
     """One descriptor for one element ID, from this step's tree and element properties only."""
@@ -131,10 +154,12 @@ def describe_target(call_index: int, function: str, parameter: str, element_id: 
         status = RESOLVED
     elif lines:
         status = AMBIGUOUS
-    elif listed:
+    elif not listed:
+        status = ABSENT
+    elif _zero_visibility(elements[element_id]):
         status = NONVISIBLE
     else:
-        status = ABSENT
+        status = NOT_IN_TREE
     return {"call": call_index, "function": function, "parameter": parameter,
             "element_id": element_id, "status": status, "tree_lines": lines,
             "properties": copy.deepcopy(elements[element_id]) if listed else None}
