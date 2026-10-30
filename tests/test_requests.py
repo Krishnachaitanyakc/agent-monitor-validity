@@ -496,7 +496,8 @@ class TestRequestLeakage(FixtureCase):
     def test_request_modules_never_import_the_label_store(self):
         import ast
         for rel in ("judge/rubric.py", "judge/schema.py", "judge/images.py", "judge/requests.py",
-                    "judge/streams.py", "judge/outcomes.py", "judge/storage.py", "judge/dispatch.py"):
+                    "judge/streams.py", "judge/outcomes.py", "judge/storage.py", "judge/dispatch.py",
+                    "scripts/dry_run.py"):
             names = set()
             for node in ast.walk(ast.parse((REPO / rel).read_text(encoding="utf-8"))):
                 if isinstance(node, ast.ImportFrom):

@@ -152,6 +152,8 @@ MUTATIONS = [
      '    verdict = obj["verdict"].casefold()', '    verdict = obj["verdict"]'),
     ("let an out-of-range p_failure void the verdict", "judge/schema.py",
      '        voided["p_failure"] = "not a finite number in [0, 1]"', "        return out"),
+    ("remove the guard install from the dry run", "scripts/dry_run.py",
+     '    fence.install("dev_only", data_root, fence_config)', "    pass"),
 ]
 
 
