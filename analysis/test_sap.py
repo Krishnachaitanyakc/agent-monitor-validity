@@ -660,6 +660,10 @@ class TestReporting(unittest.TestCase):
         self.assertNotIn("L = ", txt)
         self.assertIn("exchangeable within D = 0", txt)
         self.assertIn("What it covers, approximately", txt)
+        # The partial regime states the independence assumption too.
+        self.assertIn("  " + sap.PARTIAL_ASSUMPTION_TEXT, txt)
+        self.assertIn("assume independent tasks", sap.PARTIAL_ASSUMPTION_TEXT)
+        self.assertIn("are still to come and are required before the freeze", sap.PARTIAL_ASSUMPTION_TEXT)
 
     def test_fragility(self):
         d = sap.Design(0, 30, 3, 7, 160)

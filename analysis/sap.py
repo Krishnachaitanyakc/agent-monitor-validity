@@ -172,6 +172,16 @@ COVERS_NOTES_TEXT = (
     "template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
+# The plan prints the statements above in its coverage-regime section. The partial regime
+# has no interval for delta or G; it states its own assumption, in the plan's words.
+PARTIAL_ASSUMPTION_TEXT = (
+    "Assumptions: the exact permutation p-value and the approximate bootstrap interval "
+    "assume independent tasks. On a panel with more than one task per template they hold "
+    "only once the synthetic validation under retained template dependence has passed. "
+    "The test and the interval used here are those of plan v3.1. The inference that handles "
+    "the template dependence retained on a one-trajectory-per-task panel, and its synthetic "
+    "validation, are still to come and are required before the freeze."
+)
 REFERENCE_NOT_SUPPLIED_TEXT = ("Reference statuses not supplied: every label treated as usable "
                                "(plan v3.1 mode); Unsure and missing coverage not assessed")
 G_DEFINITION_TEXT = (
@@ -1773,9 +1783,11 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
     unequal usable shares between U and S.
     (b) is not reported when n1Y = 0 or n0Y = 0, or when the implied comparator would
     review a negative number of stable usable tasks: in coverage when
-    n1Y > s n_D0Y / n_D0, in the partial regime when B_Y > 0. Implementation choice:
-    it is also not reported when that number exceeds n0Y, which only the partial
-    regime allows.
+    n1Y > s n_D0Y / n_D0, in the partial regime when B_Y > 0. Implementation choice,
+    an addition to the plan's open point on the secondary result that awaits the same
+    confirmation: it is also not reported when that number exceeds n0Y, since the
+    comparator would then need more stable usable tasks than exist. Only the partial
+    regime allows this.
 
     No threshold claim is made for (a) or (b): the threshold of 2 per 100 refers to
     the primary result only. In the degenerate regimes Delta = 0 identically and
@@ -2117,6 +2129,7 @@ def _primary_lines(res: dict) -> List[str]:
                    "for this design. Its coverage is not guaranteed; the synthetic checks give "
                    "informational Monte Carlo coverage.")
         out.append("  No threshold claim is made in either direction in this regime.")
+        out.append("  " + PARTIAL_ASSUMPTION_TEXT)
     out.append("")
     out.append("The two questions are answered separately and are not merged into one verdict.")
     return out
@@ -2164,15 +2177,23 @@ def _secondary_lines(res: dict) -> List[str]:
                    f"[{_f(b['lower'])}, {_f(b['upper'])}] (B = {b['B']}, seed {b['seed']})")
     out.append("")
     out.append("  (b) Usable-only comparison: a proposed analysis, pending confirmation")
+    if sec["n1_Y"] > 0 and sec["n0_Y"] > 0:
+        dis_usable = Fraction(lf["s"] * sec["n_D0_Y"], lf["n_D0"])
+        out.append("  It compares disagreement-first review with an implied comparator, which reviews "
+                   "unstable agreeing tasks with a usable label as instability-first review does, then "
+                   "stable ones until it has reviewed as many agreeing tasks with a usable label as "
+                   f"disagreement-first review, s n_D0Y / n_D0 = {_f(dis_usable)}. B_Y = {_f(sec['B_Y'])} "
+                   "is how many more agreeing tasks with a usable label instability-first review reviews "
+                   "than disagreement-first review (exact, tie-averaged; negative means fewer).")
     if sec["usable_only_omitted"] is not None:
         out.append(f"  Not reported: {sec['usable_only_omitted']}.")
     else:
         uo = sec["usable_only"]
         ux, uz = uo["existence"], uo["size"]
         verdict = "REJECT H0" if ux["reject"] else "do not reject H0"
-        out.append("  Tasks without a usable reference label are left out of the rates. B_Y = "
-                   f"{_f(sec['B_Y'])}; the implied comparator reviews "
-                   f"{_f(sec['implied_stable_reviews'])} of the n0Y = {sec['n0_Y']} stable usable tasks.")
+        out.append("  Tasks without a usable reference label are left out of the rates. The implied "
+                   f"comparator reviews {_f(sec['implied_stable_reviews'])} of the n0Y = {sec['n0_Y']} "
+                   "stable agreeing tasks with a usable label.")
         if sec["regime"] == "COVERAGE":
             out.append(f"  Existence: one-sided Fisher exact test of p1Y = p0Y against p1Y > p0Y on "
                        f"tasks with a usable label: m1 = {sec['m1']} of n1Y = {sec['n1_Y']}, "
@@ -2189,9 +2210,10 @@ def _secondary_lines(res: dict) -> List[str]:
                        f"label; APPROXIMATE bootstrap interval [{_f(b['lower'])}, {_f(b['upper'])}] "
                        f"(B = {b['B']}, seed {b['seed']})")
         term = uo["usable_share_term"]
+        name = "G_hat_Y" if sec["regime"] == "COVERAGE" else "G_partial_hat_Y"
         out.append(f"  (a) = (b) {'-' if term < 0 else '+'} {_f(abs(term))}: 100 Delta / N_Y also "
                    f"carries the difference in usable shares between unstable and stable agreeing "
-                   f"tasks, which G_hat_Y removes")
+                   f"tasks, which {name} removes")
     out.append("")
     out.append(f"  The threshold of {lf['m']} per 100 refers to the primary result only: no threshold "
                f"claim is made for either secondary analysis.")

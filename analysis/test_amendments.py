@@ -778,6 +778,43 @@ class TestSecondaryResult(unittest.TestCase):
         sec = self.check_layout(r)
         self.assertIn("G_partial_hat_Y =", sec)
 
+    def test_report_defines_the_comparator_and_names_each_regime_gain(self):
+        definition = ("It compares disagreement-first review with an implied comparator, which reviews "
+                      "unstable agreeing tasks with a usable label as instability-first review does, then "
+                      "stable ones until it has reviewed as many agreeing tasks with a usable label as "
+                      "disagreement-first review, s n_D0Y / n_D0 = {}. B_Y = {} is how many more agreeing "
+                      "tasks with a usable label instability-first review reviews than disagreement-first "
+                      "review (exact, tie-averaged; negative means fewer).")
+        # Coverage, reported: s = 29, n_D0 = 170, n_D0Y = 170 - 5 Unsure.
+        labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 5, 5)), block("S", rows(16, 160)))
+        r = sap.analyze(labels, E, reference=ref)
+        sec, s2 = r["secondary"], self.section(sap.report(r))
+        self.assertIsNotNone(sec["usable_only"])
+        self.assertIn(definition.format(sap._f(Fraction(29 * 165, 170)), sap._f(sec["B_Y"])), s2)
+        self.assertLess(s2.index("It compares disagreement-first review"), s2.index("The implied comparator reviews"))
+        self.assertIn("which G_hat_Y removes", s2)
+        self.assertNotIn("G_partial_hat_Y", s2)
+        # Partial regime, reported: the decomposition names the partial-regime gain.
+        labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(1, 1, 2)), block("U1", rows(1, 6)),
+                               block("S", rows(2, 12)))
+        r = sap.analyze(labels, E, reference=ref, boot_B=500)
+        s2 = self.section(sap.report(r))
+        self.assertIsNotNone(r["secondary"]["usable_only"])
+        self.assertIn("which G_partial_hat_Y removes", s2)
+        self.assertNotIn("which G_hat_Y removes", s2)
+        # Partial regime, omitted because B_Y > 0: B_Y is defined before the reason uses it.
+        labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(1, 2, 1)), block("U1", rows(1, 4, 2)),
+                               block("S", rows(1, 2, 10)))
+        r = sap.analyze(labels, E, reference=ref, boot_B=500)
+        s2 = self.section(sap.report(r))
+        self.assertIsNone(r["secondary"]["usable_only"])
+        self.assertLess(s2.index("B_Y = 1.1429 is how many more"), s2.index("Not reported: "))
+        # No usable unstable label: nothing to define.
+        labels, E, ref = panel(block("G1", rows(0, 10)), block("U1", rows(0, 0, 8)), block("S", rows(5, 80)))
+        s2 = self.section(sap.report(sap.analyze(labels, E, reference=ref)))
+        self.assertIn("Not reported: no unstable agreeing task has a usable label.", s2)
+        self.assertNotIn("implied comparator", s2)
+
     def test_usable_only_omitted_when_its_comparator_is_negative_in_coverage(self):
         # N = 200, n_D0 = 150, s = 30, n1Y = 10: the implied comparator reviews
         # s n_D0Y / n_D0 - n1Y = n_D0Y / 5 - 10 stable usable tasks.
