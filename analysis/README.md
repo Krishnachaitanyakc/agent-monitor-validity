@@ -36,7 +36,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_sap.py` holds the tests of the core method and `test_amendments.py` those of the v3.2 amendments. `mutations.py` makes eighteen deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID or printing a threshold class for the secondary result, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_sap.py` holds the tests of the core method and `test_amendments.py` those of the v3.2 amendments. `mutations.py` makes twenty-six deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, printing a threshold class for the secondary result or searching the fragility count in one direction only, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 
