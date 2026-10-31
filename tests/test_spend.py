@@ -182,7 +182,7 @@ class TestCharge(unittest.TestCase):
         self.assertEqual(S.charge("openai", B, 200, no_usage)[0], S.HOLD)
         no_split = sse(anthropic_events(answer(), usage={"cache_creation_input_tokens": 500, "cache_creation": {}}))
         self.assertEqual(S.charge("anthropic", A, 200, no_split)[0], S.HOLD)
-        self.assertIn("Anthropic does not bill failed requests; OpenAI's behaviour is unverified",
+        self.assertIn("Anthropic does not bill failed requests; OpenAI's behavior is unverified",
                       S.charge("openai", B, 400, b"")[3])
 
     def test_an_anthropic_stream_without_final_usage_holds(self):

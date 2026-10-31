@@ -8,7 +8,7 @@ recorded, since a repeat reads the prompt cache only within its five-minute life
 every response's cache read and write token counts are logged.
 
 **Retries.** Only TRANSPORT is retried: the same bytes, the same slot, at most three
-retries with exponential backoff (a server's ``retry-after`` is honoured when longer, up
+retries with exponential backoff (a server's ``retry-after`` is honored when longer, up
 to two minutes). A slot still without a complete response after three retries is
 INVALID. Any terminal outcome ends the slot, and a slot that ended is never sent again.
 

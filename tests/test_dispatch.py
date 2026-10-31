@@ -375,7 +375,7 @@ class TestDispatch(LogCase):
         self.assertEqual(len(t.sent), 7)
         self.assertFalse(t.script)
 
-    def test_retry_after_is_honoured_up_to_a_cap(self):
+    def test_retry_after_is_honored_up_to_a_cap(self):
         self.run_slots(a_err(429, "rate_limit_error", headers={"retry-after": "30"}),
                        a_err(429, "rate_limit_error", headers={"retry-after": "9999"}), self.f.a(), self.f.a(),
                        self.f.a(), self.f.b())

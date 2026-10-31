@@ -46,7 +46,7 @@ record in the attempt log, which keeps the raw response:
 - a complete response settles at the cost of the usage it reports (input, cache write,
   cache read and output tokens), or as the price modifiers above say;
 - a non-2xx error response settles at zero: Anthropic does not bill failed requests;
-  OpenAI's behaviour is unverified and covered by reconciliation;
+  OpenAI's behavior is unverified and covered by reconciliation;
 - no response, a stream that did not complete, an Anthropic stream whose
   ``message_delta`` did not report final usage, or usage not reported in full holds the
   whole reservation, which then counts as spent for good;
@@ -289,7 +289,7 @@ def charge(provider: str, model: str, status, raw: bytes, reserved=Decimal(0)):
     if not 200 <= status < 300:
         return SETTLE, Decimal(0), dict.fromkeys(TOKEN_KINDS, 0), (
             f"HTTP {status} error response, settled at zero: Anthropic does not bill failed requests; "
-            "OpenAI's behaviour is unverified and covered by reconciliation")
+            "OpenAI's behavior is unverified and covered by reconciliation")
     s = anthropic_summary(raw) if provider == "anthropic" else openai_summary(raw)
     if not s["complete"]:
         return HOLD, None, None, "the stream did not complete, so its usage is unknown"
