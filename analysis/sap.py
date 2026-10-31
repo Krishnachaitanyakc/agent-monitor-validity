@@ -18,11 +18,21 @@ quantity as needing labels. Nothing here reads or writes files.
 
 Corrections to the earlier code
 -------------------------------
-Plan v3.1 already required both of these; the earlier code lacked them.
+Plan v3.1 already required each of these; the earlier code lacked them or got
+them wrong.
 - FILTERED is a terminal INVALID outcome. The earlier code did not list it and
   raised on it.
 - Verdicts match case-insensitively, as the plan's parser does. The earlier code
   matched their letter case exactly.
+- The fragility count is the fewest label flips that reverse the existence
+  decision. In the partial regime the earlier search moved each count only in the
+  direction it takes in the coverage regime, so it missed reversals that need
+  another direction, for example fewer discordant U1 tasks when the weight of U1
+  is negative, and could report more than 15 flips where fewer suffice. Every
+  direction is now searched. In the coverage regime the count is unchanged.
+- When no set of label flips can reverse the decision, the fragility count is
+  reported as not defined. The earlier report said that more than 15 flips would
+  reverse it.
 
 Changes from plan v3.1
 ----------------------
@@ -96,6 +106,7 @@ saw-toothed p-value.
 """
 from __future__ import annotations
 
+import bisect
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -1312,20 +1323,57 @@ def _usable_sizes(design: Design, usable: Optional[Mapping[str, int]]) -> Dict[s
     return out
 
 
-def fragility_flippable(design: Design, counts: Mapping[str, int], reject: bool,
-                        usable: Optional[Mapping[str, int]] = None) -> int:
-    """How many usable reference labels among agreeing tasks a reversing flip could change.
+class _PermutationTails:
+    """Exact rejection check of the partial-regime permutation test at any discordance counts.
 
-    When the test rejects, a reversing flip makes a discordant unstable task
-    concordant or a concordant stable task with a usable label discordant;
-    otherwise a concordant unstable task with a usable label discordant or a
-    discordant stable task concordant. Zero means the fragility count is not
-    defined: no usable label can be flipped toward reversing the decision.
+    For a total t of discordant agreeing tasks, the within-D shuffle makes
+    (M_U2, M_U1, M_S) multivariate hypergeometric given the full-panel stratum
+    sizes, so the null distribution of Delta = sum_j w_j M_j depends on t only. It
+    is tabulated once per t, with the weights scaled to integers, and the p-value
+    of counts x is the tail at sum_j w_j x_j: exactly permutation_p(design, x).
     """
-    n = _usable_sizes(design, usable)
-    if reject:
-        return counts["U2"] + counts["U1"] + (n["S"] - counts["S"])
-    return (n["U2"] - counts["U2"]) + (n["U1"] - counts["U1"]) + counts["S"]
+
+    def __init__(self, design: Design):
+        w = delta_weights(design)
+        den = math.lcm(*(w[j].denominator for j in ("U2", "U1", "S")))
+        self.weights = tuple(int(w[j] * den) for j in ("U2", "U1", "S"))
+        self.sizes = (design.n_U2, design.n_U1, design.n_S)
+        self._tables: Dict[int, Tuple[List[int], List[int], int]] = {}
+
+    def _table(self, t: int) -> Tuple[List[int], List[int], int]:
+        if t not in self._tables:
+            (nU2, nU1, nS), (wU2, wU1, wS) = self.sizes, self.weights
+            mass: Dict[int, int] = defaultdict(int)
+            for a in range(max(0, t - nU1 - nS), min(nU2, t) + 1):
+                for b in range(max(0, t - a - nS), min(nU1, t - a) + 1):
+                    c = t - a - b
+                    ways = math.comb(nU2, a) * math.comb(nU1, b) * math.comb(nS, c)
+                    mass[wU2 * a + wU1 * b + wS * c] += ways
+            values = sorted(mass)
+            tails = [0] * len(values)
+            acc = 0
+            for i in range(len(values) - 1, -1, -1):
+                acc += mass[values[i]]
+                tails[i] = acc
+            self._tables[t] = (values, tails, math.comb(nU2 + nU1 + nS, t))
+        return self._tables[t]
+
+    def rejects(self, x: Sequence[int]) -> bool:
+        """Whether the permutation p-value at counts x = (x_U2, x_U1, x_S) is at most 1/40."""
+        values, tails, total = self._table(sum(x))
+        v = sum(wj * xj for wj, xj in zip(self.weights, x))
+        i = bisect.bisect_left(values, v)
+        return Fraction(tails[i] if i < len(values) else 0, total) <= Fraction(1, 40)
+
+
+def _l1_moves(k: int):
+    """Every change (d_U2, d_U1, d_S) of the three discordance counts with |d|_1 = k."""
+    for d2 in range(-k, k + 1):
+        for d1 in range(abs(d2) - k, k - abs(d2) + 1):
+            r = k - abs(d2) - abs(d1)
+            yield d2, d1, r
+            if r:
+                yield d2, d1, -r
 
 
 def existence_fragility(design: Design, counts: Mapping[str, int], reject: bool,
@@ -1335,15 +1383,19 @@ def existence_fragility(design: Design, counts: Mapping[str, int], reject: bool,
     reverses the existence decision.
 
     A flip changes the discordance of one agreeing task that has a usable reference
-    label. When the test rejects, flips move toward no gain (a discordant U task
-    becomes concordant, or a concordant usable S task discordant); otherwise the
-    other way. A task without a usable label has no reference, so it is never
-    flipped and never counted as a flip. usable gives the number of tasks with a
-    usable label in U2, U1 and S (None: every task has one); the flipped counts stay
-    within them, while the test keeps its full-panel margins. Coverage uses Fisher's
-    p on (m1, m0); the partial regime uses the permutation p on (m_U2, m_U1, m_S).
-    Returns None when more than k_max flips are needed or when no reversing flip
-    exists; fragility_flippable() tells when the count is not defined.
+    label. A task without a usable label has no reference, so it is never flipped
+    and never counted as a flip. usable gives the number of tasks with a usable label
+    in U2, U1 and S (None: every task has one); the flipped counts stay within them,
+    while the test keeps its full-panel margins. Returns None when no set of at most
+    k_max flips reverses the decision; fragility_reversible() tells whether any set
+    of flips does.
+
+    Coverage: Fisher's p on (m1, m0). It falls as m1 rises with m0 fixed, and as m0
+    falls with m1 fixed, so the fewest reversing flips move m1 down and m0 up when
+    the test rejects, and the other way otherwise; only those moves are searched.
+    Partial regime: the permutation p on (m_U2, m_U1, m_S). The weight of U1 can
+    have either sign, and the p-value is not monotone in each count, so every
+    change of the three counts of L1 length k is tried, k = 1, 2, ...
     """
     thr = Fraction(1, 40)
     sgn = -1 if reject else 1
@@ -1359,14 +1411,48 @@ def existence_fragility(design: Design, counts: Mapping[str, int], reject: bool,
                     if (fisher_one_sided(a, n1, c, n0, exact=True) <= thr) != reject:
                         return k
         return None
+    tails = _PermutationTails(design)
+    hi = (nY["U2"], nY["U1"], nY["S"])
     for k in range(1, k_max + 1):
-        for f2 in range(k + 1):
-            for f1 in range(k - f2 + 1):
-                a2, a1, c = mU2 + sgn * f2, mU1 + sgn * f1, mS - sgn * (k - f2 - f1)
-                if 0 <= a2 <= nY["U2"] and 0 <= a1 <= nY["U1"] and 0 <= c <= nY["S"]:
-                    if (permutation_p(design, {"U2": a2, "U1": a1, "S": c}) <= thr) != reject:
-                        return k
+        for d2, d1, dS in _l1_moves(k):
+            x = (mU2 + d2, mU1 + d1, mS + dS)
+            if all(0 <= x[j] <= hi[j] for j in range(3)):
+                if tails.rejects(x) != reject:
+                    return k
     return None
+
+
+def fragility_reversible(design: Design, counts: Mapping[str, int], reject: bool,
+                         usable: Optional[Mapping[str, int]] = None) -> bool:
+    """Whether any set of usable reference-label flips among agreeing tasks reverses
+    the existence decision. When none does, the fragility count is not defined.
+
+    Only tasks with a usable label can be discordant, so a rejection is always
+    reversible: making every discordant agreeing task concordant gives p = 1.
+    Otherwise the most favorable reachable counts decide. Coverage: m1 = n1Y and
+    m0 = 0, by the monotonicity of Fisher's p (see existence_fragility). Partial
+    regime: for each total t of discordant agreeing tasks the null distribution is
+    fixed and the p-value falls as Delta rises, so the counts that maximize Delta at
+    that total (filling the strata with usable labels in decreasing order of weight)
+    decide.
+    """
+    if reject:
+        return True
+    nY = _usable_sizes(design, usable)
+    if design.regime == "COVERAGE":
+        n1Y = nY["U2"] + nY["U1"]
+        return fisher_one_sided(n1Y, design.n1, 0, design.n0, exact=True) <= Fraction(1, 40)
+    tails = _PermutationTails(design)
+    order = sorted(range(3), key=lambda j: -tails.weights[j])
+    hi = (nY["U2"], nY["U1"], nY["S"])
+    for t in range(sum(hi) + 1):
+        x, left = [0, 0, 0], t
+        for j in order:
+            x[j] = min(hi[j], left)
+            left -= x[j]
+        if tails.rejects(x):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1539,7 +1625,8 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
       existence: one-sided Fisher exact p = P(M1 >= m1 | n1, n0, m1 + m0);
       interval for delta from (m1 of n1, m0 of n0); delta_m = m N / (100 L);
       fragility: the fewest flips of usable reference labels among agreeing tasks
-      that reverse the existence decision (not defined when none can be flipped).
+      that reverse the existence decision (not defined when no set of such flips
+      reverses it, for example when no agreeing task has a usable label).
     The secondary result, per 100 tasks with a usable label, is in res['secondary']
     (secondary_analysis), and the label coverage in res['coverage']
     (reference_coverage). N_Y_ref holds the secondary per-100 denominator, as N_ref
@@ -1610,7 +1697,10 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
     if fragility and res["existence"] is not None:
         ex = res["existence"]
         ex["fragility"] = existence_fragility(design, counts, ex["reject"], usable=usable)
-        ex["fragility_defined"] = fragility_flippable(design, counts, ex["reject"], usable) > 0
+        # Not defined when no set of usable flips reverses the decision, so that the report
+        # never says "more than FRAGILITY_MAX" of a reversal that cannot happen.
+        ex["fragility_defined"] = (ex["fragility"] is not None
+                                   or fragility_reversible(design, counts, ex["reject"], usable))
     # Without reference statuses, Unsure and missing labels are not assessed at all:
     # no secondary result and no coverage table, rather than counts of zero.
     supplied = reference is not None
@@ -1959,8 +2049,8 @@ def _primary_lines(res: dict) -> List[str]:
     fr = ex.get("fragility")
     if "fragility" in ex:
         if not ex.get("fragility_defined", True):
-            out.append("  Fragility: not defined; no usable reference label among agreeing tasks "
-                       "can be flipped toward reversing this decision.")
+            out.append("  Fragility: not defined; no set of usable reference-label flips among "
+                       "agreeing tasks reverses this decision.")
         else:
             out.append(f"  Fragility: {fr if fr is not None else 'more than ' + str(FRAGILITY_MAX)} "
                        f"usable reference-label flip{'s' if fr != 1 else ''} among agreeing tasks "

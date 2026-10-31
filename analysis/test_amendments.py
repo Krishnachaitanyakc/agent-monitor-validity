@@ -893,6 +893,25 @@ class TestSecondaryResult(unittest.TestCase):
         self.assertLess(reported, 150)
 
 
+NOT_DEFINED = ("Fragility: not defined; no set of usable reference-label flips among agreeing tasks "
+               "reverses this decision.")
+
+
+def full_search(d, m, nY):
+    """Fewest flips (None above FRAGILITY_MAX) and whether any reverses, over every usable count."""
+    def p(x2, x1, xS):
+        if d.regime == "COVERAGE":
+            return sap.fisher_one_sided(x2 + x1, d.n1, xS, d.n0, exact=True)
+        return sap.permutation_p(d, {"U2": x2, "U1": x1, "S": xS})
+    reject = p(m["U2"], m["U1"], m["S"]) <= Fraction(1, 40)
+    best = None
+    for x in itertools.product(range(nY["U2"] + 1), range(nY["U1"] + 1), range(nY["S"] + 1)):
+        if (p(*x) <= Fraction(1, 40)) != reject:
+            k = abs(x[0] - m["U2"]) + abs(x[1] - m["U1"]) + abs(x[2] - m["S"])
+            best = k if best is None else min(best, k)
+    return reject, (best if best is not None and best <= sap.FRAGILITY_MAX else None), best is not None
+
+
 class TestFragilityUsableLabels(unittest.TestCase):
     def test_no_usable_label_to_flip(self):
         labels = labels_for(0, 20, 0, 10, 160)
@@ -902,9 +921,8 @@ class TestFragilityUsableLabels(unittest.TestCase):
         self.assertIsNone(ex["fragility"])
         self.assertFalse(ex["fragility_defined"])
         txt = sap.report(r)
-        self.assertIn("Fragility: not defined; no usable reference label among agreeing tasks can be "
-                      "flipped toward reversing this decision.", txt)
-        self.assertNotIn("reference-label flip", txt)
+        self.assertIn(NOT_DEFINED, txt)
+        self.assertNotIn("would reverse this decision", txt)
         # The same discordance with every label usable: two flips in U reverse the decision.
         bare = sap.analyze(labels, [0] * 190)
         self.assertEqual((bare["existence"]["fragility"], bare["existence"]["fragility_defined"]), (2, True))
@@ -937,21 +955,108 @@ class TestFragilityUsableLabels(unittest.TestCase):
         r = sap.analyze(labels, E, reference=ref, boot_B=200)
         self.assertEqual(r["label_free"]["regime"], "PARTIAL")
         ex, d = r["existence"], sap.Design.from_labels(labels)
-        nY = {"U2": 1, "U1": 2, "S": 12}
-        want = None
-        for k in range(1, sap.FRAGILITY_MAX + 1):
-            hit = False
-            for f2 in range(k + 1):
-                for f1 in range(k - f2 + 1):
-                    a2, a1, c = f2, f1, 3 - (k - f2 - f1)
-                    if a2 <= nY["U2"] and a1 <= nY["U1"] and c >= 0:
-                        hit |= sap.permutation_p(d, {"U2": a2, "U1": a1, "S": c}) <= Fraction(1, 40)
-            if hit:
-                want = k
-                break
+        # One usable U2 label and two usable U1 labels, all concordant, cannot carry a rejection.
         self.assertFalse(ex["reject"])
-        self.assertEqual(ex["fragility"], want)
-        self.assertNotEqual(sap.existence_fragility(d, r["m_counts"], False), want)
+        self.assertEqual(full_search(d, r["m_counts"], {"U2": 1, "U1": 2, "S": 12}), (False, None, False))
+        self.assertEqual((ex["fragility"], ex["fragility_defined"]), (None, False))
+        self.assertIn(NOT_DEFINED, sap.report(r))
+        # Flipping the Unsure tasks as well would give 3.
+        everyone = {"U2": 3, "U1": 6, "S": 12}
+        self.assertEqual(full_search(d, r["m_counts"], everyone), (False, 3, True))
+        self.assertEqual(sap.existence_fragility(d, r["m_counts"], False), 3)
+
+    def test_partial_regime_search_tries_every_direction(self):
+        # N = 20, s = 3: instability-first reviews 3 of the 5 U2 tasks, so the weights of
+        # U2, U1 and S are 2/5, -1/5 and -1/5. Rejection needs fewer discordant U1 tasks.
+        labels = labels_for(0, 5, 5, 7, 3)
+        E = E_for(G1=(5, 0), U2=(5, 1), U1=(7, 4), S=(3, 1))
+        r = sap.analyze(labels, E, boot_B=50)
+        d, ex = sap.Design.from_labels(labels), r["existence"]
+        self.assertEqual((d.regime, d.s, d.n_D0), ("PARTIAL", 3, 15))
+        self.assertEqual(sap.delta_weights(d), {"U2": Fraction(2, 5), "U1": Fraction(-1, 5), "S": Fraction(-1, 5)})
+        self.assertFalse(ex["reject"])
+        nY = {"U2": 5, "U1": 7, "S": 3}
+        self.assertEqual(full_search(d, r["m_counts"], nY), (False, 6, True))
+        self.assertLessEqual(sap.permutation_p(d, {"U2": 5, "U1": 2, "S": 1}), Fraction(1, 40))
+        self.assertEqual(ex["fragility"], 6)
+        self.assertIn("Fragility: 6 usable reference-label flips among agreeing tasks would reverse "
+                      "this decision.", sap.report(r))
+        # Moving every count only the way it moves in the coverage regime finds nothing.
+        one_way = [k for k in range(1, sap.FRAGILITY_MAX + 1) for f2 in range(k + 1) for f1 in range(k - f2 + 1)
+                   if 1 + f2 <= 5 and 4 + f1 <= 7 and 0 <= 1 - (k - f2 - f1)
+                   and sap.permutation_p(d, {"U2": 1 + f2, "U1": 4 + f1, "S": 1 - (k - f2 - f1)}) <= Fraction(1, 40)]
+        self.assertEqual(one_way, [])
+
+    def test_not_defined_when_no_set_of_flips_reverses(self):
+        # Coverage, every unstable label Unsure, 5 of 80 usable stable labels discordant:
+        # m1 stays 0 and p stays 1 whatever usable label is flipped.
+        labels, E, ref = panel(block("G1", rows(0, 10)), block("U2", rows(0, 0, 3)), block("U1", rows(0, 0, 5)),
+                               block("S", rows(5, 80)))
+        r = sap.analyze(labels, E, reference=ref, boot_B=50)
+        ex = r["existence"]
+        self.assertEqual((r["label_free"]["regime"], r["m1"], r["m0"]), ("COVERAGE", 0, 5))
+        self.assertEqual((ex["p"], ex["reject"], ex["fragility"], ex["fragility_defined"]), (1.0, False, None, False))
+        txt = sap.report(r)
+        self.assertIn(NOT_DEFINED, txt)
+        self.assertNotIn("more than 15", txt)
+        # One usable unstable label: the best reachable table, m1 = 1 of 8 and m0 = 0 of 80,
+        # gives p = 1/11, so no set of flips reverses the decision.
+        labels, E, ref = panel(block("G1", rows(0, 10)), block("U1", rows(0, 1, 7)), block("S", rows(0, 80)))
+        r = sap.analyze(labels, E, reference=ref, boot_B=50)
+        ex = r["existence"]
+        self.assertEqual(sap.fisher_one_sided(1, 8, 0, 80, exact=True), Fraction(1, 11))
+        self.assertEqual((ex["fragility"], ex["fragility_defined"]), (None, False))
+        self.assertIn(NOT_DEFINED, sap.report(r))
+        # Every label usable: one unstable task among 31 agreeing tasks gives at best p = 1/31.
+        r = sap.analyze(labels_for(0, 4, 0, 1, 30), [0] * 35)
+        ex = r["existence"]
+        self.assertEqual(r["label_free"]["regime"], "COVERAGE")
+        self.assertEqual((ex["fragility"], ex["fragility_defined"]), (None, False))
+        self.assertIn(NOT_DEFINED, sap.report(r))
+        # Partial regime: every unstable label Unsure, 3 of 10 usable stable labels discordant.
+        labels, E, ref = panel(block("G1", rows(0, 13)), block("U2", rows(0, 0, 10)), block("S", rows(3, 10)))
+        r = sap.analyze(labels, E, reference=ref, boot_B=50)
+        ex = r["existence"]
+        self.assertEqual(r["label_free"]["regime"], "PARTIAL")
+        self.assertEqual((ex["reject"], ex["fragility"], ex["fragility_defined"]), (False, None, False))
+        self.assertIn(NOT_DEFINED, sap.report(r))
+
+    def test_more_than_the_search_depth_only_when_reversible(self):
+        # All 20 unstable tasks discordant, no stable one: more than 15 flips are needed.
+        labels = labels_for(0, 10, 0, 20, 150)
+        r = sap.analyze(labels, E_for(U1=(20, 20), S=(150, 0), G1=(10, 0)), boot_B=50)
+        ex = r["existence"]
+        self.assertEqual(r["label_free"]["regime"], "COVERAGE")
+        self.assertEqual((ex["reject"], ex["fragility"], ex["fragility_defined"]), (True, None, True))
+        self.assertIn("Fragility: more than 15 usable reference-label flips among agreeing tasks would "
+                      "reverse this decision.", sap.report(r))
+
+    def test_count_and_reversibility_match_a_full_search(self):
+        rng = np.random.default_rng(2718)
+        seen = {"COVERAGE": 0, "PARTIAL": 0, "not reversible": 0, "beyond the depth": 0}
+        done = 0
+        while done < 150:
+            d = sap.Design(int(rng.integers(0, 3)), int(rng.integers(0, 8)), int(rng.integers(0, 6)),
+                           int(rng.integers(0, 8)), int(rng.integers(0, 22)))
+            if d.regime not in ("COVERAGE", "PARTIAL"):
+                continue
+            full = {"U2": d.n_U2, "U1": d.n_U1, "S": d.n_S}
+            nY = dict(full) if rng.random() < 0.3 else {j: int(rng.integers(0, n + 1)) for j, n in full.items()}
+            m = {j: int(rng.integers(0, nY[j] + 1)) for j in full}
+            reject, want, reversible = full_search(d, m, nY)
+            counts = dict(m, G1=0)
+            self.assertEqual(sap.existence_fragility(d, counts, reject, usable=nY), want)
+            self.assertEqual(sap.fragility_reversible(d, counts, reject, usable=nY), reversible)
+            if d.regime == "PARTIAL":
+                tails = sap._PermutationTails(d)
+                for x in itertools.product(range(full["U2"] + 1), range(full["U1"] + 1), range(full["S"] + 1)):
+                    want_x = sap.permutation_p(d, dict(zip(("U2", "U1", "S"), x))) <= Fraction(1, 40)
+                    self.assertEqual(tails.rejects(x), want_x)
+            seen[d.regime] += 1
+            seen["not reversible"] += not reversible
+            seen["beyond the depth"] += reversible and want is None
+            done += 1
+        self.assertTrue(all(v > 0 for v in seen.values()), seen)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ sap.py reads and writes no files, and its results depend only on its inputs and 
 
 - Slot resolution from the attempt log. REFUSAL, TRUNCATED, FILTERED, MALFORMED and ABSTAIN are INVALID, and verdicts match case-insensitively. A slot with no complete response after three retries is INVALID (TRANSPORT_EXHAUSTED). A slot that ends in HALT, or in a transport failure with retries left, is unfinished and is refused, never counted as INVALID.
 - The label-free design, fixed before the label join, and the exact tie-averaged captures of the three policies. Delta is the difference between instability-first and disagreement-first review.
-- The existence question, by Fisher's exact test or an exact permutation test, and the size question, by the frozen exact score interval or an approximate bootstrap, depending on the regime. The fragility count flips usable reference labels only.
+- The existence question, by Fisher's exact test or an exact permutation test, and the size question, by the frozen exact score interval or an approximate bootstrap, depending on the regime. The fragility count is the fewest flips of usable reference labels among agreeing tasks that reverse the existence decision; it is reported as not defined when no set of such flips reverses it.
 - The labeled sensitivity analyses, the template checks and a text report.
 - `select_panel`, which chooses the default panel of one trajectory per task and the one-task-per-template sensitivity panel without reading labels.
 
