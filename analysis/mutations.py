@@ -55,6 +55,29 @@ MUTATIONS = [
     ("make the one-task-per-template panel the default",
      'PANEL_UNIT = "task"     # the default panel',
      'PANEL_UNIT = "template"     # the default panel'),
+    ("leave the plan-literal secondary unscaled by N/N_Y",
+     "    ratio = Fraction(design.N_per100, den)\n",
+     "    ratio = Fraction(1)\n"),
+    ("print a threshold class for the usable-only secondary",
+     "                       f\"for G_Y: {_g_interval_text(uz['G_L'], uz['G_U'], uz['delta_L'], uz['delta_U'])}\")\n",
+     "                       f\"for G_Y: {_g_interval_text(uz['G_L'], uz['G_U'], uz['delta_L'], uz['delta_U'])}; \"\n"
+     "                       f\"size: {classify_size(uz['delta_L'], uz['delta_U'], 0.5, True)}\")\n"),
+    ("count flips of tasks without a usable label in the fragility",
+     "    usable = {j: sum(1 for l, r in zip(labels_k, ref_k) if l == j and r == USABLE)\n",
+     "    usable = {j: sum(1 for l, r in zip(labels_k, ref_k) if l == j)\n"),
+    ("print zero Unsure and missing counts when statuses are not supplied",
+     "    supplied = reference is not None\n",
+     "    supplied = True\n"),
+    ("accept the judges' words success and failure as reference labels",
+     'REFERENCE_VERDICTS = {"successful": "success", "unsuccessful": "failure"}\n',
+     'REFERENCE_VERDICTS = {"successful": "success", "unsuccessful": "failure", "success": "success", '
+     '"failure": "failure"}\n'),
+    ("report the usable-only comparison when its comparator reviews a negative number",
+     "    elif implied < 0:\n",
+     "    elif False:\n"),
+    ("report the usable-only comparison when its comparator needs more stable tasks than exist",
+     "    elif implied > n0Y:\n",
+     "    elif False:\n"),
 ]
 
 
