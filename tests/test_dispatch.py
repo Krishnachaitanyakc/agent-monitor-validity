@@ -438,12 +438,20 @@ class TestDispatch(LogCase):
                                                                                 "cache_write_tokens": 0}}),
                                   lambda f: f.b(usage={"input_tokens_details": {"cached_tokens": 0,
                                                                                 "cache_write_tokens": 64}}),
-                                  lambda f: f.b(usage={"input_tokens_details": {}})]):
+                                  lambda f: f.b(usage={"input_tokens_details": {}}),
+                                  lambda f: f.b(usage={"input_tokens": 272001}),
+                                  lambda f: f.b(usage={"input_tokens": None})]):
             self.log = AttemptLog(self.tmp / f"b{i}")
             self.log.set_first_model(self.config, "B", R.B_MODEL, "earlier run")
             result, _ = self.run_slots(self.f.a(), self.f.a(), self.f.a(), make(self.f))
             self.assertTrue(result["halted"], i)
             self.assertEqual(self.records("B1")[0]["halt_kind"], "response_check")
+        self.log = AttemptLog(self.tmp / "b-at-limit")
+        result, _ = self.run_slots(self.f.a(), self.f.a(), self.f.a(), self.f.b(usage={"input_tokens": 272000}))
+        self.assertFalse(result["halted"])
+        self.assertIn("input_tokens is 272001, not at most 272000",
+                      D.response_checks("openai", openai_summary(sse(openai_events(
+                          answer(), usage={"input_tokens": 272001}))), {}, None, None))
 
     def test_first_model_string_is_recorded_then_enforced(self):
         self.run_slots(self.f.a(), self.f.a(), self.f.a(), self.f.b())

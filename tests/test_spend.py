@@ -341,6 +341,26 @@ class TestLedger(LedgerCase):
                 S.Ledger(self.path, "pilot")
         self.ledger().close()                                # unchanged values open it again
 
+    def test_a_changed_reservation_function_or_output_cap_refuses_a_resumed_ledger(self):
+        self.ledger().close()
+
+        def reservation(model, input_tokens, max_output_tokens):
+            p = S.price(model)
+            return Decimal(input_tokens) * p["input"] + Decimal(max_output_tokens) * p["output"]
+
+        def max_output_tokens(judge, body):
+            return 16000
+
+        for name, value in (("reservation", reservation), ("max_output_tokens", max_output_tokens)):
+            with mock.patch.object(S, name, value):
+                with self.assertRaises(S.LedgerError, msg=name):
+                    S.Ledger(self.path, "pilot")
+        with mock.patch.object(R, "OUTPUT_CAP", 16000):
+            with self.assertRaises(S.LedgerError):
+                S.Ledger(self.path, "pilot")
+        self.assertEqual(S.pricing_record()["reservation"]["output_cap_tokens"], 32000)
+        self.ledger().close()
+
     def lines_of_header(self):
         return json.loads(self.path.read_text().splitlines()[0])
 

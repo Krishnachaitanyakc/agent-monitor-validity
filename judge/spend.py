@@ -23,8 +23,9 @@ provider token-count client exists. In fake mode only, where no provider exists,
 ``ESTIMATE_FACTOR`` (2) times the request layer's estimate. The 1.25 prices every input
 token as a cache write, so a repeat that misses the cache stays inside its reservation.
 max_output is the request's own output cap, 32,000 tokens. The ledger header keeps the
-SHA-256 of the price table, the modifiers and these reservation constants, and a ledger
-written under other values is refused.
+SHA-256 of the price table, the modifiers, these reservation constants, the request
+layer's output cap and the source of the functions that compute a reservation
+(``RESERVATION_CODE``), and a ledger written under other values or code is refused.
 
 **Admission.** A call is admitted only if settled spend plus open and held reservations
 plus r stays at or below the budget's cap: $95 for the pilot stages together, $285 for
@@ -92,6 +93,7 @@ Usage within the 1% tolerance passes with no adjustment.
 import csv
 import fcntl
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -103,6 +105,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import dispatch as D
+from . import requests as R
 from .storage import AttemptLog
 from .streams import anthropic_summary, openai_summary
 
@@ -123,7 +126,7 @@ MODIFIERS = {
         "service_tier": {"default": "1", "flex": "0.5", "priority": "2", "ultrafast": "6"},
         "cache_read_per_million": {"gpt-6-sol": "0.20", "gpt-6.1-sol": "0.10"},
         "cache_write_per_million": {"gpt-6-sol": "5", "gpt-6.1-sol": "5"},
-        "long_context": {"above_input_tokens": 272000, "input_and_cache": "2", "output": "1.5"},
+        "long_context": {"above_input_tokens": D.B_LONG_CONTEXT_TOKENS, "input_and_cache": "2", "output": "1.5"},
     },
 }
 TOKEN_KINDS = ("input", "cache_write", "cache_read", "output")
@@ -182,13 +185,20 @@ def timestamp(text) -> float:
     return t.timestamp()
 
 
+RESERVATION_CODE = ("reservation", "estimated_input_tokens", "max_output_tokens")
+
+
 def pricing_record() -> dict:
-    """What fixes every amount the ledger records: prices, modifiers and the reservation constants."""
+    """What fixes every amount the ledger records: prices, modifiers, the reservation
+    constants, the request layer's output cap, and the source code of the functions that
+    compute a reservation, so an edit to any of them refuses a resumed ledger."""
+    code = "".join(inspect.getsource(globals()[name]) for name in RESERVATION_CODE)
     return {"version": PRICE_TABLE_VERSION, "prices_per_million_tokens": PRICES, "modifiers": MODIFIERS,
             "reservation": {"rule": RESERVATION_RULE, "input_margin": usd(INPUT_MARGIN),
                             "input_pad_tokens": INPUT_PAD_TOKENS, "write_factor": usd(WRITE_FACTOR),
                             "estimate_factor": ESTIMATE_FACTOR, "output_cap_rule": OUTPUT_CAP_RULE,
-                            "b_input_limit_tokens": B_INPUT_LIMIT}}
+                            "output_cap_tokens": R.OUTPUT_CAP, "b_input_limit_tokens": B_INPUT_LIMIT,
+                            "code_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest()}}
 
 
 def pricing_sha256() -> str:

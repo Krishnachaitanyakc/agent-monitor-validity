@@ -21,7 +21,9 @@ A: the model string equals the first one recorded for this configuration;
 ``usage.service_tier`` is ``standard``; ``usage.inference_geo`` is ``global``; no one-hour
 cache tokens; the ``anthropic-workspace-id`` header is the study workspace when one is
 given. B: the model string equals the first recorded; ``service_tier`` is ``default``;
-``cached_tokens`` and ``cache_write_tokens`` are 0. A field that is not reported fails.
+``cached_tokens`` and ``cache_write_tokens`` are 0; ``input_tokens`` is at most 272,000,
+above which the provider prices the call at its long-context rate. A field that is not
+reported fails.
 
 **Recovery.** A stop between the two writes of an attempt leaves its raw response without
 its record. ``recover_attempt`` rebuilds that record from the bytes as the dispatcher
@@ -50,6 +52,7 @@ from .outcomes import (ABSTAIN, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TER
 from .streams import parse_sse
 
 CACHE_LIFETIME_S = 300
+B_LONG_CONTEXT_TOKENS = 272000               # judge B input above this is priced at the long-context rate
 PROMPT_SLOTS = (("A", 1), ("B", 1))          # prompt development: A1 and B1 only
 BACKOFF_BASE_S = 2.0
 RETRY_AFTER_CAP_S = 120.0
@@ -162,6 +165,8 @@ def response_checks(provider: str, summary: dict, headers: dict, first_model, wo
         if u.get("cache_read_tokens") != 0 or u.get("cache_write_tokens") != 0:
             fails.append(f"cache tokens read {u.get('cache_read_tokens')!r}, written "
                          f"{u.get('cache_write_tokens')!r}; both must be 0")
+        if not isinstance(u.get("input_tokens"), int) or u["input_tokens"] > B_LONG_CONTEXT_TOKENS:
+            fails.append(f"input_tokens is {u.get('input_tokens')!r}, not at most {B_LONG_CONTEXT_TOKENS}")
     return fails
 
 
