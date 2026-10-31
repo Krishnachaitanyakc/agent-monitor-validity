@@ -1,31 +1,46 @@
 """Statistical analysis of the instability-first review study: reference implementation.
 
-This module implements the study's statistical analysis plan, draft v3.2. The
-method is frozen only at the study freeze; until then "frozen" in this file
-names the rule the plan fixes, not a completed freeze. Comments name the plan's
-sections by topic: units, budget, policies, regimes, the coverage regime,
-invalid responses, the partial regime and the panel. Where the code has to fill
-a gap in the plan, the comment says "Implementation choice".
+This module implements the study's statistical analysis plan, draft v3.2,
+except for one piece the plan requires before the freeze. The inference that
+handles the template dependence retained on the one-trajectory-per-task panel,
+and its synthetic validation, are both still to come. Until they exist, the
+primary test and interval are those of plan v3.1, which assume independent
+tasks, and the report says so. The method is frozen only at the study freeze;
+until then "frozen" in this file names the rule the plan fixes, not a completed
+freeze. Comments name the plan's sections by topic: units, budget, policies,
+regimes, the coverage regime, invalid responses, the partial regime and the
+panel. Where the code has to fill a gap in the plan, the comment says
+"Implementation choice".
 
-Everything here is a pure function of label-free counts, plus the reference
-discordance E only where the plan marks a quantity as needing labels. Nothing
-here reads data from disk.
+Results depend only on the inputs and seeds: label-free counts, plus the
+reference discordance E and the reference statuses only where the plan marks a
+quantity as needing labels. Nothing here reads or writes files.
+
+Corrections to the earlier code
+-------------------------------
+Plan v3.1 already required both of these; the earlier code lacked them.
+- FILTERED is a terminal INVALID outcome. The earlier code did not list it and
+  raised on it.
+- Verdicts match case-insensitively, as the plan's parser does. The earlier code
+  matched their letter case exactly.
 
 Changes from plan v3.1
 ----------------------
-- Reference labels. A task whose released primary label is Unsure or missing
-  stays in the panel, in the selections and in the review count K. The primary
-  result is per 100 panel tasks (N) and counts such a task as not
+- Request and configuration halts. HTTP 400 that is not a spend or usage limit,
+  HTTP 413 and the provider's equivalent invalid-request errors halt the run,
+  as the other halt causes do. A halt is never INVALID; a slot that ends in HALT
+  is unfinished, and the analysis refuses it (UnfinishedSlot).
+- Unsure and missing labels. A task whose released primary label is Unsure or
+  missing stays in the panel, in the selections and in the review count K. The
+  primary result is per 100 panel tasks (N) and counts such a task as not
   reference-contradicted (E = 0). The secondary result is per 100 tasks with a
   usable label (N_Y) and leaves such tasks out. Coverage of Unsure and missing
   labels is reported separately; these tasks are unknown, never correct. See
   join_reference(), analyze() and reference_coverage().
-- Outcomes. FILTERED is a terminal INVALID outcome. Verdicts match
-  case-insensitively. Request and configuration errors are halts, never
-  INVALID, and a slot that ends in HALT is unfinished: the analysis refuses it
-  (UnfinishedSlot) instead of counting it.
-- Panel. The default panel is one trajectory per task; the one-task-per-template
-  panel is a labelled sensitivity analysis. See select_panel().
+- Panel unit. The default panel is one trajectory per task; the
+  one-task-per-template panel is a labeled sensitivity analysis. See
+  select_panel(). The inference for the retained dependence is not yet
+  implemented (see above).
 
 Conventions
 -----------
@@ -58,10 +73,11 @@ accept/reject decision, provided the grid discretization error is below
 REFINE_WINDOW. pvalues_all(refine=False) returns the grid maxima, which is how
 that error is measured.
 
-Two nuisance sets are implemented. 'full': the supremum
-runs over the whole admissible range of p0. 'berger-boos': the supremum runs over a 99.9% Clopper-Pearson set for p0 computed
-from m0 of n0, and BB_GAMMA = 0.001 is added (Berger and Boos 1994).
-INTERVAL_METHOD selects the frozen one; the plan freezes 'berger-boos'.
+Two nuisance sets are implemented. 'full': the supremum runs over the whole
+admissible range of p0. 'berger-boos': the supremum runs over a 99.9%
+Clopper-Pearson set for p0 computed from m0 of n0, and BB_GAMMA = 0.001 is
+added (Berger and Boos 1994). INTERVAL_METHOD selects the frozen one; the plan
+freezes 'berger-boos'.
 
 Interval endpoints. Tests are run on the d grid k/100 plus the
 label-free points 0 and delta_m. delta_L is the grid point just below the first
@@ -72,8 +88,9 @@ points, and the reported interval is the OPEN interval (delta_L, delta_U), with
 outcome uses the same grid, the one-sided miss probability at any delta, on or
 off the grid, is bounded by the size of one composite one-sided test, so
 coverage holds everywhere, not only at grid points; the cost is at most one
-grid step (0.01) per side. The earlier bisection between grid points could land
-inside a sub-grid hole of the saw-toothed p-value and was removed.
+grid step (0.01) per side. Endpoints are not refined between grid points by
+bisection, because such a search can land inside a sub-grid hole of the
+saw-toothed p-value.
 """
 from __future__ import annotations
 
@@ -101,7 +118,7 @@ INTERVAL_METHODS = ("full", "berger-boos")
 INTERVAL_METHOD = "berger-boos"    # the frozen interval method; "full" is kept for comparison
 BB_GAMMA = 0.001                   # Berger-Boos: 1 - 0.999 Clopper-Pearson set for p0
 FRAGILITY_MAX = 15                 # search depth for the fragility count
-PLAN_VERSION = "v3.2"               # the analysis plan this code implements
+PLAN_VERSION = "v3.2"              # the analysis plan this code implements
 
 NUISANCE_TEXT = {
     "full": "supremum over the whole admissible range of p0",
@@ -109,26 +126,38 @@ NUISANCE_TEXT = {
                     "plus 0.001 (Berger and Boos 1994; the frozen method)"),
 }
 
-# Wording of what the interval covers.
-COVERS_TEXT = (
-    "What the interval covers:\n"
-    "- delta = p1 - p0, where p1 is the discordance rate of agreeing first verdicts whose "
-    "repeats changed (U2 and U1 pooled) and p0 that of stable agreeing first verdicts. The "
-    "interval for delta covers delta with probability at least 95%, at most 2.5% on each "
-    "side. delta does not depend on the budget.\n"
-    "- The interval for G covers G, defined above, with the same probability. The "
-    "probability is over repeated draws of the discordance indicators E, independent "
-    "Bernoulli(p1) in U and Bernoulli(p0) in S, with the label-free design held fixed.\n"
-    "- U2 and U1 share one rate p1. If their rates differ, m1 is Poisson-binomial rather "
-    "than binomial and p1 is their size-weighted average; the exact guarantee is proved "
-    "only for the binomial case, and the synthetic checks measure unequal rates.\n"
-    "- G_hat equals the realized Delta per 100 exactly, as an identity. The interval is "
-    "for G, the expected gain for this design, not for the realized Delta of this panel, "
-    "which is known exactly once labels are joined.\n"
-    "- It does not cover the gain at another budget, because L changes.\n"
-    "- It does not cover any gain in true errors as opposed to reference discordance, "
-    "or gains for other judges, views or benchmarks.\n"
-    "- The odds ratio is not used for any interval."
+# What the interval covers: the plan's bullets, word for word. The plan requires
+# them in every report, so they are never reworded here.
+COVERS_BULLETS = (
+    "- p1 and p0 are the rates of reference-contradicted first verdicts among unstable "
+    "and stable agreeing tasks, with a task that has no usable reference label counted "
+    "as not contradicted.",
+    "- The interval for δ covers δ with probability at least 95%, at most 2.5% on each "
+    "side. δ does not depend on the budget.",
+    "- The interval for G covers G with the same probability, over repeated draws of the "
+    "discordance indicators: independent Bernoulli(p1) in U and Bernoulli(p0) in S, with "
+    "the label-free design held fixed.",
+    "- These guarantees assume independent tasks. On a panel with more than one task per "
+    "template they hold only once the synthetic validation under retained template "
+    "dependence has passed.",
+    "- U2 and U1 share one rate p1. If their rates differ, m1 is Poisson-binomial and p1 "
+    "is their size-weighted average. Exactness is proved for the binomial case, and "
+    "checked for unequal rates.",
+    "- Ĝ equals the realized Δ per 100 exactly. The interval is for G, not for the "
+    "realized Δ.",
+    "- It does not cover the gain at another budget, because L changes. It does not cover "
+    "gains in true errors as opposed to reference discordance, or gains for other judges, "
+    "views or benchmarks.",
+    "- No odds ratio is used for any interval.",
+)
+COVERS_TEXT = "What the interval covers:\n" + "\n".join(COVERS_BULLETS)
+# Explanations kept apart from the plan's wording above.
+COVERS_NOTES_TEXT = (
+    "Notes on these statements: U pools U2 and U1, the unstable agreeing tasks, and S "
+    "holds the stable agreeing tasks; G is defined above, and Ĝ is G_hat. The test and "
+    "the interval used here are those of plan v3.1. The inference that handles the "
+    "template dependence retained on a one-trajectory-per-task panel, and its synthetic "
+    "validation, are still to come and are required before the freeze."
 )
 G_DEFINITION_TEXT = (
     "G = (100/N)·L·δ is the expected number of additional "
@@ -160,7 +189,7 @@ class UnfinishedSlot(ValueError):
     """A slot without a terminal outcome: open after transport failures, or halted.
 
     A halted slot is not INVALID. The run resumes it after the cause is fixed, so
-    the analysis refuses a panel that still holds one instead of counting it.
+    the analysis refuses a panel that still holds one.
     """
 
 
@@ -199,8 +228,13 @@ class Attempt:
         errors (HTTP 400 that is not a spend or usage limit, HTTP 413, and the
         provider's equivalent invalid-request errors), the spending cap, or an
         operator stop. It is logged, is not a retry and is never INVALID. The cause
-        and the correction are recorded before the slot resumes under the same
-        frozen hash.
+        and the correction are recorded in the run log before the slot resumes
+        under the same frozen hash.
+      - A correction that changes the config hash: every slot completed under the
+        old hash is dispatched again under the new one, the caller sets the
+        voided records aside, and the change is disclosed in the run log.
+        resolve_panel() refuses records under any other hash by design, so it is
+        called with the new hash and only the records sent under it.
       - Terminal outcomes end the slot and are never retried: VALID, REFUSAL,
         TRUNCATED, FILTERED (content filter), MALFORMED and ABSTAIN. Every
         non-VALID terminal outcome is INVALID for its slot.
@@ -313,9 +347,10 @@ def resolve_panel(log: Iterable[Attempt], trajectories: Sequence[str],
 
     Returns {'slots': [ {'A1','A2','A3','B1'} -> outcome ] in trajectory order,
     'provenance': {...}}. Raises ProtocolViolation for records of trajectories
-    outside the panel, for any record under another config hash, and when two
-    complete responses share a response id, which is what a response cache
-    keyed on the payload would produce for the byte-identical repeats.
+    outside the panel, for any record under another config hash (see Attempt for
+    a correction that changes the hash), and when two complete responses share a
+    response id, which is what a response cache keyed on the payload would produce
+    for the byte-identical repeats.
     """
     trajectories = list(trajectories)
     if len(set(trajectories)) != len(trajectories):
@@ -385,13 +420,13 @@ def derive_label_free(slots: Sequence[Mapping[str, str]], b1_invalid: str = "dis
     marked HALT or TRANSPORT is unfinished and raises UnfinishedSlot; it is never
     counted as INVALID. Primary rules are the defaults:
       - A1 INVALID -> i in I. A1 is never replaced by a repeat or a later call.
-      - B1 INVALID -> D = 1 (b1_invalid='disagree'). Labelled sensitivity:
+      - B1 INVALID -> D = 1 (b1_invalid='disagree'). Labeled sensitivity:
         'agree' sets D = 0 so the item is routed by A's own R. 'exclude' is kept for
         completeness; with s held it provably cannot move Delta, p or the interval.
       - R counts valid repeats whose verdict differs from A1; invalid repeats
         count 0; both repeats invalid -> R = 0 and R_unobserved = 1
         (r_unobserved='zero'); sensitivity: 'one' sets R = 1 instead.
-        Labelled sensitivity 'one_any' also sets R = 1 when exactly one repeat is
+        Labeled sensitivity 'one_any' also sets R = 1 when exactly one repeat is
         INVALID and the valid one agrees with A1.
       - exclude_any_invalid=True is the third sensitivity analysis: drop every
         trajectory with any INVALID slot.
@@ -504,8 +539,8 @@ def join_reference(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[str]
     A task without a usable label has no reference. It stays in the panel and is
     not reference-contradicted (E_i = 0), which is how the primary result counts it;
     the secondary result leaves it out through its status. For an invalid A1, E_i = 0
-    and is ignored, as before. Nothing label-free depends on Y: the panel, D, R, the
-    selections and K are fixed before the join.
+    and is ignored, since there is no verdict to contradict. Nothing label-free
+    depends on Y: the panel, D, R, the selections and K are fixed before the join.
 
     Returns {'E': list of 0 or 1, 'reference': list of statuses}, in panel order.
     """
@@ -743,7 +778,7 @@ def _sorted_by_key(indices: Sequence[int], keys) -> np.ndarray:
 
 def one_operators_draw(labels: Sequence[str], E: Sequence[int], s: int, seed: int,
                        ids: Optional[Sequence[str]] = None) -> dict:
-    """One seeded realization of each policy, labelled "one operator's draw" [labels].
+    """One seeded realization of each policy, labeled "one operator's draw" [labels].
 
     Items are ordered by the frozen sort key before permuting, so the
     draw is reproducible from the manifest alone. The sort key is the normalized
@@ -983,7 +1018,7 @@ class ExactScoreDiff:
         """Local refinement of the nuisance maximum around grid-local maxima.
 
         p0g is the (sub-)grid the supremum runs over; the bracket of each candidate
-        stays between its neighbours on that grid, so it never leaves the nuisance set.
+        stays between its neighbors on that grid, so it never leaves the nuisance set.
         """
         vmax = float(vals.max())
         left = np.r_[-np.inf, vals[:-1]]
@@ -1298,7 +1333,7 @@ def existence_fragility(design: Design, counts: Mapping[str, int], reject: bool,
 # Panel: one trajectory per task by default, one task per template as sensitivity
 # ---------------------------------------------------------------------------
 PANEL_UNITS = ("task", "template")
-PANEL_UNIT = "task"     # the default panel; "template" gives the labelled sensitivity panel
+PANEL_UNIT = "task"     # the default panel; "template" gives the labeled sensitivity panel
 
 
 def select_panel(runs: Sequence[Mapping[str, object]], seed: int, unit: str = PANEL_UNIT) -> List[str]:
@@ -1316,7 +1351,7 @@ def select_panel(runs: Sequence[Mapping[str, object]], seed: int, unit: str = PA
     SeedSequence(seed, spawn_key=(4,)); the first run that passes is taken. A task
     with no passing run is not in the panel. Tasks that share a template all stay.
 
-    unit='template', the labelled sensitivity panel: the task panel is built
+    unit='template', the labeled sensitivity panel: the task panel is built
     first; then, for each template in template-id order, its eligible tasks are
     sorted by task id and permuted with the generator of
     SeedSequence(seed, spawn_key=(5,)), and the first task that has a panel run is
@@ -1406,7 +1441,7 @@ def template_subsample(labels: Sequence[str], templates: Sequence[str],
 def template_sensitivity(labels: Sequence[str], E: Sequence[int], templates: Sequence[str],
                          ids: Optional[Sequence[str]] = None, seed: int = 0,
                          method: Optional[str] = None) -> dict:
-    """Existence p and delta interval on one agreeing item per template (labelled sensitivity)."""
+    """Existence p and delta interval on one agreeing item per template (labeled sensitivity)."""
     chosen, info = template_subsample(labels, templates, ids, seed)
     lab = [labels[i] for i in chosen]
     e = [int(E[i]) for i in chosen]
@@ -1855,6 +1890,8 @@ def _primary_lines(res: dict) -> List[str]:
                     "decided by Fisher's p alone, and the interval only sizes the gain.")
         out.append("")
         out.append(COVERS_TEXT)
+        out.append("")
+        out.append(COVERS_NOTES_TEXT)
     else:
         b = sz["partial"]
         out.append(f"  Partial regime (n1 > s): AUG reviews only s = {lf['s']} of the n1 = {lf['n1']} "
@@ -1983,7 +2020,7 @@ SENSITIVITY_VARIANTS = [
 
 def analyze_with_sensitivities(slots: Sequence[Mapping[str, str]], E: Sequence[int],
                                **kw) -> List[Tuple[str, dict]]:
-    """Primary analysis plus the labelled sensitivity analyses for invalid responses.
+    """Primary analysis plus the labeled sensitivity analyses for invalid responses.
 
     Every sensitivity analysis holds s at its primary value (capped at
     the new n_D0) and the per-100 denominator N at the primary N, so K changes only
@@ -2019,7 +2056,7 @@ def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
                   reference: Optional[Sequence[str]] = None,
                   template_panel: Optional[Sequence[str]] = None) -> dict:
     """Everything the frozen report needs: primary and secondary results, label
-    coverage, labelled sensitivity analyses, invalid counts, repeat-observation
+    coverage, labeled sensitivity analyses, invalid counts, repeat-observation
     counts, template sensitivity and A1 provenance.
 
     The panel is the default one: one trajectory per task. reference gives each
@@ -2027,7 +2064,7 @@ def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
     task's template id, for the multiplicities and the one-agreeing-item check.
     template_panel lists the trajectory ids of the one-task-per-template panel,
     chosen label-free before evaluation (select_panel with unit='template'); the
-    full analysis is then repeated on it as a labelled sensitivity analysis, with
+    full analysis is then repeated on it as a labeled sensitivity analysis, with
     its own N, s and K, since it is a different panel.
     """
     sub = None
@@ -2134,7 +2171,7 @@ def panel_report(panel: dict) -> str:
     out.append(f"  agreeing items with one repeat INVALID and an observed flip: {rf['one_repeat_invalid_flip']}")
     out.append("")
     NY = prim["secondary"]["N_Y"] if prim.get("secondary") is not None else lf["N"]
-    out.append(f"Sensitivity analyses (labelled; s = {lf['s']} and the per-100 denominators N = {lf['N']} "
+    out.append(f"Sensitivity analyses (labeled; s = {lf['s']} and the per-100 denominators N = {lf['N']} "
                f"and N_Y = {NY} are held at their primary values, s capped at n_D0)")
     for name, r in panel["sensitivities"]:
         out.extend(_brief(name, r))
@@ -2149,10 +2186,12 @@ def panel_report(panel: dict) -> str:
             out.append(f"  {slot} | {cat} | {bench} | {c}")
     tm = panel.get("templates")
     out.append("")
-    out.append("Template sensitivity (labelled)")
+    out.append("Template sensitivity (labeled)")
     out.append(f"  The primary panel keeps one trajectory per task (N = {lf['N']}), so tasks that share "
                "a template stay in it and can be correlated; the one-task-per-template panel is the "
-               "labelled sensitivity analysis for that dependence.")
+               "labeled sensitivity analysis for that dependence. The primary test and interval "
+               "assume independent tasks; the inference that handles the retained dependence, and "
+               "its synthetic validation, are still to come and are required before the freeze.")
     mult = panel.get("template_multiplicities")
     if mult is not None:
         out.append(f"  Panel tasks: {mult['n_tasks']} in {mult['n_templates']} templates; largest template "

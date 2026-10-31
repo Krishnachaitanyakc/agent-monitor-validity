@@ -523,7 +523,8 @@ class TestScoreInterval(unittest.TestCase):
 
     def test_offgrid_hole_example(self):
         # 8 of 10 versus 20 of 220. The lower-tail test accepts d = 0.879 inside the
-        # cell (0.87, 0.88) although it rejects 0.8785; the old bisection reported 0.87845.
+        # cell (0.87, 0.88) although it rejects 0.8785. A bisection between grid points can
+        # stop near 0.87845, below an accepted point, so the upper end stays on the grid: 0.88.
         T = sap.ExactScoreDiff(10, 220, method="full")
         dm = float(sap.Design.simple(270, 40, 10).delta_threshold())
         self.assertGreater(T.pvalue(8, 20, 0.879, "lower", refine="always"), sap.ALPHA)
@@ -644,7 +645,7 @@ class TestReporting(unittest.TestCase):
                        "H0: p1 = p0", "Statistic: m1", "P(M1 >= m1 | n1, n0, m_D0)",
                        "H0_thr: δ ≤ δ_m (G ≤ m)", "Statistic: Z(d)", "Fragility:",
                        "What the interval covers", "Poisson-binomial",
-                       "Sensitivity analyses (labelled; s = ", "B1 INVALID treated as agreement",
+                       "Sensitivity analyses (labeled; s = ", "B1 INVALID treated as agreement",
                        "Invalid counts by judge slot, category and benchmark", "A1 | REFUSAL",
                        "Template sensitivity", "One agreeing item per template",
                        "items ordered by ids", "Repeat observation"):

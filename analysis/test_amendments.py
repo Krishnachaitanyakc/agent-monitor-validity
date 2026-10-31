@@ -173,14 +173,14 @@ class TestReferenceJoin(unittest.TestCase):
         ref[12] = MIS
         with self.assertRaises(ValueError):
             sap.analyze(labels, E, reference=ref)
-        E2, ref2 = [1] + [0] * 54, [UNS] + [U] * 54             # an invalid A1: E is ignored, as before
+        E2, ref2 = [1] + [0] * 54, [UNS] + [U] * 54             # an invalid A1 has no verdict: E is ignored
         sap.analyze(["I"] + labels[1:], E2, reference=ref2)
         with self.assertRaises(ValueError):
             sap.analyze(labels, [0] * 55, reference=["sure"] * 55)
 
 
 GOLDEN_V31 = {
-    # Plan v3.1 results of the original implementation on four synthetic panels.
+    # Results under the plan v3.1 rules, every label usable, on four synthetic panels.
     "coverage": dict(
         panel=(labels_for(0, 30, 3, 7, 160), E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10)), {}),
         captures={"RAND": Fraction(15, 2), "DIS": Fraction(229, 17), "AUG": Fraction(65, 4),
@@ -553,7 +553,7 @@ class TestPanelUnit(unittest.TestCase):
                 want.append(hit[0])
         self.assertEqual(sap.select_panel(self.RUNS, seed), want)
 
-    def test_template_panel_is_a_labelled_sensitivity_subset(self):
+    def test_template_panel_is_a_labeled_sensitivity_subset(self):
         task_of = {r["run_id"]: r["task_id"] for r in self.RUNS}
         tmpl_of = {r["run_id"]: r["template_id"] for r in self.RUNS}
         for seed in range(25):
