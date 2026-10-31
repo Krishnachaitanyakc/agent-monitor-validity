@@ -1,13 +1,31 @@
 """Statistical analysis of the instability-first review study: reference implementation.
 
-This module implements the study's statistical analysis plan (v3.1). Comments
-name the plan's sections by topic: units, budget, policies, regimes, the
-coverage regime, invalid responses and the partial regime. Where the code has
-to fill a gap in the plan, the comment says "Implementation choice".
+This module implements the study's statistical analysis plan, draft v3.2. The
+method is frozen only at the study freeze; until then "frozen" in this file
+names the rule the plan fixes, not a completed freeze. Comments name the plan's
+sections by topic: units, budget, policies, regimes, the coverage regime,
+invalid responses, the partial regime and the panel. Where the code has to fill
+a gap in the plan, the comment says "Implementation choice".
 
 Everything here is a pure function of label-free counts, plus the reference
 discordance E only where the plan marks a quantity as needing labels. Nothing
 here reads data from disk.
+
+Changes from plan v3.1
+----------------------
+- Reference labels. A task whose released primary label is Unsure or missing
+  stays in the panel, in the selections and in the review count K. The primary
+  result is per 100 panel tasks (N) and counts such a task as not
+  reference-contradicted (E = 0). The secondary result is per 100 tasks with a
+  usable label (N_Y) and leaves such tasks out. Coverage of Unsure and missing
+  labels is reported separately; these tasks are unknown, never correct. See
+  join_reference(), analyze() and reference_coverage().
+- Outcomes. FILTERED is a terminal INVALID outcome. Verdicts match
+  case-insensitively. Request and configuration errors are halts, never
+  INVALID, and a slot that ends in HALT is unfinished: the analysis refuses it
+  (UnfinishedSlot) instead of counting it.
+- Panel. The default panel is one trajectory per task; the one-task-per-template
+  panel is a labelled sensitivity analysis. See select_panel().
 
 Conventions
 -----------
@@ -83,6 +101,7 @@ INTERVAL_METHODS = ("full", "berger-boos")
 INTERVAL_METHOD = "berger-boos"    # the frozen interval method; "full" is kept for comparison
 BB_GAMMA = 0.001                   # Berger-Boos: 1 - 0.999 Clopper-Pearson set for p0
 FRAGILITY_MAX = 15                 # search depth for the fragility count
+PLAN_VERSION = "v3.2"               # the analysis plan this code implements
 
 NUISANCE_TEXT = {
     "full": "supremum over the whole admissible range of p0",
@@ -122,18 +141,40 @@ G_DEFINITION_TEXT = (
 # Invalid responses, abstentions, failures, retries
 # ---------------------------------------------------------------------------
 VERDICTS = ("success", "failure")
-INVALID_TERMINAL = ("REFUSAL", "TRUNCATED", "MALFORMED", "ABSTAIN")
+INVALID_TERMINAL = ("REFUSAL", "TRUNCATED", "FILTERED", "MALFORMED", "ABSTAIN")
 TRANSPORT = "TRANSPORT"                       # no complete model response; retryable
-HALT = "HALT"                                 # run stopped; not a retry
+HALT = "HALT"                                 # run stopped; not a retry and never INVALID
 TRANSPORT_EXHAUSTED = "TRANSPORT_EXHAUSTED"   # no complete response after the retries: INVALID
 MAX_RETRIES = 3
 INVALID_CODES = INVALID_TERMINAL + (TRANSPORT_EXHAUSTED,)
+UNFINISHED = (TRANSPORT, HALT)                # attempt outcomes that leave a slot open
 SLOT_KEYS = (("A", 1), ("A", 2), ("A", 3), ("B", 1))
 SLOT_NAMES = {("A", 1): "A1", ("A", 2): "A2", ("A", 3): "A3", ("B", 1): "B1"}
 
 
 class ProtocolViolation(ValueError):
     """An attempt log that the frozen retry rules forbid."""
+
+
+class UnfinishedSlot(ValueError):
+    """A slot without a terminal outcome: open after transport failures, or halted.
+
+    A halted slot is not INVALID. The run resumes it after the cause is fixed, so
+    the analysis refuses a panel that still holds one instead of counting it.
+    """
+
+
+def canonical_outcome(outcome: str) -> str:
+    """The canonical spelling of one attempt or slot outcome.
+
+    Verdicts match case-insensitively, as the parser does: 'Success', 'SUCCESS'
+    and 'success' are the verdict 'success'. Only ASCII spellings qualify, so a
+    look-alike character never becomes a verdict. Outcome codes (REFUSAL, HALT and
+    so on) are returned unchanged and must match exactly.
+    """
+    if isinstance(outcome, str) and outcome.isascii() and outcome.lower() in VERDICTS:
+        return outcome.lower()
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -143,7 +184,8 @@ class Attempt:
     trajectory, judge ('A' or 'B') and repeat (1..3 for A, 1 for B) are the slot,
     fixed at dispatch. config_hash is the evaluation configuration the attempt was
     sent under. attempt is the 1-based dispatch index within the slot. outcome is
-    TRANSPORT, HALT, 'success' or 'failure' (VALID), or one of INVALID_TERMINAL.
+    TRANSPORT, HALT, 'success' or 'failure' (VALID, matched case-insensitively), or
+    one of INVALID_TERMINAL.
     response_id is the provider's id for a complete response, when the runner has it.
 
     Runner rules this record encodes:
@@ -152,9 +194,16 @@ class Attempt:
         that is not a HALT class, and a stream that ends without a final stop
         reason. Partial stream content and any response arriving after the attempt
         was logged TRANSPORT are discarded unparsed and never logged as an outcome.
-      - HALT: the run stops. HTTP 401, 403, 404, any billing, quota or credit error
-        (whatever its status code), the spending cap, or an operator stop. It is
-        logged, is not a retry, and the slot resumes under the same frozen hash.
+      - HALT: the run stops. HTTP 401, 403, 404, any billing, quota, credit or
+        spend-limit error (whatever its status code), request or configuration
+        errors (HTTP 400 that is not a spend or usage limit, HTTP 413, and the
+        provider's equivalent invalid-request errors), the spending cap, or an
+        operator stop. It is logged, is not a retry and is never INVALID. The cause
+        and the correction are recorded before the slot resumes under the same
+        frozen hash.
+      - Terminal outcomes end the slot and are never retried: VALID, REFUSAL,
+        TRUNCATED, FILTERED (content filter), MALFORMED and ABSTAIN. Every
+        non-VALID terminal outcome is INVALID for its slot.
     """
     trajectory: str
     judge: str
@@ -189,12 +238,17 @@ def resolve_outcomes(outcomes: Sequence[str]) -> str:
     response ends the slot and is never retried. A slot whose 1 + MAX_RETRIES
     transport failures are exhausted resolves to TRANSPORT_EXHAUSTED, which is
     INVALID: the plan makes a slot with no complete response after the retries
-    INVALID. Nothing may follow exhaustion.
+    INVALID. Nothing may follow exhaustion. Verdicts match case-insensitively
+    and are returned in canonical spelling.
+
+    A slot whose last record is HALT, or TRANSPORT with retries left, has no
+    terminal outcome yet and raises UnfinishedSlot. A halt is never INVALID.
     """
     if len(outcomes) == 0:
         raise ValueError("slot has no attempts; it was never dispatched")
     n_tr = 0
     for k, a in enumerate(outcomes):
+        a = canonical_outcome(a)
         if n_tr >= 1 + MAX_RETRIES:
             raise ProtocolViolation(f"a record follows {1 + MAX_RETRIES} transport failures; "
                                     f"at most {MAX_RETRIES} retries are allowed")
@@ -211,7 +265,10 @@ def resolve_outcomes(outcomes: Sequence[str]) -> str:
         raise ValueError(f"unknown attempt outcome {a!r}")
     if n_tr >= 1 + MAX_RETRIES:
         return TRANSPORT_EXHAUSTED
-    raise ValueError("slot is still open: transport failures or a halt with retries left")
+    if canonical_outcome(outcomes[-1]) == HALT:
+        raise UnfinishedSlot("slot is unfinished: its last attempt halted the run; a halt is "
+                             "not INVALID, and the slot resumes after the cause is fixed")
+    raise UnfinishedSlot("slot is still open: transport failures with retries left")
 
 
 def resolve_slot(attempts: Sequence[Attempt], slot: Tuple[str, str, int],
@@ -303,10 +360,19 @@ def resolve_panel(log: Iterable[Attempt], trajectories: Sequence[str],
 
 
 def is_valid(outcome: str) -> bool:
+    """True for a verdict, False for an INVALID code; refuses anything unfinished.
+
+    A slot marked HALT or TRANSPORT has no terminal outcome. It raises
+    UnfinishedSlot, so a halted slot is never counted, as INVALID or otherwise.
+    """
+    outcome = canonical_outcome(outcome)
     if outcome in VERDICTS:
         return True
     if outcome in INVALID_CODES:
         return False
+    if outcome in UNFINISHED:
+        raise UnfinishedSlot(f"slot outcome {outcome!r} is unfinished: the slot has no terminal "
+                             "outcome yet and cannot enter the analysis")
     raise ValueError(f"not a resolved slot outcome: {outcome!r}")
 
 
@@ -314,8 +380,10 @@ def derive_label_free(slots: Sequence[Mapping[str, str]], b1_invalid: str = "dis
                       r_unobserved: str = "zero", exclude_any_invalid: bool = False) -> dict:
     """Resolved slot outcomes -> (I, V, D, R, R_unobserved).
 
-    slots[i] maps 'A1', 'A2', 'A3', 'B1' to a resolved outcome ('success',
-    'failure', or an INVALID code). Primary rules are the defaults:
+    slots[i] maps 'A1', 'A2', 'A3', 'B1' to a resolved outcome ('success' or
+    'failure' in any letter case, or an INVALID code, FILTERED included). A slot
+    marked HALT or TRANSPORT is unfinished and raises UnfinishedSlot; it is never
+    counted as INVALID. Primary rules are the defaults:
       - A1 INVALID -> i in I. A1 is never replaced by a repeat or a later call.
       - B1 INVALID -> D = 1 (b1_invalid='disagree'). Labelled sensitivity:
         'agree' sets D = 0 so the item is routed by A's own R. 'exclude' is kept for
@@ -346,7 +414,7 @@ def derive_label_free(slots: Sequence[Mapping[str, str]], b1_invalid: str = "dis
     Ru = np.full(n, -1)
     R1m = np.full(n, -1)
     for i, sl in enumerate(slots):
-        a1, a2, a3, b1 = sl["A1"], sl["A2"], sl["A3"], sl["B1"]
+        a1, a2, a3, b1 = (canonical_outcome(sl[k]) for k in ("A1", "A2", "A3", "B1"))
         valid = {k: is_valid(v) for k, v in (("A1", a1), ("A2", a2), ("A3", a3), ("B1", b1))}
         if exclude_any_invalid and not all(valid.values()):
             stratum[i] = "EXCL"
@@ -388,8 +456,82 @@ def invalid_counts(slots: Sequence[Mapping[str, str]],
         bench = benchmarks[i] if benchmarks is not None else "all"
         for k in ("A1", "A2", "A3", "B1"):
             if not is_valid(sl[k]):
-                c[(k, sl[k], bench)] += 1
+                c[(k, canonical_outcome(sl[k]), bench)] += 1
     return dict(c)
+
+
+# ---------------------------------------------------------------------------
+# Reference labels at the join
+# ---------------------------------------------------------------------------
+USABLE, UNSURE, MISSING = "usable", "unsure", "missing"
+REFERENCE_STATUSES = (USABLE, UNSURE, MISSING)
+# Released primary labels that are a reference, in the judges' vocabulary or in the
+# benchmark's own (Successful, Unsuccessful, Unsure); matched case-insensitively.
+REFERENCE_VERDICTS = {"success": "success", "successful": "success",
+                      "failure": "failure", "unsuccessful": "failure"}
+UNSURE_VALUES = ("unsure",)
+
+
+def reference_status(y) -> Tuple[str, Optional[str]]:
+    """(status, verdict) for one released primary label [labels].
+
+    ('usable', 'success' or 'failure') for a success or failure label in any letter
+    case (ASCII only); ('unsure', None) for Unsure; ('missing', None) for None, NaN,
+    or an empty or blank string. Any other value raises ValueError, so an unknown
+    label is never guessed.
+    """
+    if y is None or (isinstance(y, float) and math.isnan(y)):
+        return MISSING, None
+    if not isinstance(y, str):
+        raise ValueError(f"reference label {y!r} is not a string")
+    if y.strip() == "":
+        return MISSING, None
+    if y.isascii():
+        t = y.lower()
+        if t in REFERENCE_VERDICTS:
+            return USABLE, REFERENCE_VERDICTS[t]
+        if t in UNSURE_VALUES:
+            return UNSURE, None
+    raise ValueError(f"unknown reference label {y!r}")
+
+
+def join_reference(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[str]]) -> dict:
+    """Discordance E and reference status per trajectory, at the join [labels].
+
+    For trajectory i with released primary label Y_i:
+      status_i = 'usable', 'unsure' or 'missing' (reference_status);
+      E_i = 1 if status_i = 'usable', A1_i is a verdict and A1_i != Y_i, else 0.
+    A task without a usable label has no reference. It stays in the panel and is
+    not reference-contradicted (E_i = 0), which is how the primary result counts it;
+    the secondary result leaves it out through its status. For an invalid A1, E_i = 0
+    and is ignored, as before. Nothing label-free depends on Y: the panel, D, R, the
+    selections and K are fixed before the join.
+
+    Returns {'E': list of 0 or 1, 'reference': list of statuses}, in panel order.
+    """
+    if len(Y) != len(slots):
+        raise ValueError("one reference label per trajectory is required")
+    E, status = [], []
+    for sl, y in zip(slots, Y):
+        st, verdict = reference_status(y)
+        a1 = canonical_outcome(sl["A1"])
+        e = int(st == USABLE and is_valid(a1) and a1 != verdict)
+        E.append(e)
+        status.append(st)
+    return {"E": E, "reference": status}
+
+
+def _reference_list(reference: Optional[Sequence[str]], n: int) -> List[str]:
+    """Reference statuses for n trajectories; None means every label is usable (plan v3.1)."""
+    if reference is None:
+        return [USABLE] * n
+    ref = list(reference)
+    if len(ref) != n:
+        raise ValueError("reference must give one status per trajectory")
+    bad = set(ref) - set(REFERENCE_STATUSES)
+    if bad:
+        raise ValueError(f"unknown reference statuses {bad}; use {REFERENCE_STATUSES}")
+    return ref
 
 
 # ---------------------------------------------------------------------------
@@ -1053,16 +1195,24 @@ def classify_size(delta_L: float, delta_U: float, delta_m: Optional[float], reac
 # ---------------------------------------------------------------------------
 # Partial regime
 # ---------------------------------------------------------------------------
-def permutation_p(design: Design, m: Mapping[str, int]) -> Fraction:
+def permutation_p(design: Design, m: Mapping[str, int],
+                  sizes: Optional[Mapping[str, int]] = None,
+                  weights: Optional[Mapping[str, Fraction]] = None) -> Fraction:
     """Exact within-D permutation p-value of Delta, as a Fraction.
 
     Holding E fixed and shuffling R within D = 0, (m_U2, m_U1, m_S) is
     multivariate hypergeometric given (n_U2, n_U1, n_S, m_D0). Delta is linear in
     these counts with exact weights delta_weights(design), so the enumeration
     is exact. Valid in every regime; in coverage it equals Fisher's p.
+
+    sizes and weights replace the stratum sizes and the weights; the secondary
+    result passes the counts of tasks with a usable label and its own weights.
     """
-    w = delta_weights(design)
-    nU2, nU1, nS = design.n_U2, design.n_U1, design.n_S
+    w = delta_weights(design) if weights is None else weights
+    if sizes is None:
+        nU2, nU1, nS = design.n_U2, design.n_U1, design.n_S
+    else:
+        nU2, nU1, nS = sizes["U2"], sizes["U1"], sizes["S"]
     t = m["U2"] + m["U1"] + m["S"]
     obs = w["U2"] * m["U2"] + w["U1"] * m["U1"] + w["S"] * m["S"]
     acc = 0
@@ -1071,20 +1221,29 @@ def permutation_p(design: Design, m: Mapping[str, int]) -> Fraction:
             c = t - a - b
             if w["U2"] * a + w["U1"] * b + w["S"] * c >= obs:
                 acc += math.comb(nU2, a) * math.comb(nU1, b) * math.comb(nS, c)
-    return Fraction(acc, math.comb(design.n_D0, t))
+    return Fraction(acc, math.comb(nU2 + nU1 + nS, t))
 
 
 def partial_bootstrap(design: Design, m: Mapping[str, int], B: int = 10000, seed: int = 0,
-                      level: float = 0.95) -> dict:
+                      level: float = 0.95, sizes: Optional[Mapping[str, int]] = None,
+                      weights: Optional[Mapping[str, Fraction]] = None,
+                      N_per100: Optional[int] = None) -> dict:
     """APPROXIMATE Jeffreys-smoothed parametric bootstrap interval for G_partial.
 
     G_partial = (100/N) sum_j w_j n_j p_j over j in {U2, U1, S}, w = delta_weights.
     Implementation choice: smoothed plug-in p~_j = (m_j + 1/2)/(n_j + 1); B draws of
     m*_j ~ Binomial(n_j, p~_j), independent across strata; percentile interval of
     (100/N) sum_j w_j m*_j. No threshold claim is ever made from it.
+
+    sizes, weights and N_per100 replace n_j, w_j and N; the secondary result passes
+    the counts of tasks with a usable label, its own weights and N_Y.
     """
-    w = {k: float(v) for k, v in delta_weights(design).items()}
-    n = {"U2": design.n_U2, "U1": design.n_U1, "S": design.n_S}
+    w = {k: float(v) for k, v in (delta_weights(design) if weights is None else weights).items()}
+    if sizes is None:
+        n = {"U2": design.n_U2, "U1": design.n_U1, "S": design.n_S}
+    else:
+        n = {j: sizes[j] for j in ("U2", "U1", "S")}
+    den = design.N_per100 if N_per100 is None else N_per100
     rng = np.random.default_rng(seed)
     tot = np.zeros(B)
     for j in ("U2", "U1", "S"):
@@ -1092,9 +1251,9 @@ def partial_bootstrap(design: Design, m: Mapping[str, int], B: int = 10000, seed
             continue
         pt = (m[j] + 0.5) / (n[j] + 1.0)
         tot += w[j] * rng.binomial(n[j], pt, size=B)
-    tot *= 100.0 / design.N_per100
+    tot *= 100.0 / den
     q = (1 - level) / 2
-    point = 100.0 / design.N_per100 * sum(w[j] * m[j] for j in ("U2", "U1", "S"))
+    point = 100.0 / den * sum(w[j] * m[j] for j in ("U2", "U1", "S"))
     return {"G_partial_hat": point, "lower": float(np.quantile(tot, q)),
             "upper": float(np.quantile(tot, 1 - q)), "B": B, "seed": seed,
             "label": "approximate"}
@@ -1133,6 +1292,85 @@ def existence_fragility(design: Design, counts: Mapping[str, int], reject: bool,
                     if (permutation_p(design, {"U2": a2, "U1": a1, "S": c}) <= thr) != reject:
                         return k
     return None
+
+
+# ---------------------------------------------------------------------------
+# Panel: one trajectory per task by default, one task per template as sensitivity
+# ---------------------------------------------------------------------------
+PANEL_UNITS = ("task", "template")
+PANEL_UNIT = "task"     # the default panel; "template" gives the labelled sensitivity panel
+
+
+def select_panel(runs: Sequence[Mapping[str, object]], seed: int, unit: str = PANEL_UNIT) -> List[str]:
+    """Label-free choice of the panel from the eligible agent runs.
+
+    runs: one mapping per eligible agent run, with 'run_id', 'task_id' (the
+    normalized task id), 'template_id' and 'passes' (True when the run passes the
+    evidence completeness and fit checks). Eligibility (split, benchmark and
+    template exclusions) is settled before this call, and no label is read. When a
+    benchmark's template ids cannot be recovered, pass each task id as its own
+    template id.
+
+    unit='task', the default panel: for each task in task-id order, its runs are
+    sorted by run id and permuted with the generator of
+    SeedSequence(seed, spawn_key=(4,)); the first run that passes is taken. A task
+    with no passing run is not in the panel. Tasks that share a template all stay.
+
+    unit='template', the labelled sensitivity panel: the task panel is built
+    first; then, for each template in template-id order, its eligible tasks are
+    sorted by task id and permuted with the generator of
+    SeedSequence(seed, spawn_key=(5,)), and the first task that has a panel run is
+    taken with that run. For the same seed the template panel is therefore a
+    subset of the task panel.
+
+    Both streams are independent of the operator's draw and of the
+    one-agreeing-item template check. Returns the chosen run ids in task-id order.
+    """
+    if unit not in PANEL_UNITS:
+        raise ValueError(f"unit must be one of {PANEL_UNITS}")
+    run_ids = [str(r["run_id"]) for r in runs]
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError("run ids must be unique")
+    by_task: Dict[str, List[Mapping[str, object]]] = defaultdict(list)
+    template_of: Dict[str, str] = {}
+    for r in runs:
+        t, tpl = str(r["task_id"]), str(r["template_id"])
+        if template_of.setdefault(t, tpl) != tpl:
+            raise ValueError(f"task {t!r} is listed under two templates")
+        if not isinstance(r["passes"], bool):
+            raise ValueError("'passes' must be True or False")
+        by_task[t].append(r)
+    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(4,)))
+    chosen: Dict[str, str] = {}
+    for t in sorted(by_task):
+        members = sorted(by_task[t], key=lambda r: str(r["run_id"]))
+        for k in rng.permutation(len(members)):
+            if members[int(k)]["passes"]:
+                chosen[t] = str(members[int(k)]["run_id"])
+                break
+    if unit == "task":
+        return [chosen[t] for t in sorted(chosen)]
+    tasks_of: Dict[str, List[str]] = defaultdict(list)
+    for t, tpl in template_of.items():
+        tasks_of[tpl].append(t)
+    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(5,)))
+    picked = []
+    for tpl in sorted(tasks_of):
+        members = sorted(tasks_of[tpl])
+        for k in rng.permutation(len(members)):
+            if members[int(k)] in chosen:
+                picked.append(members[int(k)])
+                break
+    return [chosen[t] for t in sorted(picked)]
+
+
+def template_multiplicities(templates: Sequence[str]) -> dict:
+    """Label-free: how many panel tasks each template holds, for the panel manifest."""
+    c = Counter(str(t) for t in templates)
+    mult = sorted(c.values(), reverse=True)
+    return {"n_tasks": sum(mult), "n_templates": len(c), "max_multiplicity": mult[0] if mult else 0,
+            "tasks_sharing": sum(x for x in mult if x > 1),
+            "histogram": dict(sorted(Counter(mult).items()))}
 
 
 # ---------------------------------------------------------------------------
@@ -1203,17 +1441,49 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
             m: float = MATERIAL_M, boot_B: int = 10000, boot_seed: int = 0,
             s_override: Optional[int] = None, N_ref: Optional[int] = None,
             ids: Optional[Sequence[str]] = None, method: Optional[str] = None,
-            fragility: bool = True) -> dict:
-    """Primary analysis of one panel [labels]. Returns a result dict for report()."""
+            fragility: bool = True, reference: Optional[Sequence[str]] = None,
+            N_Y_ref: Optional[int] = None,
+            benchmarks: Optional[Sequence[str]] = None) -> dict:
+    """Primary and secondary analysis of one panel [labels]. Returns a result dict for report().
+
+    reference gives each trajectory's reference status ('usable', 'unsure' or
+    'missing', as join_reference returns it); None means every label is usable,
+    which reproduces plan v3.1 exactly. E must be 0 for every task without a usable
+    label (except invalid A1, where E is ignored), since such a task cannot be
+    reference-discordant.
+
+    Primary result, per 100 panel tasks. Every formula is the plan v3.1 formula,
+    with E_i = 0 for a task without a usable label (not reference-contradicted):
+      m_j = sum of E over stratum j; m1 = m_U2 + m_U1, m0 = m_S; n1, n0, N, L as
+      in the label-free design;
+      G_hat = 100 Delta / N; in coverage G_hat = (100/N) L (m1/n1 - m0/n0);
+      G = (100/N) L delta with delta = p1 - p0, p1 and p0 the rates of
+      reference-contradicted first verdicts in U and S;
+      existence: one-sided Fisher exact p = P(M1 >= m1 | n1, n0, m1 + m0);
+      interval for delta from (m1 of n1, m0 of n0); delta_m = m N / (100 L).
+    The secondary result, per 100 tasks with a usable label, is in res['secondary']
+    (secondary_analysis), and the label coverage in res['coverage']
+    (reference_coverage). N_Y_ref holds the secondary per-100 denominator, as N_ref
+    does for the primary; benchmarks only feed the coverage table.
+    """
     method = INTERVAL_METHOD if method is None else method
     labels = list(labels)
     E = [int(e) for e in E]
     if len(labels) != len(E):
         raise ValueError("labels and E differ in length")
+    ref = _reference_list(reference, len(labels))
+    for i, (l, e, r) in enumerate(zip(labels, E, ref)):
+        if r != USABLE and l not in ("I", "EXCL") and e != 0:
+            raise ValueError(f"trajectory {i} has no usable reference label ({r}) but E = {e}; "
+                             "a task without a reference is never reference-discordant")
+    if benchmarks is not None and len(benchmarks) != len(labels):
+        raise ValueError("benchmarks must give one entry per trajectory")
     keep = [i for i, l in enumerate(labels) if l != "EXCL"]
     labels_k = [labels[i] for i in keep]
     E_k = [E[i] for i in keep]
+    ref_k = [ref[i] for i in keep]
     ids_k = [ids[i] for i in keep] if ids is not None else None
+    bench_k = [benchmarks[i] for i in keep] if benchmarks is not None else None
     design = Design.from_labels(labels_k, s_override=s_override, N_ref=N_ref)
     counts = {j: sum(e for l, e in zip(labels_k, E_k) if l == j) for j in ("G1", "U2", "U1", "S")}
     lf = label_free_summary(design, m)
@@ -1257,7 +1527,180 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
         res["size"] = None
     if fragility and res["existence"] is not None:
         res["existence"]["fragility"] = existence_fragility(design, counts, res["existence"]["reject"])
+    res["reference_supplied"] = reference is not None
+    res["secondary"] = secondary_analysis(design, labels_k, ref_k, counts, m=m, method=method,
+                                          boot_B=boot_B, boot_seed=boot_seed, N_Y_ref=N_Y_ref)
+    res["coverage"] = reference_coverage(labels_k, ref_k, design, benchmarks=bench_k,
+                                         draw=res.get("draw"))
     return res
+
+
+def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequence[str],
+                       counts: Mapping[str, int], m: float = MATERIAL_M,
+                       method: Optional[str] = None, boot_B: int = 10000, boot_seed: int = 0,
+                       N_Y_ref: Optional[int] = None) -> dict:
+    """Secondary result: the gain per 100 tasks with a usable label [labels].
+
+    The label-free design, the regime and the selections stay those of the full
+    panel; only tasks with a usable label enter the rates. Notation:
+      Y            the panel tasks with a usable label; N_Y = |Y| (all strata, I included);
+      n_jY         the tasks of stratum j in Y; n1Y = n_U2Y + n_U1Y, n0Y = n_SY;
+      m_j          discordant first verdicts in stratum j (only tasks in Y can be
+                   discordant, so m_j is the primary count); m1 = m_U2 + m_U1, m0 = m_S;
+      w_j          the full-panel weights, Delta = sum_j w_j m_j (delta_weights);
+      B_Y          = sum_j w_j n_jY, how many more tasks with a usable label
+                   instability-first review reviews than disagreement-first review.
+                   B_Y = 0 when every label is usable (equal budgets) and whenever the
+                   usable shares of the agreeing strata are equal.
+    Secondary gain, realized:
+      G_hat_Y = (100/N_Y) (Delta - B_Y m0/n0Y) = (100/N_Y) sum_j w'_j m_j,
+      with w'_j = w_j for U2 and U1 and w'_S = w_S - B_Y/n0Y: the realized gain per 100
+      tasks with a usable label at equal review counts among those tasks, the B_Y extra
+      reviews being valued at the stable usable-label rate m0/n0Y.
+    Coverage regime (U2 and U1 are reviewed in full, w_U = L/n1, w_S = -L/n0):
+      L_Y = n1Y (n_D0 - s) / n_D0 = L n1Y / n1;
+      G_hat_Y = (100/N_Y) L_Y (m1/n1Y - m0/n0Y);
+      G_Y = (100/N_Y) L_Y delta_Y, with delta_Y = p1Y - p0Y the discordance rates among
+      unstable and stable agreeing tasks with a usable label;
+      existence: one-sided Fisher exact p = P(M1 >= m1 | n1Y, n0Y, m1 + m0), which is
+      also the exact permutation p of G_hat_Y among agreeing tasks with a usable label;
+      interval for delta_Y: the frozen exact score interval from (m1 of n1Y, m0 of n0Y),
+      grid k/100 plus 0 and delta_mY; G_Y interval = (100 L_Y/N_Y) (delta_L, delta_U);
+      delta_mY = m N_Y / (100 L_Y);
+      100 Delta / N_Y = G_hat_Y + (100 L / N_Y) (n1Y/n1 - n0Y/n0) (m0/n0Y): the realized
+      Delta per 100 tasks with a usable label also carries the difference in usable
+      shares between U and S, which G_hat_Y removes. Both are reported.
+    Partial regime: existence by the exact permutation p of sum_j w'_j m_j with
+    (m_U2, m_U1, m_S) multivariate hypergeometric given (n_U2Y, n_U1Y, n_SY, m_D0); size by
+    the approximate bootstrap of (100/N_Y) sum_j w'_j m*_j with m*_j ~ Binomial(n_jY, p~_j);
+    no threshold claim.
+    With every label usable all of this equals the primary result exactly.
+    Not estimable (reported, never imputed) when N_Y = 0, n1Y = 0 or n0Y = 0. In the
+    degenerate regimes Delta = 0 identically and nothing is tested.
+    """
+    method = INTERVAL_METHOD if method is None else method
+    nY = {j: sum(1 for l, r in zip(labels, reference) if l == j and r == USABLE) for j in STRATA}
+    N_Y = sum(nY.values())
+    den = N_Y if N_Y_ref is None else N_Y_ref
+    n1Y, n0Y = nY["U2"] + nY["U1"], nY["S"]
+    m1, m0 = counts["U2"] + counts["U1"], counts["S"]
+    Delta = expected_captures(design, counts)["Delta"]
+    out = {"N_Y": N_Y, "N_Y_per100": den, "n_Y": nY, "n1_Y": n1Y, "n0_Y": n0Y, "m1": m1, "m0": m0,
+           "regime": design.regime,
+           "Delta_per100_usable": None if den == 0 else float(Delta) * 100 / den,
+           "existence": None, "size": None, "not_estimable": None}
+    reg = design.regime
+    if reg not in ("COVERAGE", "PARTIAL"):
+        return out
+    if den == 0:
+        out["not_estimable"] = "no panel task has a usable label"
+    elif n1Y == 0:
+        out["not_estimable"] = "no unstable agreeing task has a usable label"
+    elif n0Y == 0:
+        out["not_estimable"] = "no stable agreeing task has a usable label"
+    if out["not_estimable"] is not None:
+        return out
+    w = delta_weights(design)
+    B_Y = w["U2"] * nY["U2"] + w["U1"] * nY["U1"] + w["S"] * nY["S"]
+    w_adj = {"U2": w["U2"], "U1": w["U1"], "S": w["S"] - B_Y / n0Y}
+    G_hat_exact = Fraction(100) * sum((w_adj[j] * counts[j] for j in ("U2", "U1", "S")),
+                                      Fraction(0)) / den
+    out.update(B_Y=B_Y, weights=w_adj, G_hat_exact=G_hat_exact)
+    if reg == "COVERAGE":
+        L_Y = Fraction(n1Y * (design.n_D0 - design.s), design.n_D0)
+        dmY = Fraction(m) * den / (100 * L_Y)
+        reachable = dmY < 1
+        p = fisher_one_sided(m1, n1Y, m0, n0Y)
+        out["existence"] = {"test": "one-sided Fisher exact on tasks with a usable label",
+                            "p": p, "reject": p <= ALPHA}
+        extra = [0.0] + ([float(dmY)] if reachable else [])
+        ci = ExactScoreDiff(n1Y, n0Y, method=method).interval(m1, m0, extra_grid=extra)
+        scale = 100.0 * float(L_Y) / den
+        dL, dU = ci["delta_L"], ci["delta_U"]
+        dhat = m1 / n1Y - m0 / n0Y
+        out.update(L_Y=L_Y, delta_m_Y=dmY, reachable_Y=reachable,
+                   coverage_term=Fraction(100) * design.L / den
+                   * (Fraction(n1Y, design.n1) - Fraction(n0Y, design.n0)) * Fraction(m0, n0Y))
+        out["size"] = {"delta_hat": dhat, "delta_L": dL, "delta_U": dU,
+                       "G_L": scale * dL, "G_U": scale * dU, "G_hat": scale * dhat,
+                       "class": classify_size(dL, dU, float(dmY), reachable)}
+    else:
+        sizes = {j: nY[j] for j in ("U2", "U1", "S")}
+        p = permutation_p(design, counts, sizes=sizes, weights=w_adj)
+        out["existence"] = {"test": "exact permutation p-value among agreeing tasks with a usable label",
+                            "p": float(p), "reject": p <= Fraction(1, 40)}
+        out["size"] = {"partial": partial_bootstrap(design, counts, boot_B, boot_seed, sizes=sizes,
+                                                    weights=w_adj, N_per100=den),
+                       "class": "no threshold claim (partial regime)"}
+    return out
+
+
+REVIEW_GROUPS = (("invalid first verdict", ("I",)), ("disagreement", ("G1",)),
+                 ("unstable agreeing", ("U2", "U1")), ("stable agreeing", ("S",)))
+POLICY_NAMES = {"RAND": "Random", "DIS": "Disagreement-first", "AUG": "Instability-first"}
+
+
+def selection_probabilities(design: Design, labels: Sequence[str]) -> Dict[str, List[Fraction]]:
+    """Each task's exact probability of review at budget K, per policy (label-free).
+
+    The probability of a task in layout stratum j is min(n_j, max(0, K - N_<j)) / n_j,
+    the uniform tie-breaking of the plan; the probabilities of each policy sum to K.
+    """
+    key = {"RAND": lambda l: "I" if l == "I" else "V",
+           "DIS": lambda l: l if l in ("I", "G1") else "G0",
+           "AUG": lambda l: l}
+    out = {}
+    for pol in ("RAND", "DIS", "AUG"):
+        lay = _layout(design, pol)
+        frac = dict(zip([k for k, _ in lay], review_fractions([n for _, n in lay], design.K)))
+        out[pol] = [frac[key[pol](l)] for l in labels]
+    return out
+
+
+def reference_coverage(labels: Sequence[str], reference: Sequence[str], design: Design,
+                       benchmarks: Optional[Sequence[str]] = None,
+                       draw: Optional[dict] = None) -> dict:
+    """Coverage of Unsure and missing reference labels [labels: statuses only].
+
+    These tasks are unknown: they are never counted as correct verdicts. Counts are
+    given overall and by review group: invalid first verdict (I), disagreement (G1),
+    unstable agreeing (U2 and U1) and stable agreeing (S); and by benchmark when
+    benchmarks are given. For each policy, the expected number of such tasks it
+    selects for review is sum_i pi_P(i) 1(status_i = s) over the group, with pi_P the
+    exact review probability (selection_probabilities); when a seeded draw is given,
+    the draw's own counts are added.
+    """
+    labels = list(labels)
+    reference = list(reference)
+    groups = (("all", STRATA),) + REVIEW_GROUPS
+
+    def tally(idx):
+        st = Counter(reference[i] for i in idx)
+        return {"tasks": len(idx), "usable": st[USABLE], "unsure": st[UNSURE], "missing": st[MISSING]}
+
+    members = {name: [i for i, l in enumerate(labels) if l in strata] for name, strata in groups}
+    table = {name: tally(idx) for name, idx in members.items()}
+    probs = selection_probabilities(design, labels)
+    selected = {}
+    for pol in ("RAND", "DIS", "AUG"):
+        pr = probs[pol]
+        selected[pol] = {name: {"tasks": sum((pr[i] for i in idx), Fraction(0)),
+                                UNSURE: sum((pr[i] for i in idx if reference[i] == UNSURE), Fraction(0)),
+                                MISSING: sum((pr[i] for i in idx if reference[i] == MISSING), Fraction(0))}
+                         for name, idx in members.items()}
+    out = {"groups": table, "selected_expected": selected, "selected_draw": None, "by_benchmark": None}
+    if draw is not None:
+        out["selected_draw"] = {}
+        for pol in ("RAND", "DIS", "AUG"):
+            chosen = {int(i) for i in draw["reviewed"][pol]}
+            out["selected_draw"][pol] = {
+                name: {UNSURE: sum(1 for i in idx if i in chosen and reference[i] == UNSURE),
+                       MISSING: sum(1 for i in idx if i in chosen and reference[i] == MISSING)}
+                for name, idx in members.items()}
+    if benchmarks is not None:
+        out["by_benchmark"] = {b: tally([i for i in range(len(labels)) if benchmarks[i] == b])
+                               for b in sorted(set(benchmarks))}
+    return out
 
 
 def _f(x, nd=4):
@@ -1276,12 +1719,12 @@ def _g_interval_text(lo: float, hi: float, dlo: float, dhi: float) -> str:
     return f"{left}{_f(lo)}, {_f(hi)}{right}"
 
 
-def report(res: dict) -> str:
-    """Human-readable report of one analysis. Existence and size are printed separately."""
+def _primary_lines(res: dict) -> List[str]:
+    """Report lines of the primary result. Existence and size are printed separately."""
     lf, cap = res["label_free"], res["captures"]
     reg = lf["regime"]
     out = []
-    out.append("Primary analysis, statistical analysis plan v3.1")
+    out.append(f"Primary analysis, statistical analysis plan {PLAN_VERSION}")
     out.append("")
     out.append("Label-free design (committed before the join)")
     out.append(f"  N = {lf['N']}, invalid A1 n_inv = {lf['n_inv']}, valid N_V = {lf['N_V']}")
@@ -1301,6 +1744,12 @@ def report(res: dict) -> str:
     else:
         # L and delta_m are coverage-regime quantities.
         out.append(f"  regime: {reg}")
+    cov = res.get("coverage")
+    if cov is not None:
+        g = cov["groups"]["all"]
+        out.append(f"  primary result per 100 panel tasks (N = {lf['N']}); "
+                   f"{g['unsure'] + g['missing']} tasks without a usable reference label "
+                   f"(Unsure {g['unsure']}, missing {g['missing']}) count as not reference-contradicted")
     out.append("")
     out.append("Expected captures (exact, tie-averaged)")
     out.append(f"  E[C_Rand] = {_f(cap['RAND'])}, E[C_DIS] = {_f(cap['DIS'])}, E[C_AUG] = {_f(cap['AUG'])}")
@@ -1316,17 +1765,17 @@ def report(res: dict) -> str:
         out.append("Existence question: not run. n1 = 0, so Delta = 0 identically.")
         out.append("  Finding: no instability among agreeing verdicts.")
         out.append("Size question: not applicable.")
-        return "\n".join(out)
+        return out
     if reg == "DEGENERATE-CAP":
         out.append("Existence question: not run. The cap binds (s = n_D0): both policies "
                    "review all agreeing items, so Delta = 0 identically.")
         out.append("Size question: not applicable.")
-        return "\n".join(out)
+        return out
     if reg == "DEGENERATE-NOSLICE":
         out.append("Existence question: not run. s = 0: neither policy reviews any agreeing "
                    "item, so Delta = 0 identically.")
         out.append("Size question: not applicable.")
-        return "\n".join(out)
+        return out
     ex = res["existence"]
     out.append("EXISTENCE QUESTION: is there any positive gain?")
     if reg == "COVERAGE":
@@ -1420,6 +1869,99 @@ def report(res: dict) -> str:
         out.append("  No threshold claim is made in either direction in this regime.")
     out.append("")
     out.append("The two questions are answered separately and are not merged into one verdict.")
+    return out
+
+
+def _secondary_lines(res: dict) -> List[str]:
+    """Report lines of the secondary result, per 100 tasks with a usable label."""
+    sec = res.get("secondary")
+    if sec is None:
+        return []
+    lf = res["label_free"]
+    out = [f"SECONDARY RESULT: gain per 100 tasks with a usable label "
+           f"(N_Y = {sec['N_Y']} of N = {lf['N']})"]
+    if sec["N_Y_per100"] != sec["N_Y"]:
+        out.append(f"  per-100 denominator held at the primary N_Y = {sec['N_Y_per100']}")
+    out.append("  Tasks without a usable reference label are left out of the rates. The label-free "
+               "design, the regime and the selections are those of the full panel.")
+    out.append(f"  usable labels among agreeing tasks: unstable n1Y = {sec['n1_Y']} of {lf['n1']}, "
+               f"stable n0Y = {sec['n0_Y']} of {lf['n0']}")
+    dpu = sec["Delta_per100_usable"]
+    if sec["regime"] not in ("COVERAGE", "PARTIAL"):
+        out.append(f"  Not run: Delta = 0 identically in regime {sec['regime']}.")
+        return out
+    if sec["not_estimable"] is not None:
+        out.append(f"  Not estimable: {sec['not_estimable']}. Nothing is imputed.")
+        if dpu is not None:
+            out.append(f"  Realized Delta per 100 tasks with a usable label: {_f(dpu)}")
+        return out
+    ex, sz = sec["existence"], sec["size"]
+    verdict = "REJECT H0" if ex["reject"] else "do not reject H0"
+    if sec["regime"] == "COVERAGE":
+        out.append(f"  Existence: one-sided Fisher exact test of p1Y = p0Y against p1Y > p0Y on tasks "
+                   f"with a usable label: m1 = {sec['m1']} of n1Y = {sec['n1_Y']}, m0 = {sec['m0']} of "
+                   f"n0Y = {sec['n0_Y']}; p = {ex['p']:.6g}; {verdict}")
+        out.append(f"  Size: L_Y = {_f(sec['L_Y'])}; delta_Y_hat = {_f(sz['delta_hat'])}; interval for δ_Y: "
+                   f"{_interval_text(sz['delta_L'], sz['delta_U'])}")
+        out.append(f"  G_hat_Y = {_f(sz['G_hat'])} per 100 tasks with a usable label; interval for G_Y: "
+                   f"{_g_interval_text(sz['G_L'], sz['G_U'], sz['delta_L'], sz['delta_U'])}; "
+                   f"δ_mY = {_f(sec['delta_m_Y'])}; size: {sz['class']}")
+        out.append(f"  Realized Delta per 100 tasks with a usable label: {_f(dpu)} = G_hat_Y + "
+                   f"{_f(sec['coverage_term'])} from the difference in usable shares between "
+                   f"unstable and stable agreeing tasks")
+    else:
+        b = sz["partial"]
+        out.append(f"  Existence: exact permutation p-value among agreeing tasks with a usable label: "
+                   f"p = {ex['p']:.6g}; {verdict}")
+        out.append(f"  G_partial_hat_Y = {_f(b['G_partial_hat'])} per 100 tasks with a usable label; "
+                   f"APPROXIMATE bootstrap interval [{_f(b['lower'])}, {_f(b['upper'])}] "
+                   f"(B = {b['B']}, seed {b['seed']}); no threshold claim in this regime")
+        out.append(f"  Realized Delta per 100 tasks with a usable label: {_f(dpu)}")
+    out.append("  The primary result, per 100 panel tasks, is the one the threshold refers to; the "
+               "secondary result is reported beside it.")
+    return out
+
+
+def _coverage_lines(res: dict) -> List[str]:
+    """Report lines for the coverage of Unsure and missing reference labels."""
+    cov = res.get("coverage")
+    if cov is None:
+        return []
+    out = ["REFERENCE COVERAGE: Unsure and missing labels",
+           "  These tasks are unknown, not correct verdicts. The primary result counts them as "
+           "not reference-contradicted; the secondary result leaves them out.",
+           "  group | tasks | usable | Unsure | missing"]
+    for name, g in cov["groups"].items():
+        out.append(f"  {name} | {g['tasks']} | {g['usable']} | {g['unsure']} | {g['missing']}")
+    names = list(cov["groups"])
+    out.append("  Selected for review, expected number (exact, tie-averaged), Unsure / missing, "
+               "by group: " + ", ".join(names))
+    for pol in ("RAND", "DIS", "AUG"):
+        cells = [f"{_f(cov['selected_expected'][pol][n][UNSURE], 2)} / "
+                 f"{_f(cov['selected_expected'][pol][n][MISSING], 2)}" for n in names]
+        out.append(f"  {POLICY_NAMES[pol]}: " + "; ".join(cells))
+    if cov["selected_draw"] is not None:
+        out.append("  One operator's draw, Unsure / missing selected, by the same groups:")
+        for pol in ("RAND", "DIS", "AUG"):
+            cells = [f"{cov['selected_draw'][pol][n][UNSURE]} / {cov['selected_draw'][pol][n][MISSING]}"
+                     for n in names]
+            out.append(f"  {POLICY_NAMES[pol]}: " + "; ".join(cells))
+    if cov["by_benchmark"] is not None:
+        out.append("  benchmark | tasks | usable | Unsure | missing")
+        for b, g in cov["by_benchmark"].items():
+            out.append(f"  {b} | {g['tasks']} | {g['usable']} | {g['unsure']} | {g['missing']}")
+    return out
+
+
+def report(res: dict) -> str:
+    """Human-readable report of one analysis: primary, secondary, then label coverage.
+
+    Existence and size are printed separately and never merged into one verdict.
+    """
+    out = _primary_lines(res)
+    for extra in (_secondary_lines(res), _coverage_lines(res)):
+        if extra:
+            out += [""] + extra
     return "\n".join(out)
 
 
@@ -1446,19 +1988,24 @@ def analyze_with_sensitivities(slots: Sequence[Mapping[str, str]], E: Sequence[i
     Every sensitivity analysis holds s at its primary value (capped at
     the new n_D0) and the per-100 denominator N at the primary N, so K changes only
     through reclassified items and the analysis measures the invalid rule, not a
-    budget change.
+    budget change. The secondary per-100 denominator N_Y is held the same way.
+    reference and benchmarks, when given, follow every analysis; the coverage table
+    by benchmark is built for the primary analysis only.
     """
     kw = dict(kw)
     kw.pop("s_override", None)
     kw.pop("N_ref", None)
+    kw.pop("N_Y_ref", None)
+    benchmarks = kw.pop("benchmarks", None)
     lf0 = derive_label_free(slots)
-    prim = analyze(lf0["stratum"], E, **kw)
+    prim = analyze(lf0["stratum"], E, benchmarks=benchmarks, **kw)
     s0, N0 = prim["label_free"]["s"], prim["label_free"]["N"]
+    NY0 = prim["secondary"]["N_Y"]
     out = [("primary", prim)]
     skw = {k: v for k, v in kw.items() if k not in ("seed",)}
     for name, opts in SENSITIVITY_VARIANTS:
         lf = derive_label_free(slots, **opts)
-        out.append((name, analyze(lf["stratum"], E, s_override=s0, N_ref=N0, **skw)))
+        out.append((name, analyze(lf["stratum"], E, s_override=s0, N_ref=N0, N_Y_ref=NY0, **skw)))
     return out
 
 
@@ -1468,12 +2015,34 @@ def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
                   templates: Optional[Sequence[str]] = None,
                   provenance: Optional[dict] = None,
                   seed: Optional[int] = None, m: float = MATERIAL_M,
-                  method: Optional[str] = None, boot_B: int = 10000, boot_seed: int = 0) -> dict:
-    """Everything the frozen report needs: primary analysis, labelled
-    sensitivity analyses, invalid counts, repeat-observation counts, template
-    sensitivity and A1 provenance."""
+                  method: Optional[str] = None, boot_B: int = 10000, boot_seed: int = 0,
+                  reference: Optional[Sequence[str]] = None,
+                  template_panel: Optional[Sequence[str]] = None) -> dict:
+    """Everything the frozen report needs: primary and secondary results, label
+    coverage, labelled sensitivity analyses, invalid counts, repeat-observation
+    counts, template sensitivity and A1 provenance.
+
+    The panel is the default one: one trajectory per task. reference gives each
+    trajectory's reference status (join_reference). templates gives each panel
+    task's template id, for the multiplicities and the one-agreeing-item check.
+    template_panel lists the trajectory ids of the one-task-per-template panel,
+    chosen label-free before evaluation (select_panel with unit='template'); the
+    full analysis is then repeated on it as a labelled sensitivity analysis, with
+    its own N, s and K, since it is a different panel.
+    """
+    sub = None
+    if template_panel is not None:
+        if ids is None:
+            raise ValueError("template_panel needs the trajectory ids")
+        pos = {t: i for i, t in enumerate(ids)}
+        if any(t not in pos for t in template_panel) or len(set(template_panel)) != len(template_panel):
+            raise ValueError("template_panel must list distinct trajectory ids of this panel")
+        sub = sorted(pos[t] for t in template_panel)
+    if templates is not None and len(templates) != len(slots):
+        raise ValueError("templates must give one template id per trajectory")
     kw = dict(m=m, method=method, boot_B=boot_B, boot_seed=boot_seed)
-    sens = analyze_with_sensitivities(slots, E, seed=seed, ids=ids, **kw)
+    sens = analyze_with_sensitivities(slots, E, seed=seed, ids=ids, reference=reference,
+                                      benchmarks=benchmarks, **kw)
     lf = derive_label_free(slots)
     g0 = np.isin(lf["stratum"], ["U2", "U1", "S"])
     rep = {"both_repeats_invalid": int(((lf["R_unobserved"] == 1) & g0).sum()),
@@ -1481,10 +2050,18 @@ def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
            "one_repeat_invalid_flip": int(((lf["R_one_missing"] == 1) & (lf["R"] >= 1) & g0).sum())}
     out = {"primary": sens[0][1], "sensitivities": sens[1:], "invalid_counts": invalid_counts(slots, benchmarks),
            "repeat_flags": rep, "provenance": provenance, "templates": None,
+           "template_multiplicities": None, "template_panel": None,
            "n_trajectories": len(slots)}
     if templates is not None:
+        out["template_multiplicities"] = template_multiplicities(templates)
         out["templates"] = template_sensitivity(list(lf["stratum"]), E, templates, ids,
                                                 seed=0 if seed is None else seed, method=method)
+    if sub is not None:
+        ref = _reference_list(reference, len(slots))
+        lf_t = derive_label_free([slots[i] for i in sub])
+        res_t = analyze(lf_t["stratum"], [E[i] for i in sub], reference=[ref[i] for i in sub],
+                        ids=[ids[i] for i in sub], **kw)
+        out["template_panel"] = {"n": len(sub), "result": res_t}
     return out
 
 
@@ -1503,6 +2080,19 @@ def _brief(name: str, r: dict) -> List[str]:
                      f"size: {sz['class']}")
     elif r["size"] is not None:
         lines.append(f"    size: {r['size']['class']}")
+    sec = r.get("secondary")
+    if sec is not None and sec["regime"] in ("COVERAGE", "PARTIAL"):
+        if sec["not_estimable"] is not None:
+            lines.append(f"    secondary (per 100 tasks with a usable label, N_Y = {sec['N_Y']}): "
+                         f"not estimable, {sec['not_estimable']}")
+        else:
+            txt = (f"    secondary (per 100 tasks with a usable label, N_Y = {sec['N_Y']}): existence p = "
+                   f"{sec['existence']['p']:.6g} ({'reject' if sec['existence']['reject'] else 'do not reject'})")
+            if "delta_L" in sec["size"]:
+                sz = sec["size"]
+                txt += (f"; interval for δ_Y {_interval_text(sz['delta_L'], sz['delta_U'])}; for G_Y "
+                        f"{_g_interval_text(sz['G_L'], sz['G_U'], sz['delta_L'], sz['delta_U'])}")
+            lines.append(txt)
     return lines
 
 
@@ -1543,8 +2133,9 @@ def panel_report(panel: dict) -> str:
                f"{rf['one_repeat_invalid_no_flip']}")
     out.append(f"  agreeing items with one repeat INVALID and an observed flip: {rf['one_repeat_invalid_flip']}")
     out.append("")
-    out.append(f"Sensitivity analyses (labelled; s = {lf['s']} and the per-100 denominator N = {lf['N']} "
-               f"are held at their primary values, s capped at n_D0)")
+    NY = prim["secondary"]["N_Y"] if prim.get("secondary") is not None else lf["N"]
+    out.append(f"Sensitivity analyses (labelled; s = {lf['s']} and the per-100 denominators N = {lf['N']} "
+               f"and N_Y = {NY} are held at their primary values, s capped at n_D0)")
     for name, r in panel["sensitivities"]:
         out.extend(_brief(name, r))
     out.append("")
@@ -1559,8 +2150,22 @@ def panel_report(panel: dict) -> str:
     tm = panel.get("templates")
     out.append("")
     out.append("Template sensitivity (labelled)")
+    out.append(f"  The primary panel keeps one trajectory per task (N = {lf['N']}), so tasks that share "
+               "a template stay in it and can be correlated; the one-task-per-template panel is the "
+               "labelled sensitivity analysis for that dependence.")
+    mult = panel.get("template_multiplicities")
+    if mult is not None:
+        out.append(f"  Panel tasks: {mult['n_tasks']} in {mult['n_templates']} templates; largest template "
+                   f"holds {mult['max_multiplicity']}; {mult['tasks_sharing']} tasks share a template.")
+    tp = panel.get("template_panel")
+    if tp is None:
+        out.append("  One-task-per-template panel: not supplied with the panel manifest.")
+    else:
+        out.append("  One-task-per-template panel (chosen label-free before evaluation; its own N, s and K):")
+        out.extend("  " + x for x in _brief("one task per template", tp["result"]))
     if tm is None:
-        out.append("  Not run: no template ids were supplied with the panel manifest.")
+        out.append("  One agreeing item per template: not run, no template ids were supplied with the "
+                   "panel manifest.")
     else:
         out.append(f"  Agreeing items: {tm['n_G0']} in {tm['n_templates']} templates; largest template "
                    f"holds {tm['max_multiplicity']}; {tm['items_sharing']} items share a template.")
