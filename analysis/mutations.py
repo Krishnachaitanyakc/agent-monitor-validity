@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Deliberate breaks of the analysis that its unit tests must catch.
+
+Each mutation copies the analysis folder to a temporary folder, makes one exact edit
+to sap.py that reintroduces a wrong rule, runs the analysis tests there, and expects
+them to fail. The unchanged copy must pass first. Run from the repository root:
+
+    python analysis/mutations.py
+
+Exit code 0 means the unchanged suite passed and every mutation was caught.
+"""
+
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+MUTATIONS = [
+    ("count an Unsure or missing label as reference-contradicted",
+     "        e = int(st == USABLE and is_valid(a1) and a1 != verdict)\n",
+     "        e = int(st != USABLE or (is_valid(a1) and a1 != verdict))\n"),
+    ("use N_Y as the primary per-100 denominator",
+     "    design = Design.from_labels(labels_k, s_override=s_override, N_ref=N_ref)\n",
+     "    design = Design.from_labels(labels_k, s_override=s_override, N_ref=N_ref if N_ref is not None "
+     "else max(1, sum(r == USABLE for r in ref_k)))\n"),
+    ("drop tasks without a usable label from the panel",
+     '    keep = [i for i, l in enumerate(labels) if l != "EXCL"]\n',
+     '    keep = [i for i, l in enumerate(labels) if l != "EXCL" and ref[i] == USABLE]\n'),
+    ("treat a halted slot as INVALID",
+     "INVALID_CODES = INVALID_TERMINAL + (TRANSPORT_EXHAUSTED,)\n",
+     "INVALID_CODES = INVALID_TERMINAL + (TRANSPORT_EXHAUSTED, HALT)\n"),
+    ("resolve a slot that ends in a halt as exhausted",
+     '        raise UnfinishedSlot("slot is unfinished: its last attempt halted the run; a halt is "\n'
+     '                             "not INVALID, and the slot resumes after the cause is fixed")\n',
+     "        return TRANSPORT_EXHAUSTED\n"),
+    ("drop FILTERED from the terminal outcomes",
+     'INVALID_TERMINAL = ("REFUSAL", "TRUNCATED", "FILTERED", "MALFORMED", "ABSTAIN")\n',
+     'INVALID_TERMINAL = ("REFUSAL", "TRUNCATED", "MALFORMED", "ABSTAIN")\n'),
+    ("match verdicts case-sensitively",
+     "    if isinstance(outcome, str) and outcome.isascii() and outcome.lower() in VERDICTS:\n",
+     "    if False:\n"),
+    ("use every agreeing task in the secondary rates",
+     "    nY = {j: sum(1 for l, r in zip(labels, reference) if l == j and r == USABLE) for j in STRATA}\n",
+     "    nY = {j: sum(1 for l, r in zip(labels, reference) if l == j) for j in STRATA}\n"),
+    ("drop the equal review count adjustment from the secondary gain",
+     '    w_adj = {"U2": w["U2"], "U1": w["U1"], "S": w["S"] - B_Y / n0Y}\n',
+     "    w_adj = dict(w)\n"),
+    ("count Unsure labels as usable in the coverage table",
+     '        return {"tasks": len(idx), "usable": st[USABLE], "unsure": st[UNSURE], "missing": st[MISSING]}\n',
+     '        return {"tasks": len(idx), "usable": st[USABLE] + st[UNSURE], "unsure": st[UNSURE], '
+     '"missing": st[MISSING]}\n'),
+    ("make the one-task-per-template panel the default",
+     'PANEL_UNIT = "task"     # the default panel',
+     'PANEL_UNIT = "template"     # the default panel'),
+]
+
+
+def run_tests(folder: Path) -> bool:
+    result = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "analysis", "-f"],
+                            cwd=folder, capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def copy_analysis(tmp: str) -> Path:
+    shutil.copytree(HERE, Path(tmp) / "analysis", ignore=shutil.ignore_patterns("__pycache__"))
+    return Path(tmp) / "analysis" / "sap.py"
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        copy_analysis(tmp)
+        if not run_tests(Path(tmp)):
+            print("SETUP ERROR  the unchanged analysis tests fail")
+            return 1
+    print("passed  unchanged analysis tests")
+    missed = 0
+    for name, old, new in MUTATIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = copy_analysis(tmp)
+            text = target.read_text(encoding="utf-8")
+            if text.count(old) != 1:
+                print(f"SETUP ERROR  {name}: expected exactly one match in sap.py")
+                missed += 1
+                continue
+            target.write_text(text.replace(old, new), encoding="utf-8")
+            caught = not run_tests(Path(tmp))
+            missed += not caught
+            print(f"{'caught' if caught else 'MISSED'}  {name}")
+    print(f"{len(MUTATIONS) - missed} of {len(MUTATIONS)} mutations caught")
+    return 0 if missed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
