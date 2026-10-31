@@ -30,7 +30,7 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies ninety-four deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies one hundred twenty-four deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests
@@ -142,12 +142,13 @@ Each element an action names gets one status: `resolved` or `ambiguous` when one
 
 ## Stage runner
 
-[RUNNER.md](RUNNER.md) describes the spending controls in `judge/spend.py` and the stage runner, `scripts/run_stage.py`: stages P1 to P3 and EVAL, the gates each stage reports, the reservation, the price modifiers and the cap, one write-ahead ledger per budget shared by every run root, restart and reconciliation, and the conditions for paid mode, which is refused until a provider token-count client exists. P1 to P3 install `dev_only` and EVAL installs `pre_join`. `scripts/dry_run_stages.py` runs P1 to P3 on development packs through the fake transport with the `dev_only` guard installed and every socket refused. `tests/test_spend.py`, `tests/test_run_stage.py` and `tests/test_dry_run_stages.py` add 78 tests, `tests/test_dispatch.py` one more for the dispatcher's two slot sets, and `tests/mutations.py` thirty-six breaks, from dropping the 1.25 factor and writing the reservation after sending to paid mode without a token count, a ledger kept inside each run root, a missed daily reconciliation in the evaluation, a correction that leaves the provider's excess unsettled, an orphaned raw response, an attempt with no reservation and a slot subset other than the two allowed.
+[RUNNER.md](RUNNER.md) describes the spending controls in `judge/spend.py` and the stage runner, `scripts/run_stage.py`: stages P1 to P3 and EVAL, the gates each stage reports, the reservation, the price modifiers and the cap, one write-ahead ledger per budget shared by every run root, with a hash chain and marks kept outside the ledger file, restart and reconciliation, and the conditions for paid mode, which is refused until a provider token-count client exists. P1 to P3 install `dev_only` and EVAL installs `pre_join`. `scripts/dry_run_stages.py` runs P1 to P3 on development packs through the fake transport with the `dev_only` guard installed and every socket refused. `tests/test_spend.py`, `tests/test_run_stage.py` and `tests/test_dry_run_stages.py` add 98 tests, `tests/test_dispatch.py` one more for the dispatcher's two slot sets, and `tests/mutations.py` sixty-six breaks, from dropping the 1.25 factor and writing the reservation after sending to paid mode without a token count, a ledger kept inside each run root, a rolled-back, cut or edited ledger, a missed daily reconciliation in the evaluation, an export that leaves out a provider, ends in the future, repeats an earlier one or falls below the responses' own usage, a correction that leaves the provider's excess unsettled, an orphaned raw response sent again, a lost over-reservation halt, an attempt with no reservation, a transport or ledger of another mode, and a slot subset other than the two allowed.
 
 ## Not done yet
 
 - A provider token-count client; paid mode is refused until it exists.
 - Adapters from each provider's usage and cost reports to the runner's usage-export format.
+- A record of each ledger outside the data root, which would tell a copy of the data root from the original.
 - Evaluation label unlocking, which the runner restores after validating complete prediction records, valid verdicts and model roles, and their binding to the frozen panel and run manifest.
 - Unsure or missing primary labels are handled at the label join (proposed): excluded from the error-based quantities and reported by count. No test label field is read before the join.
 - The README, charter and codebook still describe the earlier three-mentee design. A separate docs PR reconciles them before the main run, as the brief asks, and retires the multi-source `scripts/collect_traces.py` stub.

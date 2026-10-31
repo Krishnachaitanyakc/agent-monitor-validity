@@ -21,40 +21,50 @@ P1 to P3 install the dev_only guard and share the pilot budget ($95); EVAL insta
 pre_join and has its own budget ($285). The guard is installed before anything is read.
 P3 and EVAL refuse a rubric whose status is not "frozen". --b-model picks judge B's model,
 gpt-6-sol or its first fallback; it is part of the configuration hash, so a stage resumes
-only under the model it started with. In the evaluation, a call is refused with a
-reconcile_due halt once the oldest call that no passing reconciliation follows is more
-than a day old, and EVAL's report is complete only after a passing reconciliation that
-follows its last call: reconcile, then run the same command again to write it.
+only under the model it started with. In the evaluation, a trajectory does not start,
+with a reconcile_due halt, once the oldest call that no passing reconciliation follows
+is more than 23 hours old (a single call is refused at 24 hours), and EVAL's report is
+complete only after a passing reconciliation that follows its last call: reconcile, then
+run the same command again to write it.
 
 **Transport.** With none of --paid, --confirm-paid-calls and --approval-note, only the
 fake transport runs: every socket connection is refused, no API key is read, and
 responses carry scripted usage (--scripted-usage central, high or extreme). Paid mode
 needs all three together, --paid, --confirm-paid-calls (passed to the HTTPS transport as
 ``confirm_paid_calls``) and --approval-note naming an existing, non-empty file, plus
---workspace, the study's Anthropic workspace ID. A partial set of paid flags, or paid
-mode without --workspace, is refused before any transport exists. Paid mode is also
-refused until a provider token-count client exists, since every reservation needs the
-provider's own pre-send count. Every call reserves on the budget's ledger first
-(``judge.spend``), and the existing dispatcher sends A1, A2 and A3 serially, then B1. A
-call that settles above its reservation halts the stage once its trajectory finishes;
-the cap still counts actual settled spend.
+--workspace and --openai-project, the study's Anthropic workspace and OpenAI project. A
+partial set of paid flags, or paid mode without both, is refused before any transport
+exists. Paid mode is also refused until a provider token-count client exists, since
+every reservation needs the provider's own pre-send count. Every call reserves on the
+budget's ledger first (``judge.spend``), and the existing dispatcher sends A1, A2 and A3
+serially, then B1. A call that settles above its reservation halts the stage once its
+trajectory finishes; the cap still counts actual settled spend.
 
 **Ledgers**, one per budget and mode, at one fixed place under --data-root, shared by
 every run root, so committed spend adds up across runs:
   <data-root>/out/ledgers/<mode>/ledger-pilot.jsonl, ledger-evaluation.jsonl
-  <data-root>/out/ledgers/<mode>/budgets.jsonl        every ledger created there
-  <data-root>/out/ledgers/fake/fake_provider_export-<budget>.csv   the fake provider's usage
-Once a ledger for a budget exists, a second one (after it was moved or deleted) is
-created only with --new-budget-note, which the new ledger's header keeps.
+  <data-root>/out/ledgers/budgets.jsonl             every ledger created, in every mode
+  <data-root>/out/ledgers/marks-<budget>.jsonl      the ledger's mark after every entry
+  <data-root>/out/ledgers/fake/fake_provider_export-<budget>-<ledger id>.csv
+                                                    the fake provider's usage, per ledger
+A ledger shorter than, or differing from, a mark that the marks file or a run root
+directly under <data-root>/out recorded is refused. Once the register or a mark names a
+ledger for a budget, a second one (after it was moved or deleted) is created only with
+--new-budget-note, which the new ledger's header keeps. These checks hold within one
+data root; a copy of the whole data root carries copies of its ledgers.
 
 **Outputs**, under --run-root (outside the repository):
-  run.json                          the mode and the run's id, fixed at the first stage
+  run.json                          the mode, workspace, OpenAI project and the run's id,
+                                    fixed at the first stage
+  ledger_marks-<budget>.jsonl       the ledger's mark after each trajectory and command
   identity/                         the first model string per judge and every provider
                                     response id, shared by all stages of the run
   <stage>/stage.json                the stage's inputs; a resumed stage must match them
   <stage>/attempt_log/              the write-once attempt log, halts and corrections
   <stage>/progress.json             the gates so far, rewritten after each trajectory
   <stage>/report.json               written once, when every case has ended
+A raw response left without its attempt record by a stop is rebuilt into one at the next
+start and never sent again.
 The report prints the gates for review and never acts on them to select a judge. A halt
 stops the stage; rerun the same command after recording a correction note.
 """

@@ -27,7 +27,7 @@ Only a transport failure is retried: same bytes, same slot, at most three retrie
 
 ## Halts
 
-HTTP 400 or 413, any invalid-request error, 401, 402, 403, 404, and credit, spend or usage limits halt the run. So does a failed per-response check (model string, service tier, region, one-hour cache tokens, workspace header on A; model string, tier, cache tokens on B) or a repeated response ID. Nothing more is sent until `AttemptLog.record_correction` stores a note for the halt. A halt uses no retry and is never an invalid verdict.
+HTTP 400 or 413, any invalid-request error, 401, 402, 403, 404, and credit, spend or usage limits halt the run. So does a failed per-response check (model string, service tier, region, one-hour cache tokens, workspace header on A; model string, tier, cache tokens and input above 272,000 tokens on B) or a repeated response ID. Nothing more is sent until `AttemptLog.record_correction` stores a note for the halt. A halt uses no retry and is never an invalid verdict. A raw response left without its attempt record by a stop is never sent again: `dispatch.recover_attempt` rebuilds the record from the bytes, as described in [RUNNER.md](RUNNER.md).
 
 ## Outcomes
 
@@ -63,4 +63,4 @@ On Oct 30, at commit `53569bf`, the dry run over 19 development packs built ever
 ## Not done yet
 
 - A provider token-count client; paid mode is refused until it exists. Spending controls and the stage runner are in [RUNNER.md](RUNNER.md).
-- The study workspace ID itself. The stage runner takes it as `--workspace` and records it in `stage.json`; the dry runs use a stand-in.
+- The study workspace and OpenAI project IDs themselves. The stage runner takes them as `--workspace` and `--openai-project` and records them in `run.json` and `stage.json`; the dry runs use stand-ins.
