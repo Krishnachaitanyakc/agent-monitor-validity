@@ -154,6 +154,25 @@ MUTATIONS = [
      '        voided["p_failure"] = "not a finite number in [0, 1]"', "        return out"),
     ("remove the guard install from the dry run", "scripts/dry_run.py",
      '    fence.install("dev_only", data_root, fence_config)', "    pass"),
+    ("drop the 1.25 factor from the reservation", "judge/spend.py",
+     '* INPUT_MARGIN + INPUT_PAD_TOKENS) * p["input"] * WRITE_FACTOR', '* INPUT_MARGIN + INPUT_PAD_TOKENS) * p["input"]'),
+    ("admit a call whose reservation passes the cap", "judge/spend.py",
+     'if not t["committed"] + amount <= self.cap:', 'if not t["committed"] <= self.cap:'),
+    ("refuse a call that lands exactly on the cap", "judge/spend.py",
+     'if not t["committed"] + amount <= self.cap:', 'if not t["committed"] + amount < self.cap:'),
+    ("write the reservation after sending", "judge/spend.py",
+     "            self._open = self.ledger.reserve(fields, amount)\n            return self.inner.send(request)\n",
+     "            exchange = self.inner.send(request)\n            self._open = self.ledger.reserve(fields, amount)\n"
+     "            return exchange\n"),
+    ("release open reservations at zero after a restart", "judge/spend.py",
+     '{"type": "hold", "id": r["id"],',
+     '{"type": "settle", "cost_usd": "0", "tokens": {}, "basis": "restart", "price_table": PRICE_TABLE_VERSION, '
+     '"over_reservation": False, "id": r["id"],'),
+    ("count a call with no response as free", "judge/spend.py",
+     '        return HOLD, None, None, "no response arrived; the provider may still bill the request"',
+     '        return SETTLE, Decimal(0), dict.fromkeys(TOKEN_KINDS, 0), "no response"'),
+    ("loosen the reconciliation threshold", "judge/spend.py",
+     'RECONCILE_TOLERANCE = Decimal("0.01")', 'RECONCILE_TOLERANCE = Decimal("0.02")'),
 ]
 
 

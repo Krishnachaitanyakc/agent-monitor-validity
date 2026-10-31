@@ -17,4 +17,6 @@ docs/REQUESTS.md for the request layer. The pieces:
 - ``storage``: the write-once attempt log, halts and correction notes.
 - ``dispatch``: the serial dispatcher, the per-response checks, the fallback capability
   check, and the fake and HTTPS transports.
+- ``spend``: prices, reservations, the spending caps, the write-ahead ledger and
+  reconciliation against a provider usage export.
 """
