@@ -186,6 +186,8 @@ MUTATIONS = [
      "    if not reconciled:", "    if False:"),
     ("remove the guard install from the stage runner", "scripts/run_stage.py",
      "    fence.install(profile, data_root, fence.load_config(required=True))", "    pass"),
+    ("remove the guard install from the stage dry run", "scripts/dry_run_stages.py",
+     '    fence.install("dev_only", data_root, fence.load_config(required=True))', "    pass"),
 ]
 
 
