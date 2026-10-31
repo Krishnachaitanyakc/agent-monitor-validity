@@ -1,8 +1,9 @@
 """Tests for the stage runner, scripts/run_stage.py.
 
-The runner's core runs on synthetic packs through the fake transport. The commands run
-in fresh processes on the data path's fixture, since an installed guard cannot be
-removed. No test builds the HTTPS transport: where paid mode is checked, the class is
+The runner's core runs on synthetic packs through the fake transport, with a frozen
+rubric stand-in where P3 or EVAL runs. The commands run in fresh processes on the data
+path's fixture, since an installed guard cannot be removed; there the rubric is the real
+draft. No test builds the HTTPS transport: where paid mode is checked, the class is
 replaced by a stand-in that records how it was called.
 """
 
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -27,7 +29,7 @@ from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
 from judge import spend as S  # noqa: E402
-from judge.storage import AttemptLog  # noqa: E402
+from judge.storage import AttemptLog, write_once  # noqa: E402
 from test_pack import FixtureCase  # noqa: E402
 from test_requests import images_for, synthetic_pack  # noqa: E402
 
@@ -44,16 +46,24 @@ def items(n, tag):
     return out
 
 
+def reserves(led):
+    return [e for e in led.entries if e["type"] == "reserve"]
+
+
 class RunnerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.root = self.tmp / "run"
+        self.ledgers = self.tmp / "ledgers"
+        frozen = mock.patch.object(R, "RUBRIC_STATUS", "frozen")      # a frozen rubric stand-in
+        frozen.start()
+        self.addCleanup(frozen.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def ledger(self, path=None, budget="pilot"):
-        led = S.Ledger(path or RS.ledger_path(self.root, budget), budget)
+    def ledger(self, path=None, budget="pilot", clock=time.time):
+        led = S.Ledger(path or RS.ledger_path(self.ledgers, budget), budget, clock)
         self.addCleanup(led.close)
         return led
 
@@ -63,6 +73,13 @@ class RunnerCase(unittest.TestCase):
                               read_images=lambda e: e, workspace=RS.FAKE_WORKSPACE, counter=provider, **kw)
         return report, provider
 
+    @staticmethod
+    def reconcile(led, provider, period_end=None, rows=None):
+        return led.reconcile(provider.export_rows(led.created_at, period_end, rows), "test")
+
+    def run_id(self, root=None):
+        return json.loads(((root or self.root) / "run.json").read_text())["run_id"]
+
     def pilot(self, led, sizes=(5, 20, 20), profile="central", root=None):
         reports = {}
         for stage, n in zip(("P1", "P2", "P3"), sizes):
@@ -70,14 +87,14 @@ class RunnerCase(unittest.TestCase):
             reports[stage] = report
             if not report["complete"]:
                 break
-            led.reconcile(provider.billed, "test")
+            self.reconcile(led, provider)
         return reports
 
 
 class TestPilot(RunnerCase):
-    def test_the_cut_pilot_costs_the_addendum_figures_and_stays_under_the_cap(self):
+    def test_pilot_of_5_20_20_cases_costs_16_35_central_and_48_25_extreme(self):
         for profile, total in (("central", "16.35"), ("extreme", "48.25")):
-            self.root = self.tmp / profile
+            self.root, self.ledgers = self.tmp / profile, self.tmp / f"ledgers-{profile}"
             led = self.ledger()
             reports = self.pilot(led, profile=profile)
             self.assertTrue(all(r["complete"] for r in reports.values()), profile)
@@ -103,11 +120,11 @@ class TestPilot(RunnerCase):
         refusal = report["gates"]["spend"]["refusals"][0]
         self.assertLessEqual(committed, CAP)
         self.assertGreater(committed + Decimal(refusal["amount_usd"]), CAP)
-        reserves = [e for e in led.entries if e["type"] == "reserve"]
-        last = reserves[-1]
-        self.assertEqual((last["run"], last["log_root"]), ("pilot-2", "pilot-2/P3/attempt_log"))
-        sent = AttemptLog(self.tmp / last["log_root"]).attempts(last["trace_key"], last["config_sha256"],
-                                                                last["judge"], last["repeat"])
+        last = reserves(led)[-1]
+        self.assertEqual((last["run"], last["run_root"], last["log_root"]),
+                         (self.run_id(self.tmp / "pilot-2"), "pilot-2", "P3/attempt_log"))
+        sent = AttemptLog(self.tmp / last["run_root"] / last["log_root"]).attempts(
+            last["trace_key"], last["config_sha256"], last["judge"], last["repeat"])
         self.assertEqual(len(sent), 1)
         # The refused call was never sent, and a note does not raise the cap.
         log = AttemptLog(self.tmp / "pilot-2" / "P3" / "attempt_log")
@@ -125,7 +142,7 @@ class TestPilot(RunnerCase):
         self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B"] * 2)
         self.assertEqual(len({r.body for r in provider.sent[:3]}), 1)
         self.assertEqual(report["settings"]["config_sha256"], R.config_sha256(caching=True))
-        led.reconcile(provider.billed, "test")
+        self.reconcile(led, provider)
         report, provider = self.stage("P2", items(3, "b"), led)
         self.assertEqual([r.judge for r in provider.sent], ["A", "B"] * 3)
         self.assertTrue(all(b'"cache_control"' not in r.body for r in provider.sent if r.judge == "A"))
@@ -163,6 +180,18 @@ class TestPilot(RunnerCase):
         self.assertEqual((cap["failed"], cap["fallback_indicated"]), ([], False))
         self.assertEqual({r.model for r in provider.sent if r.judge == "B"}, {R.B_MODEL})
 
+    def test_the_b_fallback_is_a_configuration_change(self):
+        led = self.ledger()
+        its = items(1, "a")
+        report, provider = self.stage("P1", its, led, b_model="gpt-6.1-sol")
+        self.assertTrue(report["complete"])
+        self.assertEqual({r.model for r in provider.sent if r.judge == "B"}, {"gpt-6.1-sol"})
+        self.assertEqual(report["settings"]["config_sha256"], R.config_sha256(b_model="gpt-6.1-sol"))
+        self.assertNotEqual(report["settings"]["config_sha256"], R.config_sha256())
+        self.assertEqual(report["settings"]["b_model"], "gpt-6.1-sol")
+        self.assertEqual([e["model"] for e in reserves(led) if e["judge"] == "B"], ["gpt-6.1-sol"])
+        self.assertEqual(led.totals()["committed"], Decimal("0.414"))
+
     def test_a_scripted_halt_stops_the_stage_until_a_note_is_recorded(self):
         led = self.ledger()
         its = items(3, "a")
@@ -197,21 +226,23 @@ class TestPilot(RunnerCase):
         led = self.ledger()
         report, provider = self.stage("P1", its, led)
         self.assertTrue(report["complete"])
-        a2 = [e for e in led.entries if e["type"] == "reserve" and e["slot"] == "A2"]
+        a2 = [e for e in reserves(led) if e["slot"] == "A2"]
         self.assertEqual([(e["attempt"], led.reservations[e["id"]]["state"]) for e in a2],
                          [(1, "held"), (1, "settled")])
         self.assertEqual(led.totals()["held"], r)
 
-    def test_a_call_that_costs_more_than_its_reservation_halts(self):
+    def test_a_call_that_costs_more_than_its_reservation_halts_once_its_trajectory_finishes(self):
         led = self.ledger()
 
         class Low(RS.ScriptedProvider):
             def count(self, request):
                 return 10
 
-        report, _ = self.stage("P1", items(2, "a"), led, provider=Low("extreme"))
+        report, provider = self.stage("P1", items(2, "a"), led, provider=Low("extreme"))
         self.assertEqual(report["stopped"]["kind"], "over_reservation")
         self.assertTrue(report["gates"]["spend"]["over_reservation"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B"])     # the whole first trajectory
+        self.assertEqual(led.totals()["committed"], Decimal("1.29"))                 # actual settled spend
 
 
 class TestGating(RunnerCase):
@@ -222,7 +253,7 @@ class TestGating(RunnerCase):
         _, provider = self.stage("P1", items(1, "a"), led)
         with self.assertRaisesRegex(RS.StageRefused, "reconcile"):
             self.stage("P2", items(1, "b"), led)
-        led.reconcile(provider.billed, "test")
+        self.reconcile(led, provider)
         with self.assertRaisesRegex(RS.StageRefused, "P2's report"):
             self.stage("P3", items(1, "c"), led)
         with self.assertRaisesRegex(RS.StageRefused, "already complete"):
@@ -233,7 +264,7 @@ class TestGating(RunnerCase):
         self.assertTrue(report["complete"])
         self.assertEqual(report["previous_report"], str(self.root / "P1" / "report.json"))
 
-    def test_a_run_keeps_one_mode_and_a_resumed_stage_its_inputs(self):
+    def test_a_run_keeps_one_mode_and_a_resumed_stage_its_inputs_and_workspace(self):
         led = self.ledger()
         its = items(2, "a")
         report, _ = self.stage("P1", its, led, events={(its[1].trace_key, "A1", 1): "http_400"})
@@ -243,10 +274,171 @@ class TestGating(RunnerCase):
             self.stage("P1", its[:1], led)
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="paid", transport=D.FakeTransport(), ledger=led,
-                         read_images=lambda e: e, workspace="w")
+                         read_images=lambda e: e, workspace="w", counter=RS.ScriptedProvider())
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "same ones"):
+            RS.run_stage("P1", self.root, its, mode="fake", transport=provider, ledger=led, read_images=lambda e: e,
+                         workspace="wrkspc_another", counter=provider)
+        self.assertEqual(provider.sent, [])
+        record = json.loads((self.root / "P1" / "stage.json").read_text())
+        self.assertEqual((record["workspace"], record["ledger"]), (RS.FAKE_WORKSPACE, {
+            "budget": "pilot", "file": "ledger-pilot.jsonl", "id": led.ledger_id}))
+        self.assertEqual(report["settings"]["workspace"], RS.FAKE_WORKSPACE)
         with self.assertRaises(ValueError):
             RS.run_stage("EVAL", self.root, its, mode="fake", transport=D.FakeTransport(), ledger=led,
                          read_images=lambda e: e, workspace="w")
+
+    def test_p3_and_eval_refuse_a_rubric_that_is_not_frozen(self):
+        with mock.patch.object(R, "RUBRIC_STATUS", "draft"):
+            led = self.ledger()
+            for stage in ("P1", "P2"):
+                report, provider = self.stage(stage, items(1, stage[1]), led)
+                self.assertTrue(report["complete"])
+                self.reconcile(led, provider)
+            with self.assertRaisesRegex(RS.StageRefused, "frozen rubric"):
+                self.stage("P3", items(1, "3"), led)
+            self.assertFalse((self.root / "P3").exists())
+            with self.assertRaisesRegex(RS.StageRefused, "frozen rubric"):
+                self.stage("EVAL", items(1, "e"), self.ledger(budget="evaluation"))
+            with self.assertRaises(ValueError):
+                RS.run_stage("P3", self.root, items(1, "3"), mode="paid", transport=D.FakeTransport(), ledger=led,
+                             read_images=lambda e: e, workspace="w", counter=RS.ScriptedProvider(),
+                             rubric_check=False)
+            report, _ = self.stage("P3", items(1, "3"), led, rubric_check=False)
+            self.assertTrue(report["complete"])
+            self.assertEqual((report["settings"]["rubric_status"], report["settings"]["rubric_check"]),
+                             ("draft", "waived in a fake-mode dry run"))
+
+
+class TestRunRecords(RunnerCase):
+    def test_a_model_change_or_a_repeated_response_id_after_p1_halts_a_later_stage(self):
+        led = self.ledger()
+        report, provider = self.stage("P1", items(1, "a"), led)
+        self.reconcile(led, provider)
+
+        class Renamed(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                ex = super()._exchange(request, stage, ref, kind)
+                return ex._replace(raw=ex.raw.replace(b'"model": "claude-sonnet-5"', b'"model": "claude-sonnet-5-1"'))
+
+        report, _ = self.stage("P2", items(1, "b"), led, provider=Renamed("central"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("response_check", "A1"))
+        halt = AttemptLog(self.root / "P2" / "attempt_log").halts()[0]
+        self.assertIn("is not the first recorded 'claude-sonnet-5'", halt["failed_checks"][0])
+
+        class Reused(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                return super()._exchange(request, stage, ref.replace("P2_", "P1_", 1), kind)
+
+        root, its = self.tmp / "run-2", items(1, "c")
+        report, provider = self.stage("P1", its, led, root=root)
+        self.reconcile(led, provider)
+        report, _ = self.stage("P2", its, led, root=root, provider=Reused("central"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("response_check", "A1"))
+        halt = AttemptLog(root / "P2" / "attempt_log").halts()[0]
+        self.assertIn("was seen before", halt["failed_checks"][0])
+
+    def test_a_raw_response_without_its_record_is_refused_before_anything_is_reserved(self):
+        led = self.ledger()
+        its = items(1, "a")
+        real = AttemptLog.write_attempt
+
+        class Fresh(RS.ScriptedProvider):
+            """A provider gives a resent request a new response id."""
+
+            def _exchange(self, request, stage, ref, kind):
+                return super()._exchange(request, stage, ref + "_resent", kind)
+
+        def stop_between_writes(log, record, raw):
+            if record["slot"] == "A2":
+                folder = log.slot_dir(record["trace_key"], record["config_sha256"], "A", 2)
+                write_once(folder / "1.raw", raw)
+                raise KeyboardInterrupt
+            return real(log, record, raw)
+
+        with mock.patch.object(AttemptLog, "write_attempt", stop_between_writes):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led)
+        made = len(reserves(led))
+        report, provider = self.stage("P1", its, led)
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("orphan_attempt", "A2"))
+        self.assertEqual(provider.sent, [])
+        self.assertEqual(len(reserves(led)), made)
+        self.assertEqual(led.entries[-1]["reason"], "orphan_attempt")
+        folder = AttemptLog(self.root / "P1" / "attempt_log").slot_dir(its[0].trace_key, R.config_sha256(), "A", 2)
+        (folder / "1.raw").rename(self.tmp / "inspected-A2-1.raw")
+        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Inspected the raw response and moved it aside.", R.config_sha256(), at="now")
+        report, provider = self.stage("P1", its, led, provider=Fresh("central"))
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "B"])
+
+    def test_a_halt_attempt_without_its_halt_record_is_an_unresolved_halt(self):
+        led = self.ledger()
+        its = items(2, "a")
+        with mock.patch.object(AttemptLog, "write_halt", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led, events={(its[0].trace_key, "A2", 1): "http_400"})
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        self.assertEqual(log.halts(), [])
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        halts = log.halts()
+        self.assertEqual([(h["slot"], h["attempt"], h["halt_kind"], h["recorded_at_start"]) for h in halts],
+                         [("A2", 1, "request_error", True)])
+        log.record_correction(halts[0]["halt_id"], "Fixed the request.", R.config_sha256(), at="now")
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "B", "A", "A", "A", "B"])
+
+    def test_a_ledger_shorter_than_the_recorded_progress_is_refused(self):
+        led = self.ledger()
+        its = items(2, "a")
+        report, _ = self.stage("P1", its, led, events={(its[1].trace_key, "A1", 1): "http_400"})
+        self.assertEqual(report["ledger"]["last_seq"], len(led.entries) - 1)
+        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Noted.", R.config_sha256(), at="now")
+        led.close()
+        path = RS.ledger_path(self.ledgers, "pilot")
+        lines = path.read_text().splitlines()
+        self.assertEqual(json.loads(lines[-1])["type"], "settle")
+        path.write_text("\n".join(lines[:-1]) + "\n")                # the last settlement rolled back
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "rolled back or replaced"):
+            self.stage("P1", its, self.ledger(), provider=provider)
+        self.assertEqual(provider.sent, [])
+
+    def test_an_attempt_without_its_reservation_is_refused(self):
+        led = self.ledger()
+        its = items(1, "a")
+
+        class Crash(RS.ScriptedProvider):
+            def send(self, request):
+                if len(self.sent) == 2:
+                    raise KeyboardInterrupt
+                return super().send(request)
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.stage("P1", its, led, provider=Crash("central"))
+        self.assertFalse((self.root / "P1" / "progress.json").exists())
+        led.close()
+        path = RS.ledger_path(self.ledgers, "pilot")
+        path.write_text(path.read_text().splitlines()[0] + "\n")      # rolled back to its header
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "has no reservation"):
+            self.stage("P1", its, self.ledger(), provider=provider)
+        self.assertEqual(provider.sent, [])
+
+    def test_a_run_root_stays_on_the_ledger_it_started_on(self):
+        led = self.ledger()
+        report, provider = self.stage("P1", items(1, "a"), led)
+        self.reconcile(led, provider)
+        fresh = self.ledger(self.tmp / "elsewhere" / "ledger-pilot.jsonl")
+        with self.assertRaisesRegex(RS.StageRefused, "ran on pilot ledger"):
+            self.stage("P2", items(1, "b"), fresh)
+        self.assertFalse((self.root / "P2").exists())
 
 
 class TestEval(RunnerCase):
@@ -262,7 +454,7 @@ class TestEval(RunnerCase):
         for stage, tag in (("P1", "a"), ("P2", "b"), ("P3", "c")):
             report, provider = self.stage(stage, items(1, tag), pilot)
             self.assertTrue(report["complete"])
-            pilot.reconcile(provider.billed, "test")
+            self.reconcile(pilot, provider)
         pilot.close()
         self.panel_items = items(2, "e")
         self.write_manifest()
@@ -275,9 +467,13 @@ class TestEval(RunnerCase):
         path.write_text(json.dumps(m))
         return {"manifest": str(path), "sha256": R.sha256_bytes(path.read_bytes()), "freeze_tag": "freeze-1"}
 
-    def eval(self, panel, its=None):
-        with S.Ledger(RS.ledger_path(self.root, "evaluation"), "evaluation") as led:
-            return self.stage("EVAL", its or self.panel_items, led, panel=panel, repo=self.repo)
+    def eval_ledger(self, clock=time.time):
+        return S.Ledger(RS.ledger_path(self.ledgers, "evaluation"), "evaluation", clock)
+
+    def eval(self, panel, its=None, clock=time.time, provider=None):
+        with self.eval_ledger(clock) as led:
+            return self.stage("EVAL", its or self.panel_items, led, panel=panel, repo=self.repo, provider=provider,
+                              clock=clock)
 
     def test_eval_refuses_without_a_verified_frozen_panel(self):
         good = self.write_manifest()
@@ -302,22 +498,82 @@ class TestEval(RunnerCase):
             self.eval(self.write_manifest())
         self.assertFalse((self.root / "EVAL").exists())
 
-    def test_eval_runs_on_the_frozen_panel_with_its_own_budget(self):
-        report, provider = self.eval(self.write_manifest())
+    def test_eval_runs_on_the_frozen_panel_and_completes_only_after_a_reconciliation(self):
+        panel = self.write_manifest()
+        report, provider = self.eval(panel)
+        self.assertEqual((report["complete"], report["stopped"]), (False, None))
+        self.assertIn("reconciliation", report["awaiting"])
+        self.assertFalse((self.root / "EVAL" / "report.json").exists())
+        self.assertEqual(len(provider.sent), 8)
+        with self.eval_ledger() as led:
+            self.reconcile(led, provider)
+        report, again = self.eval(panel)
         self.assertTrue(report["complete"])
+        self.assertEqual(again.sent, [])
+        self.assertTrue((self.root / "EVAL" / "report.json").exists())
         spend = report["gates"]["spend"]
-        self.assertEqual((spend["budget"], spend["cap_usd"]), ("evaluation", "285"))
+        self.assertEqual((spend["budget"], spend["cap_usd"], spend["reconciled_after_last_call"]),
+                         ("evaluation", "285", True))
         self.assertEqual(report["panel"]["freeze_tag"], "freeze-1")
         self.assertEqual(report["settings"]["fence_profile"], "pre_join")
-        self.assertEqual(len(provider.sent), 8)
 
     def test_eval_needs_the_pilot_ledger_reconciled(self):
-        with S.Ledger(RS.ledger_path(self.root, "pilot"), "pilot") as pilot:
-            rid = pilot.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": ".", "stage": "P3"},
+        with S.Ledger(RS.ledger_path(self.ledgers, "pilot"), "pilot") as pilot:
+            rid = pilot.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": self.run_id(), "stage": "P3"},
                                 Decimal("0.1"))
             pilot.close_reservation(rid, None)
         with self.assertRaisesRegex(RS.StageRefused, "reconcile the pilot ledger"):
             self.eval(self.write_manifest())
+
+    def test_eval_halts_for_a_reconciliation_once_a_call_is_more_than_a_day_old(self):
+        now = [time.time() - 3 * 86400]
+
+        def clock():
+            return now[0]
+
+        class NextDay(RS.ScriptedProvider):
+            def send(self, request):
+                exchange = super().send(request)
+                if request.judge == "B":
+                    now[0] += 25 * 3600
+                return exchange
+
+        panel = self.write_manifest()
+        report, first = self.eval(panel, clock=clock, provider=NextDay("central"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["trace_key"], report["stopped"]["slot"]),
+                         ("reconcile_due", self.panel_items[1].trace_key, "A1"))
+        self.assertEqual(len(first.sent), 4)
+        with self.eval_ledger(clock) as led:
+            self.assertEqual(led.entries[-1]["reason"], "reconcile_due")
+            self.assertTrue(self.reconcile(led, first, period_end=S._now(clock))["ok"])
+        AttemptLog(self.root / "EVAL" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Reconciled both providers' usage.", R.config_sha256(), at="now")
+        report, second = self.eval(panel, clock=clock)
+        self.assertEqual(len(second.sent), 4)
+        self.assertEqual((report["complete"], report["stopped"]), (False, None))
+        with self.eval_ledger(clock) as led:
+            self.reconcile(led, first, period_end=S._now(clock), rows=first.billed + second.billed)
+        report, _ = self.eval(panel, clock=clock)
+        self.assertTrue(report["complete"])
+
+    def test_eval_will_not_start_while_a_call_more_than_a_day_old_is_unreconciled(self):
+        now = [time.time() - 3 * 86400]
+
+        def clock():
+            return now[0]
+
+        with self.eval_ledger(clock) as led:
+            rid = led.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": "earlier", "stage": "EVAL"},
+                              Decimal("0.5"))
+            led.close_reservation(rid, None)
+        now[0] += 25 * 3600
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "older than a day"):
+            self.eval(self.write_manifest(), clock=clock, provider=provider)
+        self.assertEqual(provider.sent, [])
+        now[0] -= 2 * 3600                                              # 23 hours after that call
+        report, provider = self.eval(self.write_manifest(), clock=clock)
+        self.assertEqual((report["stopped"], len(provider.sent)), (None, 8))
 
 
 class TestPaidMode(unittest.TestCase):
@@ -333,6 +589,7 @@ class TestPaidMode(unittest.TestCase):
         empty, blank = self.tmp / "empty.txt", self.tmp / "blank.txt"
         empty.write_text("")
         blank.write_text("  \n")
+        counter = RS.ScriptedProvider()                    # a stand-in for a provider token counter
         with mock.patch.object(D, "HttpsTransport") as https:
             self.assertEqual(RS.select_transport(False, False, None), ("fake", None))
             for paid in (False, True):
@@ -341,14 +598,27 @@ class TestPaidMode(unittest.TestCase):
                         if (paid, confirm, note) in ((False, False, None), (True, True, str(self.note))):
                             continue
                         with self.assertRaisesRegex(RS.StageRefused, "missing"):
-                            RS.select_transport(paid, confirm, note, workspace="wrkspc_study")
+                            RS.select_transport(paid, confirm, note, workspace="wrkspc_study", counter=counter)
             https.assert_not_called()
             with self.assertRaisesRegex(RS.StageRefused, "--workspace"):
-                RS.select_transport(True, True, str(self.note))
+                RS.select_transport(True, True, str(self.note), counter=counter)
             https.assert_not_called()
-            mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study")
+            mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter)
         self.assertEqual(mode, "paid")
         https.assert_called_once_with(confirm_paid_calls=True)
+
+    def test_paid_mode_without_a_provider_token_count_is_refused_before_any_transport_exists(self):
+        with mock.patch.object(D, "HttpsTransport") as https:
+            with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
+                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study")
+            https.assert_not_called()
+        led = S.Ledger(self.tmp / "ledger-pilot.jsonl", "pilot")
+        self.addCleanup(led.close)
+        with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
+            RS.run_stage("P1", self.tmp / "run", items(1, "a"), mode="paid", transport=D.FakeTransport(), ledger=led,
+                         read_images=lambda e: e, workspace="wrkspc_study")
+        self.assertFalse((self.tmp / "run").exists())
+        self.assertEqual(len(led.entries), 1)
 
     def test_the_https_transport_itself_still_refuses_without_confirmation(self):
         with self.assertRaises(ValueError):
@@ -366,6 +636,7 @@ class CommandCase(FixtureCase):
                           "--provenance", str(self.inputs / "provenance.jsonl"), "--out", str(self.tmp / "packs")])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.root = self.tmp / "run"
+        self.ledgers = RS.ledger_dir(self.tmp, "fake")
 
     def env(self):
         env = {k: v for k, v in os.environ.items() if k not in KEY_ENVS + ("SPAR_FENCE_CONFIG",)}
@@ -376,8 +647,8 @@ class CommandCase(FixtureCase):
         return subprocess.run([sys.executable, str(REPO / args[0])] + args[1:], capture_output=True, text=True,
                               env=self.env())
 
-    def stage_args(self, stage, *extra):
-        return ["scripts/run_stage.py", "run", "--stage", stage, "--run-root", str(self.root), "--data-root",
+    def stage_args(self, stage, *extra, root=None):
+        return ["scripts/run_stage.py", "run", "--stage", stage, "--run-root", str(root or self.root), "--data-root",
                 str(self.tmp), "--packs", str(self.tmp / "packs"), "--provenance",
                 str(self.inputs / "provenance.jsonl")] + list(extra)
 
@@ -423,12 +694,17 @@ class TestCommands(CommandCase):
         self.assertEqual(report["settings"]["fence"]["profiles"], ["dev_only"])
         self.assertEqual(report["cases"], {"planned": 5, "given": 2, "ended": 2, "ineligible": []})
         self.assertIn("every socket refused", report["settings"]["transport"])
+        self.assertEqual(sorted(p.name for p in self.ledgers.iterdir()),
+                         ["budgets.jsonl", "fake_provider_export-pilot.csv", "ledger-pilot.jsonl"])
+        self.assertFalse(any(p.name.startswith("ledger") for p in self.root.iterdir()))
 
         r = self.command(self.stage_args("P2"))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("reconcile", r.stderr)
-        export = self.root / "fake_provider_export-pilot.csv"
-        self.assertEqual(self.reconcile(export).returncode, 0)
+        export = RS.export_path(self.ledgers, "pilot")
+        r = self.reconcile(export)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"{RS.FAKE_WORKSPACE} from ", r.stdout)
         r = self.command(self.stage_args("P2"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("cache hits      not applicable", r.stdout)
@@ -439,16 +715,52 @@ class TestCommands(CommandCase):
         r = self.reconcile(inflated)
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("MORE THAN 1%", r.stdout)
-        r = self.command(self.stage_args("P3"))
-        self.assertIn("reconcile", r.stderr)
         r = self.command(["scripts/run_stage.py", "correct", "--run-root", str(self.root), "--data-root",
                           str(self.tmp), "--budget", "pilot", "--note", "The export repeated one row."])
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("settled as an adjustment", r.stdout)
         self.assertEqual(self.reconcile(export).returncode, 0)
         r = self.command(self.stage_args("P3", "--scripted-usage", "extreme"))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("frozen rubric", r.stderr)
+        self.assertFalse((self.root / "P3").exists())
 
-    def test_paid_flags_without_all_three_and_eval_without_a_panel_are_refused(self):
+    def test_two_run_roots_share_one_ledger_and_the_second_is_refused_at_the_cap(self):
+        with S.open_budget_ledger(self.ledgers, "pilot", "fake", create=True) as led:
+            rid = led.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": "earlier", "stage": "P1"},
+                              Decimal("93.75"))
+            led.close_reservation(rid, None)                    # held: counted as spent for good
+        first, second = self.tmp / "run-a", self.tmp / "run-b"
+        r = self.command(self.stage_args("P1", root=first))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        a = json.loads((first / "P1" / "report.json").read_text())
+        self.assertEqual(Decimal(a["gates"]["spend"]["budget_committed_usd"]), Decimal("94.578"))
+        r = self.command(self.stage_args("P1", root=second))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        b = json.loads((second / "P1" / "progress.json").read_text())
+        self.assertEqual((b["stopped"]["kind"], b["stopped"]["slot"]), ("spend_cap", "A1"))
+        self.assertEqual(b["gates"]["spend"]["budget_committed_usd"], a["gates"]["spend"]["budget_committed_usd"])
+        self.assertEqual(b["ledger"]["id"], a["ledger"]["id"])
+        for root in (first, second):
+            self.assertFalse(any(p.name.startswith("ledger") for p in root.iterdir()))
+        with S.open_budget_ledger(self.ledgers, "pilot", "fake") as led:
+            self.assertEqual(led.totals()["committed"], Decimal("94.578"))
+            ledger_id = led.ledger_id
+
+        # Moving the ledger aside does not start a fresh cap without a new-budget note.
+        RS.ledger_path(self.ledgers, "pilot").rename(self.ledgers / "ledger-pilot-moved.jsonl")
+        third = self.tmp / "run-c"
+        r = self.command(self.stage_args("P1", root=third))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("was created here before", r.stderr)
+        r = self.command(self.stage_args("P1", "--new-budget-note", "A second pilot budget, approved in writing.",
+                                         root=third))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with S.open_budget_ledger(self.ledgers, "pilot", "fake") as led:
+            self.assertEqual((led.header["new_budget_note"], led.header["replaces"]),
+                             ("A second pilot budget, approved in writing.", [ledger_id]))
+
+    def test_paid_flags_without_all_three_and_p3_or_eval_on_a_draft_rubric_are_refused(self):
         empty = self.tmp / "empty.txt"
         empty.write_text("")
         for extra in (["--paid"], ["--confirm-paid-calls"], ["--paid", "--confirm-paid-calls"],
@@ -456,10 +768,23 @@ class TestCommands(CommandCase):
             r = self.command(self.stage_args("P1", *extra))
             self.assertNotEqual(r.returncode, 0, extra)
             self.assertIn("missing", r.stderr, extra)
-        r = self.command(self.stage_args("EVAL"))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("needs --panel-manifest", r.stderr)
-        self.assertFalse((self.root / "P1").exists())
+        for stage in ("P3", "EVAL"):
+            r = self.command(self.stage_args(stage))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("frozen rubric", r.stderr)
+        self.assertFalse(self.root.exists())
+
+    def test_paths_inside_the_repository_are_refused(self):
+        inside = REPO / "not-a-file-in-the-repo.txt"
+        r = self.command(self.stage_args("P1", "--approval-note", str(inside)))
+        self.assertIn("--approval-note must be outside the repository", r.stderr)
+        r = self.command(self.stage_args("EVAL", "--panel-manifest", str(inside)))
+        self.assertIn("--panel-manifest must be outside the repository", r.stderr)
+        r = self.command(["scripts/run_stage.py", "reconcile", "--run-root", str(self.root), "--data-root",
+                          str(self.tmp), "--budget", "pilot", "--export", str(inside)])
+        self.assertIn("--export must be outside the repository", r.stderr)
+        self.assertFalse(inside.exists())
+        self.assertFalse(self.root.exists())
 
     def test_the_guard_is_installed_and_the_network_refused(self):
         self.config.write_text(json.dumps({"test_output_dirs": [str(self.tmp / "packs")]}))
@@ -467,10 +792,13 @@ class TestCommands(CommandCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("fence (dev_only)", r.stderr)
         probe = (f"import sys; sys.path.insert(0, {str(REPO / 'scripts')!r}); import run_stage as s; "
-                 "s._forbid_network(); import socket; socket.create_connection(('127.0.0.1', 9), timeout=1)")
+                 "print(s.fake_transport_line()); s._forbid_network(); print(s.fake_transport_line()); "
+                 "import socket; socket.create_connection(('127.0.0.1', 9), timeout=1)")
         r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no network calls", r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [RS.FAKE_TRANSPORT + "; no socket guard installed",
+                                                 RS.FAKE_TRANSPORT + "; every socket refused"])
 
 
 if __name__ == "__main__":

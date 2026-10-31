@@ -24,14 +24,19 @@ class TestDryRunStages(CommandCase):
         summary = json.loads((out / "summary.json").read_text())
         self.assertTrue(summary["ok"])
         self.assertEqual(summary["settings"]["fence"]["profiles"], ["dev_only"])
+        self.assertIn("every socket refused", summary["settings"]["transport"])
+        self.assertEqual(summary["rubric"]["frozen_rubric_rule"], "waived for this fake-mode rehearsal")
         for profile in ("central", "extreme"):
             sc = summary["scenarios"][profile]
             self.assertTrue(sc["complete"])
+            self.assertEqual(sc["ledger"], f"{profile}/ledgers/ledger-pilot.jsonl")
             self.assertTrue(all(s["export_equals_settled"] for s in sc["stages"].values()))
+            self.assertTrue(all(s["reconciliation"]["coverage"]["openai"]["scope"] == "proj_fake"
+                                for s in sc["stages"].values()))
         halt = summary["scenarios"]["cap-check"]["halt"]
         self.assertEqual(halt["stopped"]["kind"], "spend_cap")
         self.assertLessEqual(Decimal(halt["committed_at_halt_usd"]), CAP)
-        self.assertTrue(summary["estimate_check"]["ok"])
+        self.assertNotIn("estimate_check", summary)
         r = self.command(["scripts/dry_run_stages.py", "--data-root", str(self.tmp), "--packs", str(self.tmp / "packs"),
                           "--provenance", str(self.inputs / "provenance.jsonl"), "--out", str(out)])
         self.assertNotEqual(r.returncode, 0)

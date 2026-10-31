@@ -18,23 +18,30 @@ B tier not listed, or a value that is not reported) holds its whole reservation.
 call whose input count is above 272,000 tokens is refused before it is reserved.
 
 **Reservation.** Before each call, r = (I x 1.02 + 256) x p_in x 1.25 + max_output x p_out.
-I is the provider's pre-send token count when one is supplied, and otherwise
-``ESTIMATE_FACTOR`` (2) times the request layer's estimate, whose text rate and B image
-count are unmeasured. The 1.25 prices every input token as a cache write, so a repeat that
-misses the cache stays inside its reservation. max_output is the request's own output
-cap, 32,000 tokens. The ledger header keeps the SHA-256 of the price table, the modifiers
-and these reservation constants, and a ledger written under other values is refused.
+I is the provider's own pre-send token count; the stage runner refuses paid mode until a
+provider token-count client exists. In fake mode only, where no provider exists, I may be
+``ESTIMATE_FACTOR`` (2) times the request layer's estimate. The 1.25 prices every input
+token as a cache write, so a repeat that misses the cache stays inside its reservation.
+max_output is the request's own output cap, 32,000 tokens. The ledger header keeps the
+SHA-256 of the price table, the modifiers and these reservation constants, and a ledger
+written under other values is refused.
 
 **Admission.** A call is admitted only if settled spend plus open and held reservations
 plus r stays at or below the budget's cap: $95 for the pilot stages together, $285 for
 the evaluation. Otherwise a refusal is written and ``SpendHalt`` is raised before
-anything is sent.
+anything is sent. In the evaluation a call is also refused (``reconcile_due``) while the
+oldest settled or held call that no passing reconciliation follows is more than 24 hours
+old.
 
 **Ledger.** One append-only JSONL file per budget; each line is flushed and fsynced
-before the next step, so a reservation is on disk before its request leaves. One process
+before the next step, so a reservation is on disk before its request leaves. Its header
+names the budget, the cap, the pricing hash, the mode and a random ledger id. One process
 holds the file (an exclusive lock) and at most one reservation is open at a time, so
-calls go out one at a time. A reservation closes from its attempt record in the attempt
-log, which keeps the raw response:
+calls go out one at a time. ``open_budget_ledger`` keeps each budget's ledger at one fixed
+place shared by every run, with a register of every ledger created there, so a moved or
+deleted ledger is never silently replaced by a fresh cap: a second ledger for a budget
+needs a new-budget note, which its header keeps. A reservation closes from its attempt
+record in the attempt log, which keeps the raw response:
 
 - a complete response settles at the cost of the usage it reports (input, cache write,
   cache read and output tokens), or as the price modifiers above say;
@@ -46,14 +53,20 @@ log, which keeps the raw response:
 - no attempt record at all also holds it.
 
 After a restart, an open reservation counts as spent until ``recover`` matches it to its
-attempt record in the same way. A reservation names its run and attempt log relative to the
-ledger's folder, so the ledger and its run folders can move together.
+attempt record in the same way. A reservation names its run by the run's own id, and its
+attempt log relative to that run's folder.
 
-**Reconciliation.** ``read_usage_export`` reads a provider usage export (``EXPORT_FIELDS``,
-as CSV or JSON). ``Ledger.reconcile`` prices it with the same table and compares each
-provider's total with the ledger's spend on that provider. Usage above the ledger by
-more than 1% fails, and a failed reconciliation refuses every later reservation until
-``record_correction`` appends a note.
+**Reconciliation.** ``read_usage_export`` reads a usage export in the runner's own format
+(``EXPORT_FIELDS``, as CSV or JSON), not a provider's format. Every row states the
+export's period and its scope (the Anthropic workspace or the OpenAI project), the same
+for all of one provider's rows. The export is cumulative from the ledger's creation: a
+period that starts after the ledger's ``created_at`` or ends before the provider's last
+settled or held call is refused. ``Ledger.reconcile`` prices it with the same table and
+compares each provider's total with the ledger's spend on that provider. Usage above the
+ledger by more than 1% fails, and a failed reconciliation refuses every later reservation
+until ``record_correction`` appends a note. The note first appends, for each provider, a
+settled adjustment of the export's excess over the ledger in that failed reconciliation,
+so committed spend never stays below what the provider reported.
 """
 
 import csv
@@ -62,6 +75,7 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import threading
 import time
 from datetime import datetime, timezone
@@ -101,13 +115,16 @@ WRITE_FACTOR = Decimal("1.25")
 ESTIMATE_FACTOR = 2
 CAPS = {"pilot": Decimal("95"), "evaluation": Decimal("285")}
 RECONCILE_TOLERANCE = Decimal("0.01")
+DAILY_RECONCILE_S = 24 * 3600
 B_INPUT_LIMIT = MODIFIERS["openai"]["long_context"]["above_input_tokens"]
 RESERVATION_RULE = "r = (I x 1.02 + 256) x p_in x 1.25 + max_output x p_out"
 OUTPUT_CAP_RULE = "max_output is the request body's max_tokens (A) or max_output_tokens (B)"
 
 SETTLE, HOLD = "settle", "hold"
+COVERAGE_FIELDS = ("period_start", "period_end", "scope")
 EXPORT_FIELDS = ("provider", "model", "input_tokens", "cache_write_tokens", "cache_read_tokens",
-                 "output_tokens", "cost_usd")
+                 "output_tokens", "cost_usd") + COVERAGE_FIELDS
+REGISTER_NAME = "budgets.jsonl"
 
 
 class LedgerError(RuntimeError):
@@ -132,6 +149,16 @@ def usd(amount: Decimal) -> str:
 
 def _now(clock) -> str:
     return datetime.fromtimestamp(clock(), timezone.utc).isoformat(timespec="milliseconds")
+
+
+def timestamp(text) -> float:
+    """Seconds since the epoch for an ISO 8601 time that names its time zone."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(f"{text!r} is not an ISO 8601 time")
+    t = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        raise ValueError(f"{text!r} names no time zone")
+    return t.timestamp()
 
 
 def pricing_record() -> dict:
@@ -176,7 +203,7 @@ def reservation(model: str, input_tokens: int, max_output_tokens: int) -> Decima
 
 
 def estimated_input_tokens(request_estimate: int) -> int:
-    """The reservation's input count when no provider count is supplied."""
+    """The reservation's input count in fake mode when no count is supplied."""
     return ESTIMATE_FACTOR * request_estimate
 
 
@@ -280,11 +307,24 @@ def charge(provider: str, model: str, status, raw: bytes, reserved=Decimal(0)):
     return SETTLE, cost, tokens, "response usage"
 
 
-def recorded_attempt(entry: dict, base=None):
-    """(attempt record, raw bytes) for a reservation, or None if no attempt was recorded.
-    A relative ``log_root`` is read from ``base``, the ledger's folder."""
-    root = Path(entry["log_root"])
-    log = AttemptLog(Path(base) / root if base is not None and not root.is_absolute() else root)
+def attempt_log_root(entry: dict, base=None, run_roots=None) -> Path:
+    """Where a reservation's attempt log is: ``log_root`` under the run's folder, found by
+    the run's id in ``run_roots``, or else by ``run_root`` relative to ``base``, the ledger's
+    folder. An absolute ``log_root`` is used as it is."""
+    log_root = Path(entry["log_root"])
+    if log_root.is_absolute():
+        return log_root
+    run_root = (run_roots or {}).get(entry.get("run"))
+    if run_root is None:
+        run_root = Path(entry.get("run_root", "."))
+        if base is not None and not run_root.is_absolute():
+            run_root = Path(base) / run_root
+    return Path(run_root) / log_root
+
+
+def recorded_attempt(entry: dict, base=None, run_roots=None):
+    """(attempt record, raw bytes) for a reservation, or None if no attempt was recorded."""
+    log = AttemptLog(attempt_log_root(entry, base, run_roots))
     records = log.attempts(entry["trace_key"], entry["config_sha256"], entry["judge"], entry["repeat"])
     if len(records) < entry["attempt"]:
         return None
@@ -313,7 +353,7 @@ def next_attempt(log, trace_key: str, config_sha256: str, judge: str, slots) -> 
 class Ledger:
     """The write-ahead ledger for one budget (see the module docstring)."""
 
-    def __init__(self, path, budget: str, clock=time.time):
+    def __init__(self, path, budget: str, clock=time.time, mode=None, new_budget_note=None, replaces=()):
         if budget not in CAPS:
             raise ValueError(f"unknown budget {budget!r}; use one of {sorted(CAPS)}")
         self.path, self.budget, self.cap, self.clock = Path(path), budget, CAPS[budget], clock
@@ -325,7 +365,7 @@ class Ledger:
         except OSError:
             self._f.close()
             raise LedgerError(f"{self.path} is held by another run; one run at a time") from None
-        self.entries, self.reservations, self._blocking = [], {}, None
+        self.entries, self.reservations, self.adjustments, self._blocking = [], {}, [], None
         try:
             self._f.seek(0)
             data = self._f.read()
@@ -335,8 +375,10 @@ class Ledger:
                 self._apply(json.loads(line))
             if not self.entries:
                 self._append({"type": "ledger", "budget": budget, "cap_usd": usd(self.cap),
-                              "price_table": PRICE_TABLE_VERSION, "pricing_sha256": pricing_sha256(),
-                              "pricing": pricing_record(), "created_at": _now(clock)})
+                              "ledger_id": secrets.token_hex(8), "mode": mode, "price_table": PRICE_TABLE_VERSION,
+                              "pricing_sha256": pricing_sha256(), "pricing": pricing_record(),
+                              "new_budget_note": new_budget_note, "replaces": list(replaces),
+                              "created_at": _now(clock)})
                 if created:
                     fd = os.open(self.path.parent, os.O_RDONLY)
                     try:
@@ -348,6 +390,8 @@ class Ledger:
                     "ledger", budget, usd(self.cap), pricing_sha256()):
                 raise LedgerError(f"{self.path} is not a {budget} ledger under cap ${usd(self.cap)}, price table "
                                   f"{PRICE_TABLE_VERSION} and these reservation constants")
+            if mode is not None and head.get("mode") != mode:
+                raise LedgerError(f"{self.path} is a {head.get('mode')} ledger, not a {mode} one")
         except BaseException:
             self.close()
             raise
@@ -361,6 +405,22 @@ class Ledger:
 
     def __exit__(self, *exc):
         self.close()
+
+    @property
+    def header(self) -> dict:
+        return self.entries[0]
+
+    @property
+    def ledger_id(self) -> str:
+        return self.header.get("ledger_id")
+
+    @property
+    def created_at(self) -> str:
+        return self.header["created_at"]
+
+    @property
+    def mode(self):
+        return self.header.get("mode")
 
     # -------------------------------------------------------------- entries
 
@@ -379,14 +439,17 @@ class Ledger:
             if r is None or r["state"] != "open":
                 raise LedgerError(f"{self.path}: {t} for {e['id']}, which is not open")
             r.update(state="settled" if t == "settle" else "held",
-                     cost=Decimal(e["cost_usd"]) if t == "settle" else None)
+                     cost=Decimal(e["cost_usd"]) if t == "settle" else None, closed_at=e.get("at"))
         elif t == "reconcile":
             if not e["ok"]:
                 self._blocking = e                # a later passing one does not clear it; a note does
-        elif t == "correction":
+        elif t in ("adjust", "correction"):
             if self._blocking is None or e["reconcile_seq"] != self._blocking["seq"]:
-                raise LedgerError(f"{self.path}: a correction must answer the failed reconciliation")
-            self._blocking = None
+                raise LedgerError(f"{self.path}: an {t} entry must answer the failed reconciliation")
+            if t == "adjust":
+                self.adjustments.append(e)
+            else:
+                self._blocking = None
         elif t not in ("ledger", "refuse"):
             raise LedgerError(f"{self.path}: unknown entry type {t!r}")
         self.entries.append(e)
@@ -410,36 +473,65 @@ class Ledger:
         """What one reservation counts as: its cost once settled, its full amount otherwise."""
         return r["cost"] if r["state"] == "settled" else Decimal(r["amount_usd"])
 
+    def adjusted(self, provider=None) -> Decimal:
+        return sum((Decimal(e["cost_usd"]) for e in self.adjustments if provider in (None, e["provider"])),
+                   Decimal(0))
+
     def totals(self, rows=None) -> dict:
+        """Settled, held, open and committed spend; for the whole budget, settled includes
+        the adjustments recorded after failed reconciliations."""
+        selected = rows is not None
         rows = list(self.reservations.values()) if rows is None else rows
         out = {s: sum((self.spent(r) for r in rows if r["state"] == s), Decimal(0))
                for s in ("settled", "held", "open")}
+        if not selected:
+            out["settled"] += self.adjusted()
         out["committed"] = out["settled"] + out["held"] + out["open"]
         return out
 
     # -------------------------------------------------------------- calls
 
+    def refuse(self, fields: dict, amount: Decimal, kind: str, message: str, **extra):
+        """Write a refusal and raise ``SpendHalt``; nothing is sent."""
+        entry = dict(fields, amount_usd=usd(amount), committed_before_usd=usd(self.totals()["committed"]),
+                     cap_usd=usd(self.cap), at=_now(self.clock))
+        refused = self._append(dict(entry, type="refuse", reason=kind, **extra))
+        raise SpendHalt(kind, message, refused)
+
+    def reconcile_due(self):
+        """The oldest settled or held call that no passing reconciliation follows, when it is
+        more than a day old; otherwise None."""
+        last_ok = max((e["seq"] for e in self.entries if e["type"] == "reconcile" and e["ok"]), default=-1)
+        for e in self.entries:
+            if (e["type"] == "reserve" and e["seq"] > last_ok
+                    and self.reservations[e["id"]]["state"] in ("settled", "held")):
+                return e if self.clock() - timestamp(e["at"]) > DAILY_RECONCILE_S else None
+        return None
+
     def reserve(self, fields: dict, amount: Decimal) -> str:
         """Admit and record one reservation before its call, or refuse it (``SpendHalt``)."""
         if self.open_reservations():
             raise ConcurrentCall("a reservation is still open; calls go out one at a time")
-        t = self.totals()
-        entry = dict(fields, amount_usd=usd(amount), committed_before_usd=usd(t["committed"]),
-                     cap_usd=usd(self.cap), at=_now(self.clock))
         if self._blocking is not None:
-            refused = self._append(dict(entry, type="refuse", reason="reconciliation",
-                                        reconcile_seq=self._blocking["seq"]))
-            raise SpendHalt("reconciliation", "a failed reconciliation has no correction note yet", refused)
+            self.refuse(fields, amount, "reconciliation", "a failed reconciliation has no correction note yet",
+                        reconcile_seq=self._blocking["seq"])
+        due = self.reconcile_due() if self.budget == "evaluation" else None
+        if due is not None:
+            self.refuse(fields, amount, "reconcile_due",
+                        f"the call reserved at {due['at']} is more than a day old and no passing reconciliation "
+                        "follows it; reconcile the evaluation ledger, record a note, and resume",
+                        oldest_unreconciled=due["id"])
         if fields.get("provider") == "openai" and (fields.get("input_tokens") or 0) > B_INPUT_LIMIT:
-            refused = self._append(dict(entry, type="refuse", reason="long_context"))
-            raise SpendHalt("long_context", f"the B request's input count {fields['input_tokens']} is above "
-                            f"{B_INPUT_LIMIT} tokens, which the provider prices at a long-context rate", refused)
+            self.refuse(fields, amount, "long_context",
+                        f"the B request's input count {fields['input_tokens']} is above {B_INPUT_LIMIT} tokens, "
+                        "which the provider prices at a long-context rate")
+        t = self.totals()
         if not t["committed"] + amount <= self.cap:
-            refused = self._append(dict(entry, type="refuse", reason="spend_cap"))
-            raise SpendHalt("spend_cap", f"the reservation of ${usd(amount)} on ${usd(t['committed'])} already "
-                            f"committed would pass the {self.budget} cap of ${usd(self.cap)}", refused)
+            self.refuse(fields, amount, "spend_cap", f"the reservation of ${usd(amount)} on ${usd(t['committed'])} "
+                        f"already committed would pass the {self.budget} cap of ${usd(self.cap)}")
         rid = f"r{len(self.reservations) + 1:06d}"
-        self._append(dict(entry, type="reserve", id=rid))
+        self._append(dict(fields, amount_usd=usd(amount), committed_before_usd=usd(t["committed"]),
+                          cap_usd=usd(self.cap), at=_now(self.clock), type="reserve", id=rid))
         return rid
 
     def close_reservation(self, rid: str, found) -> dict:
@@ -457,9 +549,9 @@ class Ledger:
                              "basis": detail, "price_table": PRICE_TABLE_VERSION,
                              "over_reservation": cost > Decimal(r["amount_usd"]), "at": _now(self.clock)})
 
-    def recover(self, find=None) -> list:
+    def recover(self, find=None, run_roots=None) -> list:
         """Close every reservation left open by an earlier process (see the module docstring)."""
-        find = find or (lambda entry: recorded_attempt(entry, self.path.parent))
+        find = find or (lambda entry: recorded_attempt(entry, self.path.parent, run_roots))
         closed = []
         for r in self.open_reservations():
             found = find(r)
@@ -472,10 +564,26 @@ class Ledger:
 
     # -------------------------------------------------------------- reconciliation
 
+    def last_closed_at(self, provider: str):
+        """When the provider's last reservation was settled or held, or None."""
+        times = [r["closed_at"] for r in self.reservations.values()
+                 if r["provider"] == provider and r["state"] in ("settled", "held") and r.get("closed_at")]
+        return max(times, key=timestamp) if times else None
+
     def reconcile(self, rows: list, export_sha256: str) -> dict:
-        """Compare a provider usage export with the ledger; a failure blocks later calls."""
+        """Compare a usage export with the ledger; a failure blocks later calls. An export
+        that does not cover the ledger's whole life is refused (``ValueError``)."""
         if self.open_reservations():
             raise LedgerError("recover the open reservation before reconciling")
+        coverage = export_coverage(rows)
+        for p, c in sorted(coverage.items()):
+            if timestamp(c["period_start"]) > timestamp(self.created_at):
+                raise ValueError(f"the {p} export starts at {c['period_start']}, after the ledger was created at "
+                                 f"{self.created_at}; an export is cumulative from the ledger's creation")
+            last = self.last_closed_at(p)
+            if last is not None and timestamp(c["period_end"]) < timestamp(last):
+                raise ValueError(f"the {p} export ends at {c['period_end']}, before the ledger's last {p} call "
+                                 f"was settled or held at {last}")
         by_provider = {}
         for row in rows:
             by_provider.setdefault(row["provider"], Decimal(0))
@@ -483,6 +591,8 @@ class Ledger:
         ledger_by = {}
         for r in self.reservations.values():
             ledger_by[r["provider"]] = ledger_by.get(r["provider"], Decimal(0)) + self.spent(r)
+        for e in self.adjustments:
+            ledger_by[e["provider"]] = ledger_by.get(e["provider"], Decimal(0)) + Decimal(e["cost_usd"])
         missing = sorted(p for p, v in ledger_by.items() if v > 0 and p not in by_provider)
         if missing:
             raise ValueError(f"the export has no rows for {missing}; export both providers' usage")
@@ -494,16 +604,26 @@ class Ledger:
             providers[p] = {"export_usd": usd(exported), "ledger_usd": usd(ledgered), "within": within,
                             "excess_share": (f"{(exported - ledgered) / ledgered:.6f}" if ledgered else None)}
         return self._append({"type": "reconcile", "ok": ok, "export_sha256": export_sha256,
-                             "export_rows": len(rows), "tolerance": usd(RECONCILE_TOLERANCE),
+                             "export_rows": len(rows), "coverage": coverage, "tolerance": usd(RECONCILE_TOLERANCE),
                              "providers": providers, "at": _now(self.clock)})
 
     def record_correction(self, note: str) -> dict:
+        """Answer the failed reconciliation: first a settled adjustment per provider of the
+        export's excess over the ledger in it, then the note, which clears the block."""
         if self._blocking is None:
             raise ValueError("no failed reconciliation needs a correction")
         if not (isinstance(note, str) and note.strip()):
             raise ValueError("a correction note is required")
-        return self._append({"type": "correction", "reconcile_seq": self._blocking["seq"], "note": note,
-                             "at": _now(self.clock)})
+        seq = self._blocking["seq"]
+        for p, v in sorted(self._blocking["providers"].items()):
+            excess = Decimal(v["export_usd"]) - Decimal(v["ledger_usd"])
+            done = sum((Decimal(e["cost_usd"]) for e in self.adjustments
+                        if e["reconcile_seq"] == seq and e["provider"] == p), Decimal(0))
+            if excess > done:
+                self._append({"type": "adjust", "provider": p, "cost_usd": usd(excess - done), "reconcile_seq": seq,
+                              "basis": "the provider's usage above the ledger in the failed reconciliation",
+                              "at": _now(self.clock)})
+        return self._append({"type": "correction", "reconcile_seq": seq, "note": note, "at": _now(self.clock)})
 
     def blocking_reconciliation(self):
         return self._blocking
@@ -533,10 +653,12 @@ class Ledger:
         ids = {r["id"] for r in rows}
         over = [e for e in self.entries if e["type"] == "settle" and e["over_reservation"] and e["id"] in ids]
         amounts = [Decimal(r["amount_usd"]) for r in rows]
-        return {"budget": self.budget, "cap_usd": usd(self.cap), "ledger": str(self.path),
+        return {"budget": self.budget, "cap_usd": usd(self.cap),
+                "ledger": {"file": self.path.name, "id": self.ledger_id, "last_seq": len(self.entries) - 1},
                 "price_table": PRICE_TABLE_VERSION, "budget_committed_usd": usd(ta["committed"]),
                 "budget_settled_usd": usd(ta["settled"]), "budget_held_usd": usd(ta["held"]),
-                "budget_open_usd": usd(ta["open"]), "headroom_usd": usd(self.cap - ta["committed"]),
+                "budget_open_usd": usd(ta["open"]), "budget_adjusted_usd": usd(self.adjusted()),
+                "headroom_usd": usd(self.cap - ta["committed"]),
                 "selected_spent_usd": usd(t["committed"]), "selected_settled_usd": usd(t["settled"]),
                 "selected_held_usd": usd(t["held"]),
                 "reservations": len(rows), "settled": sum(r["state"] == "settled" for r in rows),
@@ -550,6 +672,64 @@ class Ledger:
                                       "amount_usd": self.reservations[e["id"]]["amount_usd"]} for e in over]}
 
 
+def ledger_name(budget: str) -> str:
+    return f"ledger-{budget}.jsonl"
+
+
+def _note_given(note) -> bool:
+    return isinstance(note, str) and bool(note.strip())
+
+
+def _register(folder: Path, led: Ledger) -> None:
+    line = json.dumps({"budget": led.budget, "ledger_id": led.ledger_id, "file": led.path.name, "mode": led.mode,
+                       "created_at": led.created_at, "new_budget_note": led.header.get("new_budget_note"),
+                       "replaces": led.header.get("replaces", [])}, sort_keys=True) + "\n"
+    with open(folder / REGISTER_NAME, "ab") as f:
+        f.write(line.encode("utf-8"))
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def open_budget_ledger(folder, budget: str, mode: str, *, create=False, new_budget_note=None,
+                       clock=time.time) -> Ledger:
+    """The budget's one ledger, ``folder``/ledger-<budget>.jsonl, shared by every run.
+
+    ``budgets.jsonl`` in ``folder`` lists every ledger created there. A ledger is created
+    only with ``create``. Once a ledger for the budget has been created, another one (after
+    the first was moved aside or deleted) needs ``new_budget_note``, which the new ledger's
+    header keeps; otherwise a fresh cap would quietly replace the spend already committed.
+    """
+    folder = Path(folder)
+    path = folder / ledger_name(budget)
+    register = folder / REGISTER_NAME
+    entries = ([json.loads(line) for line in register.read_text(encoding="utf-8").splitlines() if line.strip()]
+               if register.is_file() else [])
+    earlier = [e for e in entries if e.get("budget") == budget]
+    if path.exists():
+        if _note_given(new_budget_note):
+            raise LedgerError(f"{path} exists; a new-budget note starts a new {budget} ledger only after this one "
+                              "is moved aside")
+        led = Ledger(path, budget, clock, mode=mode)
+        if led.ledger_id not in {e.get("ledger_id") for e in earlier}:
+            if earlier and not _note_given(led.header.get("new_budget_note")):
+                led.close()
+                raise LedgerError(f"{path} is not the {budget} ledger registered in {register}")
+            _register(folder, led)            # created, then stopped before its registration
+        return led
+    if not create:
+        raise LedgerError(f"no {budget} ledger at {path}")
+    others = sorted(p.name for p in folder.glob(f"ledger-{budget}*")) if folder.is_dir() else []
+    if (earlier or others) and not _note_given(new_budget_note):
+        before = ", ".join([f"{e['ledger_id']} created {e['created_at']}" for e in earlier] + others)
+        raise LedgerError(f"a {budget} ledger was created here before ({before}) and is not at {path}; restore it, "
+                          f"or give a new-budget note to start a new {budget} budget")
+    folder.mkdir(parents=True, exist_ok=True)
+    led = Ledger(path, budget, clock, mode=mode, new_budget_note=new_budget_note if _note_given(new_budget_note)
+                 else None, replaces=[e["ledger_id"] for e in earlier])
+    _register(folder, led)
+    return led
+
+
 # ---------------------------------------------------------------- metered transport
 
 class MeteredTransport:
@@ -557,12 +737,21 @@ class MeteredTransport:
 
     ``begin`` names the trajectory and the input count each judge's request is priced at.
     Before a send, the previous reservation is closed from the attempt record the
-    dispatcher wrote for it; ``finish`` closes the last one after the trajectory.
+    dispatcher wrote for it; ``finish`` closes the last one after the trajectory. A slot
+    folder holding a raw response without its attempt record (a stop between the two
+    writes) is refused before anything is reserved or sent.
     """
 
-    def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root):
+    def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root, run_root=None):
         self.inner, self.ledger, self.run, self.stage = inner, ledger, run, stage
-        self.log_root = os.path.relpath(Path(log_root).resolve(), ledger.path.parent.resolve())
+        led_dir = ledger.path.parent.resolve()
+        if run_root is None:
+            self.run_root, self.run_root_rel = None, "."
+            self.log_root = os.path.relpath(Path(log_root).resolve(), led_dir)
+        else:
+            self.run_root = Path(run_root).resolve()
+            self.run_root_rel = os.path.relpath(self.run_root, led_dir)
+            self.log_root = os.path.relpath(Path(log_root).resolve(), self.run_root)
         self._busy = threading.Lock()
         self._open = None
         self.ctx = None
@@ -575,7 +764,9 @@ class MeteredTransport:
     def _close_open(self) -> None:
         if self._open is not None:
             rid, self._open = self._open, None
-            self.ledger.close_reservation(rid, recorded_attempt(self.ledger.reservations[rid], self.ledger.path.parent))
+            roots = {self.run: self.run_root} if self.run_root is not None else None
+            self.ledger.close_reservation(rid, recorded_attempt(self.ledger.reservations[rid],
+                                                                self.ledger.path.parent, roots))
 
     def finish(self) -> None:
         if not self._busy.acquire(blocking=False):
@@ -602,21 +793,52 @@ class MeteredTransport:
                       "slot": f"{judge}{repeat}", "attempt": attempt, "provider": request.provider,
                       "model": request.model, "request_sha256": request.sha256,
                       "input_tokens": basis["input_tokens"], "input_source": basis["input_source"],
-                      "max_output_tokens": basis["max_output_tokens"], "log_root": self.log_root}
+                      "max_output_tokens": basis["max_output_tokens"], "run_root": self.run_root_rel,
+                      "log_root": self.log_root}
+            folder = c["log"].slot_dir(c["trace_key"], c["config_sha256"], judge, repeat)
+            orphans = (sorted(p.name for p in folder.glob("*.raw") if not p.with_suffix(".json").exists())
+                       if folder.is_dir() else [])
+            if orphans:
+                self.ledger.refuse(fields, amount, "orphan_attempt",
+                                   f"{folder} holds {', '.join(orphans)} without its attempt record; inspect it, "
+                                   "nothing sent")
             self._open = self.ledger.reserve(fields, amount)
             return self.inner.send(request)
         finally:
             self._busy.release()
 
 
-# ---------------------------------------------------------------- provider usage export
+# ---------------------------------------------------------------- usage export
+
+def _coverage_value(path, i, field, value):
+    if not (isinstance(value, str) and value.strip()):
+        raise ValueError(f"{path}: row {i}: {field} must be stated")
+    if field != "scope":
+        timestamp(value)
+    return value.strip()
+
+
+def export_coverage(rows: list) -> dict:
+    """{provider: {"period_start", "period_end", "scope"}} from export rows; every row of one
+    provider must state the same period and scope (``ValueError`` otherwise)."""
+    coverage = {}
+    for i, row in enumerate(rows):
+        c = {k: _coverage_value("export", i, k, row.get(k)) for k in COVERAGE_FIELDS}
+        if timestamp(c["period_start"]) > timestamp(c["period_end"]):
+            raise ValueError(f"export row {i}: the period ends before it starts")
+        if coverage.setdefault(row["provider"], c) != c:
+            raise ValueError(f"export row {i}: every {row['provider']} row must state the same period and scope")
+    return coverage
+
 
 def read_usage_export(path):
-    """(rows, SHA-256) from a usage export: a CSV with the header ``EXPORT_FIELDS``, or JSON,
-    either a list of objects with those keys or {"rows": [...]}.
+    """(rows, SHA-256) from a usage export in the runner's own format: a CSV with the header
+    ``EXPORT_FIELDS``, or JSON, either a list of objects with those keys or {"rows": [...]}.
 
     Token columns are disjoint counts: ``input_tokens`` excludes cache writes and reads.
     ``cost_usd`` may be empty; when given, the larger of it and the priced tokens counts.
+    ``period_start`` and ``period_end`` (ISO 8601 with a time zone) and ``scope`` (the
+    Anthropic workspace or OpenAI project) state what the export covers.
     """
     path = Path(path)
     data = path.read_bytes()
@@ -650,7 +872,9 @@ def read_usage_export(path):
         cost = None if cost in (None, "") else Decimal(str(cost))
         if cost is not None and not (cost.is_finite() and cost >= 0):
             raise ValueError(f"{path}: row {i}: cost_usd must be a non-negative amount")
-        rows.append({"provider": row["provider"], "model": model, "tokens": tokens, "cost_usd": cost})
+        rows.append(dict({"provider": row["provider"], "model": model, "tokens": tokens, "cost_usd": cost},
+                         **{k: _coverage_value(path, i, k, row[k]) for k in COVERAGE_FIELDS}))
+    export_coverage(rows)
     return rows, hashlib.sha256(data).hexdigest()
 
 
@@ -660,10 +884,16 @@ def export_usd(row: dict) -> Decimal:
 
 
 def write_usage_export(path, rows) -> None:
-    """Write rows of {"provider", "model", "tokens", "cost_usd"} as an export CSV."""
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, lineterminator="\n")
-        w.writerow(EXPORT_FIELDS)
-        for row in rows:
-            w.writerow([row["provider"], row["model"]] + [row["tokens"][k] for k in TOKEN_KINDS]
-                       + ["" if row.get("cost_usd") is None else usd(row["cost_usd"])])
+    """Write rows of {"provider", "model", "tokens", "cost_usd", "period_start",
+    "period_end", "scope"} as an export CSV, replacing the file in one step."""
+    path = Path(path)
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(EXPORT_FIELDS)
+    for row in rows:
+        w.writerow([row["provider"], row["model"]] + [row["tokens"][k] for k in TOKEN_KINDS]
+                   + ["" if row.get("cost_usd") is None else usd(row["cost_usd"])]
+                   + [row[k] for k in COVERAGE_FIELDS])
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(buf.getvalue(), encoding="utf-8")
+    os.replace(tmp, path)

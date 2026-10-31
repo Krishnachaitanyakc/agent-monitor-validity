@@ -17,18 +17,25 @@ scripted usage, and the reservations use the scripted count as the provider's co
   cap-check/  the extreme pilot, all calls valid, repeated on one pilot ledger in new run
               folders until the $95 cap halts it
 
+Each scenario keeps its pilot ledger in its own ledgers/ folder, apart from its run
+folders, as the runner keeps one ledger per budget for every run. The rubric is still a
+draft, so P3 runs here as a fake-mode rehearsal with the runner's frozen-rubric rule
+waived; the summary says so, and the runner itself never waives it.
+
 In central and extreme the same scripted events run, keyed by each stage's case order:
 P1 case 3's A2 misses the cache; P2 case 2's A1 times out once, case 5's B1 refuses and
 case 8's A1 gets an HTTP 400, which halts the stage until a correction note is recorded;
 P3 case 4's A3 and case 7's B1 reach the output cap. After each stage the fake provider's
-usage export is reconciled with the ledger, and the run checks that the ledger's settled
-spend equals that export exactly.
+usage export, stating its period from the ledger's creation and each provider's scope, is
+reconciled with the ledger, and the run checks that the ledger's settled spend equals
+that export exactly.
 
 Outputs go to a staging folder next to --out and are published in one rename, only if
 every check passes; --out must not exist yet. They are never committed:
   summary.json   per scenario and stage: cases, spend, projection, the gates, the
                  reconciliation, the reservations, and where the cap check halted
-  <scenario>/    the run folders: ledgers, attempt logs, stage reports, usage exports
+  <scenario>/    ledgers/ (the pilot ledger and the fake usage export) and the run
+                 folders: attempt logs and stage reports
 """
 
 import argparse
@@ -72,11 +79,15 @@ def run_pilot(root, ledger, profile, first, everything, read_images, export, wit
         items = stage_items(stage, first, everything)
         provider = RS.ScriptedProvider(profile, events=events_for(stage, items) if with_events else None,
                                        export_path=export)
+        provider.period_start = ledger.created_at
         corrections = []
         while True:
-            report = RS.run_stage(stage, root, items, mode="fake", transport=provider, ledger=ledger,
-                                  read_images=read_images, workspace=RS.FAKE_WORKSPACE, counter=provider,
-                                  settings=settings)
+            try:
+                report = RS.run_stage(stage, root, items, mode="fake", transport=provider, ledger=ledger,
+                                      read_images=read_images, workspace=RS.FAKE_WORKSPACE, counter=provider,
+                                      settings=settings, rubric_check=False)
+            finally:
+                provider.write_export()
             stop = report["stopped"]
             if stop is None or stop["kind"] != "request_error" or not with_events:
                 break
@@ -152,36 +163,25 @@ def _run_into(staging, data_root, first, everything, args):
     settings = {"python": platform.python_version(), "code": RS.code_version(),
                 "fence": {"profiles": fence.installed_profiles(),
                           "config_sha256": fetch.sha256_file(Path(os.environ[fence.CONFIG_ENV]).expanduser())},
-                "transport": "fake transport with scripted provider-shaped streams; every socket refused"}
-    summary = {"settings": settings, "price_table": S.PRICE_TABLE_VERSION, "reservation_rule": S.RESERVATION_RULE,
-               "estimate_factor": S.ESTIMATE_FACTOR, "events": {k: [list(e) for e in v] for k, v in EVENTS.items()},
+                "transport": RS.fake_transport_line()}
+    summary = {"settings": settings, "price_table": S.PRICE_TABLE_VERSION, "pricing_sha256": S.pricing_sha256(),
+               "reservation_rule": S.RESERVATION_RULE,
+               "rubric": {"status": R.RUBRIC_STATUS, "frozen_rubric_rule": "waived for this fake-mode rehearsal"},
+               "events": {k: [list(e) for e in v] for k, v in EVENTS.items()},
                "packs": {"P1": len(first), "P2": len(everything), "P3": len(everything)}, "scenarios": {}}
     all_ok = True
 
-    # The conservative estimate is never below the request layer's own, on every pack.
-    estimates = []
-    for item in everything:
-        prep = R.prepare(item.pack, read_images(item.entries))
-        for j in "AB":
-            est = R.token_estimate(j, prep["requests"][j], prep["image_sizes"])["input_tokens"]
-            estimates.append({"trace_key": item.trace_key, "judge": j, "request_estimate": est,
-                              "reservation_basis": S.estimated_input_tokens(est)})
-        del prep
-    estimate_ok = all(e["reservation_basis"] >= e["request_estimate"] for e in estimates)
-    all_ok &= estimate_ok
-    summary["estimate_check"] = {"ok": estimate_ok, "rows": estimates}
-
     for profile in ("central", "extreme"):
-        root = staging / profile
-        with S.Ledger(RS.ledger_path(root, "pilot"), "pilot") as ledger:
+        root, ledgers = staging / profile / "run", staging / profile / "ledgers"
+        with S.Ledger(RS.ledger_path(ledgers, "pilot"), "pilot", mode="fake") as ledger:
             stages, ok = run_pilot(root, ledger, profile, first, everything, read_images,
-                                   RS.export_path(root, "pilot"), True, settings)
+                                   RS.export_path(ledgers, "pilot"), True, settings)
             totals = ledger.totals()
         complete = all(s["report"]["complete"] for s in stages.values()) and len(stages) == 3
         all_ok &= ok and complete and totals["committed"] <= S.CAPS["pilot"]
         summary["scenarios"][profile] = {
             "tokens_per_call": RS.USAGE_PROFILES[profile], "complete": complete, "checks_ok": ok,
-            "ledger": str(RS.ledger_path(root, "pilot").relative_to(staging)),
+            "ledger": str(RS.ledger_path(ledgers, "pilot").relative_to(staging)),
             "totals_usd": {k: S.usd(v) for k, v in totals.items()},
             "stages": {s: dict(_brief(v["report"]), reconciliation=v["reconciliation"],
                                corrections=v["corrections"], export_equals_settled=v["export_equals_settled"])
@@ -189,12 +189,13 @@ def _run_into(staging, data_root, first, everything, args):
 
     # The cap check: the extreme pilot, repeated on one ledger until the cap halts it.
     cap_root = staging / "cap-check"
+    cap_ledgers = cap_root / "ledgers"
     halt, pilots = None, []
-    with S.Ledger(RS.ledger_path(cap_root, "pilot"), "pilot") as ledger:
+    with S.Ledger(RS.ledger_path(cap_ledgers, "pilot"), "pilot", mode="fake") as ledger:
         for k in range(1, MAX_PILOTS + 1):
             root = cap_root / f"pilot-{k:02d}"
             stages, ok = run_pilot(root, ledger, "extreme", first, everything, read_images,
-                                   RS.export_path(cap_root, "pilot"), False, settings)
+                                   RS.export_path(cap_ledgers, "pilot"), False, settings)
             all_ok &= ok
             pilots.append({s: _brief(v["report"])["spend"]["stage_spent_usd"] for s, v in stages.items()})
             stopped = [(s, v["report"]) for s, v in stages.items() if not v["report"]["complete"]]
@@ -213,7 +214,7 @@ def _run_into(staging, data_root, first, everything, args):
     all_ok &= cap_ok
     summary["scenarios"]["cap-check"] = {
         "tokens_per_call": RS.USAGE_PROFILES["extreme"], "checks_ok": cap_ok,
-        "ledger": str(RS.ledger_path(cap_root, "pilot").relative_to(staging)),
+        "ledger": str(RS.ledger_path(cap_ledgers, "pilot").relative_to(staging)),
         "pilots": pilots, "halt": halt, "calls_reserved": sent, "totals_usd": {k: S.usd(v) for k, v in totals.items()}}
     summary["ok"] = all_ok
 
@@ -241,7 +242,7 @@ def _run_into(staging, data_root, first, everything, args):
               f"{h['stopped']['trace_key']}: ${_cents(r['committed_before_usd'])} committed, reservation "
               f"${Decimal(r['amount_usd']).normalize()} refused against the ${_cents(S.usd(S.CAPS['pilot']))} cap; "
               f"{cc['calls_reserved']} calls reserved")
-    print(f"estimate check: {'ok' if estimate_ok else 'FAIL'} on {len(estimates)} requests")
+    print(f"transport: {settings['transport']}; P3 rubric rule waived (rubric {R.RUBRIC_STATUS})")
     return all_ok, summary
 
 

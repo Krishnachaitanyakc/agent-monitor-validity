@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +32,7 @@ from test_requests import answer, images_for, synthetic_pack  # noqa: E402
 
 A, B = R.A_MODEL, R.B_MODEL
 CAP = S.CAPS["pilot"]
+START, END = "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z"        # a period that covers every test ledger
 
 
 def a_raw(inp=0, write=0, read=0, out=3000, stop="end_turn", msg_id="msg_1", one_hour=0, tier="standard",
@@ -136,7 +138,7 @@ class TestReservation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 S.reservation(A, i, o)
 
-    def test_the_conservative_estimate_never_underestimates_the_request_layers(self):
+    def test_the_fake_mode_estimate_never_underestimates_the_request_layers(self):
         self.assertEqual(S.ESTIMATE_FACTOR, 2)
         cases = [(synthetic_pack(1), (4, 3)), (synthetic_pack(4), (300, 200)),
                  (synthetic_pack(3, shots=[True, False, True, False]), (1280, 720)),
@@ -268,6 +270,7 @@ class TestLedger(LedgerCase):
         self.assertEqual((rows[0]["budget"], rows[0]["cap_usd"], rows[0]["price_table"],
                           rows[0]["pricing"]["reservation"]["estimate_factor"], rows[0]["pricing_sha256"]),
                          ("pilot", "95", S.PRICE_TABLE_VERSION, 2, S.pricing_sha256()))
+        self.assertEqual(len(rows[0]["ledger_id"]), 16)
         self.assertEqual(rows[1]["committed_before_usd"], "0")
 
     def test_admission_at_the_cap_boundary(self):
@@ -563,9 +566,10 @@ class TestReconcile(LedgerCase):
         return S.read_usage_export(path)
 
     @staticmethod
-    def row(provider, model, inp=0, write=0, read=0, out=0, cost=""):
+    def row(provider, model, inp=0, write=0, read=0, out=0, cost="", start=START, end=END, scope=None):
         return {"provider": provider, "model": model, "input_tokens": inp, "cache_write_tokens": write,
-                "cache_read_tokens": read, "output_tokens": out, "cost_usd": cost}
+                "cache_read_tokens": read, "output_tokens": out, "cost_usd": cost, "period_start": start,
+                "period_end": end, "scope": scope or ("wrkspc_study" if provider == "anthropic" else "proj_study")}
 
     def test_csv_and_json_exports_read_the_same(self):
         rows = [self.row("anthropic", A, write=60000, out=3000), self.row("openai", B, inp=60000, out=3000, cost="0.2")]
@@ -574,14 +578,22 @@ class TestReconcile(LedgerCase):
         self.assertEqual(from_csv, from_json)
         self.assertNotEqual(sha_csv, sha_json)
         self.assertEqual([S.export_usd(r) for r in from_csv], [Decimal("0.18"), Decimal("0.2")])
+        self.assertEqual((from_csv[0]["period_start"], from_csv[0]["scope"]), (START, "wrkspc_study"))
 
     def test_bad_exports_are_refused(self):
         good = self.row("anthropic", A, out=1)
         for rows in ([dict(good, model="claude-sonnet-5.5")], [dict(good, provider="openai")],
-                     [dict(good, output_tokens=-1)], [dict(good, output_tokens="1.5")], [dict(good, cost_usd="-1")]):
+                     [dict(good, output_tokens=-1)], [dict(good, output_tokens="1.5")], [dict(good, cost_usd="-1")],
+                     [dict(good, period_start="")], [dict(good, scope=" ")], [dict(good, period_end="soon")],
+                     [dict(good, period_end="2026-06-01T00:00:00")], [dict(good, period_end="2025-01-01T00:00:00Z")],
+                     [good, dict(good, scope="wrkspc_other")], [good, dict(good, period_start="2026-02-01T00:00:00Z")]):
             with self.assertRaises(ValueError):
                 self.export("bad.json", rows)
         (self.tmp / "bad.csv").write_text("provider,model,tokens\n")
+        with self.assertRaises(ValueError):
+            S.read_usage_export(self.tmp / "bad.csv")
+        no_period = ",".join(f for f in S.EXPORT_FIELDS if f not in S.COVERAGE_FIELDS)
+        (self.tmp / "bad.csv").write_text(no_period + "\nanthropic,claude-sonnet-5,0,0,0,1,\n")
         with self.assertRaises(ValueError):
             S.read_usage_export(self.tmp / "bad.csv")
         (self.tmp / "bad.txt").write_text("")
@@ -602,6 +614,10 @@ class TestReconcile(LedgerCase):
         entry = led.reconcile(rows, sha)
         self.assertFalse(entry["ok"])
         self.assertEqual(entry["providers"]["anthropic"]["excess_share"], "0.010010")
+        self.assertEqual(entry["coverage"], {"anthropic": {"period_start": START, "period_end": END,
+                                                           "scope": "wrkspc_study"},
+                                             "openai": {"period_start": START, "period_end": END,
+                                                        "scope": "proj_study"}})
         self.assertFalse(led.reconciled_after_last_call())
         with self.assertRaises(S.SpendHalt) as cm:
             led.reserve(fields(), Decimal("0.01"))
@@ -617,6 +633,61 @@ class TestReconcile(LedgerCase):
         led.close()
         reopened = self.ledger()
         self.assertIsNone(reopened.blocking_reconciliation())
+        self.assertEqual(reopened.adjusted(), Decimal("0.002002"))     # the failed export's anthropic excess
+
+    def test_a_correction_settles_what_the_provider_reported_above_the_ledger(self):
+        led = self.ledger()
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))          # $0.20
+        self.settled(led, "openai", B, b_raw(100000, 0))                     # $0.20
+        rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=150000), self.row("openai", B, inp=95000)])
+        self.assertFalse(led.reconcile(rows, sha)["ok"])
+        real_append = led._append
+
+        def stop_before_the_note(entry):
+            if entry["type"] == "correction":
+                raise KeyboardInterrupt
+            return real_append(entry)
+
+        with mock.patch.object(led, "_append", stop_before_the_note):
+            with self.assertRaises(KeyboardInterrupt):
+                led.record_correction("Checked the export.")
+        led.close()
+        led = self.ledger()
+        self.assertIsNotNone(led.blocking_reconciliation())
+        note = led.record_correction("Checked the export: the usage is the study's.")
+        adjust = [e for e in led.entries if e["type"] == "adjust"]
+        self.assertEqual([(e["provider"], Decimal(e["cost_usd"]), e["reconcile_seq"]) for e in adjust],
+                         [("anthropic", Decimal("0.1"), note["reconcile_seq"])])   # once, and none for openai
+        self.assertIsNone(led.blocking_reconciliation())
+        self.assertEqual(led.totals(), {"settled": Decimal("0.5"), "held": 0, "open": 0, "committed": Decimal("0.5")})
+        self.assertEqual(Decimal(led.summary()["budget_adjusted_usd"]), Decimal("0.1"))
+        self.assertTrue(led.reconcile(rows, sha)["ok"])
+        led.close()
+        led = self.ledger()
+        self.assertEqual(led.totals()["committed"], Decimal("0.5"))
+        led.close()
+        lines = self.path.read_text().splitlines()
+        stray = {"type": "adjust", "provider": "openai", "cost_usd": "1", "reconcile_seq": 1, "at": "now",
+                 "seq": len(lines)}
+        self.path.write_text("\n".join(lines + [json.dumps(stray)]) + "\n")
+        with self.assertRaises(S.LedgerError):                               # an adjustment answers a failure only
+            S.Ledger(self.path, "pilot")
+
+    def test_an_export_must_cover_the_ledger_from_its_creation_to_its_last_call(self):
+        now = [1800000000.0]
+        led = S.Ledger(self.path, "pilot", clock=lambda: now[0])
+        self.addCleanup(led.close)
+        now[0] += 60
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))
+        last = led.entries[-1]["at"]
+        late, _ = self.export("late.csv", [self.row("anthropic", A, inp=100000, start=last)])
+        with self.assertRaisesRegex(ValueError, "after the ledger was created"):
+            led.reconcile(late, "late")
+        early, _ = self.export("early.csv", [self.row("anthropic", A, inp=100000, end=led.created_at)])
+        with self.assertRaisesRegex(ValueError, "before the ledger's last anthropic call"):
+            led.reconcile(early, "early")
+        exact, _ = self.export("exact.csv", [self.row("anthropic", A, inp=100000, start=led.created_at, end=last)])
+        self.assertEqual(led.reconcile(exact, "exact")["coverage"]["anthropic"]["period_end"], last)
 
     def test_an_export_missing_a_provider_is_refused(self):
         led = self.ledger()
@@ -629,10 +700,108 @@ class TestReconcile(LedgerCase):
         self.assertTrue(led.reconcile(rows, sha)["ok"])
 
 
-class TestSimulatedPilot(LedgerCase):
-    """The Oct 28 pilot plan before the cuts, at extreme token counts, against the $95 cap."""
+class TestDailyReconciliation(LedgerCase):
+    def test_the_evaluation_refuses_a_call_while_one_more_than_a_day_old_is_unreconciled(self):
+        now = [1800000000.0]
+        led = S.Ledger(self.tmp / "ledger-evaluation.jsonl", "evaluation", clock=lambda: now[0])
+        self.addCleanup(led.close)
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), ({"http_status": 200}, a_raw(inp=1000, out=0)))
+        now[0] += S.DAILY_RECONCILE_S                                  # exactly a day: still admitted
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), None)
+        now[0] += 1
+        self.assertEqual(led.reconcile_due()["seq"], 1)
+        with self.assertRaises(S.SpendHalt) as cm:
+            led.reserve(fields(), Decimal("0.5"))
+        self.assertEqual((cm.exception.kind, led.entries[-1]["oldest_unreconciled"]), ("reconcile_due", "r000001"))
+        rows = [{"provider": "anthropic", "model": A, "tokens": {"input": 1000, "cache_write": 0, "cache_read": 0,
+                                                                  "output": 0}, "cost_usd": None,
+                 "period_start": START, "period_end": END, "scope": "wrkspc_study"}]
+        self.assertTrue(led.reconcile(rows, "daily")["ok"])
+        self.assertIsNone(led.reconcile_due())
+        led.reserve(fields(), Decimal("0.5"))
 
-    def test_the_uncut_pilot_halts_in_the_frozen_pass_below_the_cap(self):
+    def test_the_pilot_has_no_daily_rule(self):
+        now = [1800000000.0]
+        led = S.Ledger(self.path, "pilot", clock=lambda: now[0])
+        self.addCleanup(led.close)
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), None)
+        now[0] += 3 * S.DAILY_RECONCILE_S
+        led.reserve(fields(), Decimal("0.5"))
+
+
+class TestBudgetLedger(unittest.TestCase):
+    """One ledger per budget at one fixed place, and no silent second ledger."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.folder = self.tmp / "ledgers"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def open(self, **kw):
+        led = S.open_budget_ledger(self.folder, "pilot", "fake", **kw)
+        self.addCleanup(led.close)
+        return led
+
+    def register(self):
+        return [json.loads(x) for x in (self.folder / S.REGISTER_NAME).read_text().splitlines()]
+
+    def test_one_ledger_is_created_once_and_shared(self):
+        with self.assertRaisesRegex(S.LedgerError, "no pilot ledger"):
+            S.open_budget_ledger(self.folder, "pilot", "fake")
+        led = self.open(create=True)
+        first = led.ledger_id
+        led.close_reservation(led.reserve(fields(), Decimal("1")), None)
+        led.close()
+        again = self.open(create=True)
+        self.assertEqual((again.ledger_id, again.totals()["committed"], again.mode), (first, Decimal("1"), "fake"))
+        self.assertEqual([(e["budget"], e["ledger_id"], e["file"]) for e in self.register()],
+                         [("pilot", first, "ledger-pilot.jsonl")])
+        again.close()
+        with self.assertRaisesRegex(S.LedgerError, "not a paid one"):
+            S.open_budget_ledger(self.folder, "pilot", "paid")
+        evaluation = S.open_budget_ledger(self.folder, "evaluation", "fake", create=True)
+        self.addCleanup(evaluation.close)
+        self.assertNotEqual(evaluation.ledger_id, first)
+
+    def test_a_second_ledger_for_a_budget_needs_a_new_budget_note(self):
+        led = self.open(create=True)
+        first = led.ledger_id
+        led.close()
+        path = self.folder / "ledger-pilot.jsonl"
+        for gone in ("moved", "deleted"):
+            if gone == "moved":
+                path.rename(self.folder / "ledger-pilot-old.jsonl")
+            else:
+                (self.folder / "ledger-pilot-old.jsonl").unlink()
+            with self.assertRaisesRegex(S.LedgerError, "was created here before"):
+                S.open_budget_ledger(self.folder, "pilot", "fake", create=True)
+            with self.assertRaisesRegex(S.LedgerError, "was created here before"):
+                S.open_budget_ledger(self.folder, "pilot", "fake", create=True, new_budget_note="  ")
+            self.assertFalse(path.exists())
+        led = self.open(create=True, new_budget_note="A new pilot budget, approved in writing on the study channel.")
+        self.assertEqual((led.header["new_budget_note"], led.header["replaces"]),
+                         ("A new pilot budget, approved in writing on the study channel.", [first]))
+        self.assertEqual([e["ledger_id"] for e in self.register()], [first, led.ledger_id])
+        led.close()
+        with self.assertRaisesRegex(S.LedgerError, "moved aside"):
+            S.open_budget_ledger(self.folder, "pilot", "fake", new_budget_note="Another one.")
+
+    def test_an_unregistered_ledger_in_the_fixed_place_is_refused(self):
+        self.open(create=True).close()
+        path = self.folder / "ledger-pilot.jsonl"
+        path.unlink()
+        S.Ledger(path, "pilot", mode="fake").close()                   # made by hand, outside the register
+        with self.assertRaisesRegex(S.LedgerError, "not the pilot ledger registered"):
+            S.open_budget_ledger(self.folder, "pilot", "fake")
+
+
+class TestSimulatedPilot(LedgerCase):
+    """A pilot of 5, 60 and 40 cases (P2 three passes, P3 four repeats), at extreme token
+    counts, against the $95 cap."""
+
+    def test_a_pilot_of_5_60_40_cases_at_extreme_tokens_halts_in_p3_below_the_cap(self):
         led = self.ledger()
         i, o = 100000, 20000
         write = ("anthropic", A, lambda n: a_raw(write=i, out=o, msg_id=n))
