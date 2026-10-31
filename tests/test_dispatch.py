@@ -84,6 +84,13 @@ class TestSSE(unittest.TestCase):
         self.assertEqual((s["usage"]["cache_read_tokens"], s["usage"]["output_tokens"],
                           s["usage"]["cache_write_1h_tokens"], s["usage"]["service_tier"],
                           s["usage"]["inference_geo"]), (900, 250, 0, "standard", "global"))
+        self.assertTrue(s["usage_final"])
+        events = anthropic_events(text)
+        for _, obj in events:
+            if obj.get("type") == "message_delta":
+                del obj["usage"]
+        s = anthropic_summary(sse(events))
+        self.assertEqual((s["complete"], s["usage_final"], s["usage"]["output_tokens"]), (True, False, 1))
 
     def test_a_cut_stream_is_incomplete_and_its_text_is_never_read(self):
         raw = sse(anthropic_events(answer()))
@@ -312,14 +319,17 @@ class TestDispatch(LogCase):
         self.assertEqual([r["seconds_since_previous_a_start"] for r in recs], [None, 3.0, 3.0, None])
         self.assertEqual([r["within_cache_lifetime"] for r in recs], [None, True, True, None])
 
-    def test_a_slot_subset_runs_in_order_and_nothing_else_is_accepted(self):
+    def test_only_all_four_slots_or_a1_and_b1_are_accepted(self):
         transport = D.FakeTransport([self.f.a(), self.f.b()])
         result = D.dispatch_trajectory(KEY, self.reqs, self.config, transport, self.log, WS, sleep=self.sleeps.append,
                                        clock=self.clock, slots=(("A", 1), ("B", 1)))
         self.assertEqual([r.judge for r in transport.sent], ["A", "B"])
         self.assertEqual(sorted(result["slots"]), ["A1", "B1"])
         self.assertEqual(self.records("A2"), [])
-        for bad in ((), (("B", 1),), (("A", 2), ("A", 1)), (("A", 1), ("A", 1)), (("A", 1), ("A", 4)),
+        self.assertEqual(D.PROMPT_SLOTS, (("A", 1), ("B", 1)))
+        for bad in ((), (("A", 1),), (("A", 1), ("A", 2)), (("A", 1), ("A", 2), ("A", 3)),
+                    (("A", 1), ("A", 2), ("B", 1)), (("A", 1), ("A", 3), ("B", 1)), (("B", 1),),
+                    (("A", 2), ("A", 1)), (("A", 1), ("A", 1)), (("A", 1), ("A", 4)),
                     (("A", 1), ("B", 1), ("A", 2))):
             transport = D.FakeTransport([self.f.a()])
             with self.assertRaises(ValueError):

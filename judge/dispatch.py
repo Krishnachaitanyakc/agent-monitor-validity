@@ -42,6 +42,7 @@ from .outcomes import (ABSTAIN, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TER
                        TRANSPORT, VALID, Exchange, canonical_outcome)
 
 CACHE_LIFETIME_S = 300
+PROMPT_SLOTS = (("A", 1), ("B", 1))          # prompt development: A1 and B1 only
 BACKOFF_BASE_S = 2.0
 RETRY_AFTER_CAP_S = 120.0
 KEPT_HEADERS = ("request-id", "anthropic-workspace-id", "x-request-id", "openai-project",
@@ -189,13 +190,13 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
 
     ``requests`` maps "A" and "B" to the ``PreparedRequest`` built for this trajectory.
     ``workspace`` is the study's Anthropic workspace ID, or None where no real workspace
-    exists (the dry run). ``slots`` runs a subset of the four in the same order, starting
-    with A1; prompt development sends A1 and B1 only. Returns {"halted": bool, "halt_id",
-    "slots": {slot: result}}.
+    exists (the dry run). ``slots`` is either all four, ``R.SLOTS``, or ``PROMPT_SLOTS``,
+    A1 then B1, which prompt development sends; any other set is refused. Returns
+    {"halted": bool, "halt_id", "slots": {slot: result}}.
     """
     slots = tuple(slots)
-    if not slots or slots[0] != ("A", 1) or slots != tuple(s for s in R.SLOTS if s in slots):
-        raise ValueError(f"slots {slots} are not A1 followed by others of {R.SLOTS} in order")
+    if slots not in (R.SLOTS, PROMPT_SLOTS):
+        raise ValueError(f"slots {slots} are neither {R.SLOTS} nor {PROMPT_SLOTS}")
     pending = log.unresolved_halts()
     if pending:
         raise HaltPending(f"{len(pending)} halt(s) need a correction note before resuming: "

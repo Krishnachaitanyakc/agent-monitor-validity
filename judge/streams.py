@@ -7,7 +7,8 @@ when the bytes end is discarded, so a cut stream never yields a half event.
 
 ``anthropic_summary`` reads a Messages stream: ``message_start`` (id, model, usage),
 content blocks and their deltas, ``message_delta`` (stop reason, cumulative usage),
-``message_stop``, ``ping`` and ``error``. ``openai_summary`` reads a Responses stream:
+``message_stop``, ``ping`` and ``error``; ``usage_final`` says whether a ``message_delta``
+reported the final output count, without which the usage is only ``message_start``'s. ``openai_summary`` reads a Responses stream:
 ``response.created`` and the other lifecycle events, the terminal ``response.completed``,
 ``response.incomplete`` or ``response.failed`` (each carrying the full response), and
 ``error``. Other event types are counted and otherwise ignored.
@@ -74,7 +75,7 @@ def anthropic_summary(raw: bytes) -> dict:
     """The final state of a Messages stream (see the module docstring)."""
     events, bad = _json_events(raw)
     s = {"provider": "anthropic", "complete": False, "id": None, "model": None, "stop_reason": None,
-         "stop_details": None, "text": None, "usage_raw": {}, "usage": {}, "error": None,
+         "stop_details": None, "text": None, "usage_raw": {}, "usage": {}, "usage_final": False, "error": None,
          "events": len(events), "unparsed_events": bad, "unknown_event_types": []}
     blocks, started, stopped = {}, False, False
     usage = {}
@@ -98,7 +99,10 @@ def anthropic_summary(raw: bytes) -> dict:
             if delta.get("stop_reason") is not None:
                 s["stop_reason"] = delta.get("stop_reason")
                 s["stop_details"] = delta.get("stop_details")
-            for k, v in (obj.get("usage") or {}).items():
+            delta_usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+            if _int(delta_usage.get("output_tokens")) is not None:
+                s["usage_final"] = True
+            for k, v in delta_usage.items():
                 if v is not None:
                     usage[k] = v                     # cumulative counts replace earlier ones
         elif t == "message_stop":

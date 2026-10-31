@@ -21,7 +21,7 @@ If either request breaks a provider limit (for A, a side over 2,000 px with more
 
 ## Serial dispatch
 
-A1, A2, A3, then B1, one after another. The A calls send one prepared body, so bytes and settings are identical and no answer reaches a later call. Every slot runs whatever an earlier slot returned. Prompt development passes `slots` to send only A1 and B1, in that order. Each attempt logs the seconds since the previous A request started and its cache read and write tokens, so cache hits are measured.
+A1, A2, A3, then B1, one after another. The A calls send one prepared body, so bytes and settings are identical and no answer reaches a later call. Every slot runs whatever an earlier slot returned. The dispatcher takes all four slots or, for prompt development, A1 and B1 only, in that order; any other set is refused. Each attempt logs the seconds since the previous A request started and its cache read and write tokens, so cache hits are measured.
 
 Only a transport failure is retried: same bytes, same slot, at most three retries, then the slot is invalid. A slot that ended is never sent again, so A1 is never replaced.
 
