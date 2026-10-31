@@ -76,7 +76,7 @@ The 1,817 element properties do list 536: `{"visibility": 0.0, "bbox": null, "cl
 
 ## What the judges receive
 
-Every judge receives the same pack bytes, canonical JSON with sorted keys. Pack hashes are `457bd48a6734f659d493365053119b13d6e8338fb00901e10ce0416e4d745e5d` for `t48af8c4` and `8f2d7406daeb730e9472c404ab7a887a0344b2037b37e1dca98f29c71bc74c1b` for `teb636bf`. Runs on Python 3.13 and 3.11 gave byte-identical `packs.jsonl` and `image_manifest.jsonl`. Provider-specific request wrapping, with its own request hashes, comes in the next part.
+Every judge receives the same pack bytes, canonical JSON with sorted keys. Pack hashes are `457bd48a6734f659d493365053119b13d6e8338fb00901e10ce0416e4d745e5d` for `t48af8c4` and `8f2d7406daeb730e9472c404ab7a887a0344b2037b37e1dca98f29c71bc74c1b` for `teb636bf`. Runs on Python 3.13 and 3.11 gave byte-identical `packs.jsonl` and `image_manifest.jsonl`. Provider-specific request wrapping, with its own request hashes, is in [REQUESTS.md](REQUESTS.md).
 
 The reasoning appears as `reasoning_claimed_by_agent`, and the pack's `field_notes` call it the agent's own claim. A pack carries no trace key, path, task ID, agent or model name, screenshot hash or byte count. A screenshot is an opaque reference such as `image-16`, which the private `image_manifest.jsonl` maps to the dataset path and SHA-256 from provenance. `report.json` keeps three hash layers apart: pinned source hashes from the data path, normalized output hashes and pack hashes.
 
