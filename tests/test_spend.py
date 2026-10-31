@@ -418,7 +418,7 @@ class MeteredCase(LedgerCase):
 
     def dispatch(self, inner, led, key=KEY):
         metered = S.MeteredTransport(inner, led, "run", "P1", self.tmp / "log")
-        metered.begin(key, self.config, self.log, R.SLOTS, self.inputs)
+        metered.begin(key, self.config, self.log, R.SLOTS, self.inputs, self.reqs)
         try:
             return D.dispatch_trajectory(key, self.reqs, self.config, metered, self.log, WS, sleep=lambda s: None)
         finally:
@@ -495,7 +495,7 @@ class TestMetered(MeteredCase):
                 return test.metered.send(request)
 
         self.metered = S.MeteredTransport(Reentrant(), led, "run", "P1", self.tmp / "log")
-        self.metered.begin(KEY, self.config, self.log, R.SLOTS, self.inputs)
+        self.metered.begin(KEY, self.config, self.log, R.SLOTS, self.inputs, self.reqs)
         with self.assertRaises(S.ConcurrentCall):
             self.metered.send(self.reqs["A"])
 
@@ -510,7 +510,7 @@ class TestMetered(MeteredCase):
         led2 = S.Ledger(self.tmp / "two.jsonl", "pilot")
         self.addCleanup(led2.close)
         metered = S.MeteredTransport(Slow(), led2, "run", "P1", self.tmp / "log2")
-        metered.begin(KEY, self.config, AttemptLog(self.tmp / "log2"), R.SLOTS, self.inputs)
+        metered.begin(KEY, self.config, AttemptLog(self.tmp / "log2"), R.SLOTS, self.inputs, self.reqs)
         t = threading.Thread(target=metered.send, args=(self.reqs["A"],))
         t.start()
         self.assertTrue(entered.wait(5))
@@ -535,23 +535,64 @@ class TestMetered(MeteredCase):
         self.assertEqual([r["state"] for r in led.reservations.values()], ["held"])
         self.assertEqual(self.log.attempts(KEY, self.config, "A", 1), [])
 
-    def test_a_b_call_above_272000_input_tokens_is_refused_before_it_is_reserved(self):
+    def test_a_trajectory_whose_b_count_is_above_272000_tokens_is_refused_before_a1(self):
         led = self.ledger()
         self.inputs["B"] = dict(self.inputs["B"], input_tokens=272001)
         inner = D.FakeTransport([self.ex_a(write=60000), self.ex_a(read=60000), self.ex_a(read=60000)])
         with self.assertRaises(S.SpendHalt) as cm:
             self.dispatch(inner, led)
         self.assertEqual((cm.exception.kind, cm.exception.entry["slot"]), ("long_context", "B1"))
-        self.assertEqual([r.judge for r in inner.sent], ["A", "A", "A"])
-        self.assertEqual([e["slot"] for e in led.entries if e["type"] == "reserve"], ["A1", "A2", "A3"])
-        self.inputs["B"] = dict(self.inputs["B"], input_tokens=272000)
+        self.assertTrue(cm.exception.entry["before_trajectory"])
+        self.assertEqual((inner.sent, led.reservations), ([], {}))
+        # The per-call refusal stays as a backstop.
+        with self.assertRaises(S.SpendHalt) as cm:
+            led.reserve(dict(fields("openai", B), input_tokens=272001), Decimal("0.5"))
+        self.assertEqual(cm.exception.kind, "long_context")
         self.assertEqual(led.reserve(dict(fields("openai", B), input_tokens=272000), Decimal("0.5"))[0], "r")
+
+    def test_the_evaluation_refuses_a_trajectory_once_the_oldest_unreconciled_call_is_23_hours_old(self):
+        now = [1800000000.0]
+        led = S.Ledger(self.tmp / "ledger-evaluation.jsonl", "evaluation", clock=lambda: now[0])
+        self.addCleanup(led.close)
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), None)
+        now[0] += S.DAILY_RECONCILE_S - S.TRAJECTORY_MARGIN_S + 1           # 23 hours and a second later
+        inner = D.FakeTransport([self.ex_a(write=60000)])
+        with self.assertRaises(S.SpendHalt) as cm:
+            self.dispatch(inner, led)
+        self.assertEqual((cm.exception.kind, cm.exception.entry["slot"]), ("reconcile_due", "A1"))
+        self.assertEqual((inner.sent, len(led.reservations)), ([], 1))
+        self.assertIsNone(led.reconcile_due())                              # the per-call rule would admit it
+
+        # A trajectory that starts inside the margin runs whole, though it passes 23 hours.
+        now[0] -= 2
+
+        class Slow(D.FakeTransport):
+            def send(self, request):
+                now[0] += 600
+                return super().send(request)
+
+        inner = Slow([self.ex_a(write=60000), self.ex_a(read=60000), self.ex_a(read=60000), self.ex_b()])
+        self.dispatch(inner, led, key="t" + "1" * 16)
+        self.assertEqual([r.judge for r in inner.sent], ["A", "A", "A", "B"])
+
+    def test_a_raw_response_without_its_record_is_refused_before_it_is_reserved(self):
+        led = self.ledger()
+        folder = self.log.slot_dir(KEY, self.config, "A", 1)
+        folder.mkdir(parents=True)
+        (folder / "1.raw").write_bytes(a_raw(write=60000))
+        inner = D.FakeTransport([self.ex_a(write=60000)])
+        with self.assertRaises(S.SpendHalt) as cm:
+            self.dispatch(inner, led)
+        self.assertEqual((cm.exception.kind, cm.exception.entry["slot"]), ("orphan_attempt", "A1"))
+        self.assertEqual((inner.sent, led.reservations), ([], {}))
+        self.assertIn("rebuilds the record", str(cm.exception))
 
     def test_a_request_must_be_the_one_priced(self):
         led = self.ledger()
         metered = S.MeteredTransport(D.FakeTransport([self.ex_a()]), led, "run", "P1", self.tmp / "log")
         metered.begin(KEY, self.config, self.log, R.SLOTS, dict(self.inputs, A=dict(self.inputs["A"],
-                                                                                     request_sha256="0" * 64)))
+                                                                                     request_sha256="0" * 64)),
+                      self.reqs)
         with self.assertRaises(ValueError):
             metered.send(self.reqs["A"])
         self.assertEqual(led.reservations, {})

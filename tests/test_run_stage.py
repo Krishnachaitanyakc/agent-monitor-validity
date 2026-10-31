@@ -50,6 +50,17 @@ def reserves(led):
     return [e for e in led.entries if e["type"] == "reserve"]
 
 
+class StandInHttps(D.HttpsTransport):
+    """Of the HTTPS transport's type, so paid mode's checks can be reached, but never set up
+    and never able to send."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, request):
+        raise AssertionError("no test sends a paid request")
+
+
 class RunnerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -62,8 +73,8 @@ class RunnerCase(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def ledger(self, path=None, budget="pilot", clock=time.time):
-        led = S.Ledger(path or RS.ledger_path(self.ledgers, budget), budget, clock)
+    def ledger(self, path=None, budget="pilot", clock=time.time, mode="fake"):
+        led = S.Ledger(path or RS.ledger_path(self.ledgers, budget), budget, clock, mode=mode)
         self.addCleanup(led.close)
         return led
 
@@ -254,6 +265,76 @@ class TestPilot(RunnerCase):
         self.assertEqual(led.totals()["committed"], Decimal("1.29"))                 # actual settled spend
 
 
+class Low(RS.ScriptedProvider):
+    """A provider whose pre-send count is far below what it bills."""
+
+    def count(self, request):
+        return 10
+
+
+class TestOverReservationAndLongContext(RunnerCase):
+    def test_an_over_reservation_halt_lost_in_a_stop_is_recorded_at_start(self):
+        led = self.ledger()
+        its = items(2, "a")
+        real = AttemptLog.write_halt
+
+        def stop(log, record):
+            if record["halt_kind"] == "over_reservation":
+                raise KeyboardInterrupt
+            return real(log, record)
+
+        with mock.patch.object(AttemptLog, "write_halt", stop):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led, provider=Low("extreme"))
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        self.assertEqual(log.halts(), [])
+        provider = Low("extreme")
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        halts = log.halts()
+        self.assertEqual([(h["halt_kind"], h["recorded_at_start"], len(h["reservations"])) for h in halts],
+                         [("over_reservation", True, 2)])               # A1 and B1
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)                    # recorded once
+        self.assertEqual(len(log.halts()), 1)
+
+    def test_an_over_reservation_is_halted_even_when_another_halt_ends_the_trajectory(self):
+        led = self.ledger()
+        r = S.reservation(R.A_MODEL, 10, 32000)
+        filler = CAP - Decimal("0.45") - r + Decimal("0.001")              # room for A1, not for A2 after it
+        led.close_reservation(led.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": "earlier",
+                                           "stage": "P1"}, filler), None)
+        report, provider = self.stage("P1", items(1, "a"), led, provider=Low("extreme"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("spend_cap", "A2"))
+        self.assertEqual([r.judge for r in provider.sent], ["A"])
+        self.assertEqual(sorted(h["kind"] for h in report["gates"]["halts"]), ["over_reservation", "spend_cap"])
+
+        led2 = self.ledger(self.tmp / "other" / "ledger-pilot.jsonl")
+        its = items(1, "b")
+        report, _ = self.stage("P1", its, led2, root=self.tmp / "run-2",
+                               provider=Low("extreme", events={(its[0].trace_key, "B1", 1): "http_400"}))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("request_error", "B1"))
+        self.assertEqual(sorted(h["kind"] for h in report["gates"]["halts"]), ["over_reservation", "request_error"])
+
+    def test_a_trajectory_whose_b_count_is_above_272000_tokens_is_refused_before_anything_is_sent(self):
+        led = self.ledger()
+
+        class Long(RS.ScriptedProvider):
+            def count(self, request):
+                return 300000 if request.judge == "B" else 60000
+
+        its = items(2, "a")
+        report, provider = self.stage("P1", its, led, provider=Long("central"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"], report["stopped"]["trace_key"]),
+                         ("long_context", "B1", its[0].trace_key))
+        self.assertEqual((provider.sent, reserves(led)), ([], []))
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        log.record_correction(report["stopped"]["halt_id"], "Checked the count.", R.config_sha256(), at="now")
+        report, provider = self.stage("P1", its, led, provider=Long("central"))
+        self.assertEqual((report["stopped"]["kind"], provider.sent), ("long_context", []))
+
+
 class TestGating(RunnerCase):
     def test_each_stage_needs_the_previous_report_and_a_reconciliation(self):
         led = self.ledger()
@@ -281,8 +362,9 @@ class TestGating(RunnerCase):
         log.record_correction(report["stopped"]["halt_id"], "Noted.", R.config_sha256(), at="now")
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             self.stage("P1", its[:1], led)
+        paid = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid")
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
-            RS.run_stage("P1", self.root, its, mode="paid", transport=D.FakeTransport(), ledger=led,
+            RS.run_stage("P1", self.root, its, mode="paid", transport=StandInHttps(), ledger=paid,
                          read_images=lambda e: e, workspace="w", openai_project="p", counter=RS.ScriptedProvider())
         provider = RS.ScriptedProvider()
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
@@ -315,6 +397,28 @@ class TestGating(RunnerCase):
         report, _ = self.stage("P2", items(1, "b"), led)
         self.assertEqual((report["complete"], report["settings"]["openai_project"]), (True, RS.FAKE_PROJECT))
 
+    def test_the_transport_and_the_ledger_must_match_the_mode(self):
+        its = items(1, "a")
+        provider = RS.ScriptedProvider()
+
+        class Plain:
+            sent = []
+
+            def send(self, request):
+                raise AssertionError("never sent")
+
+        cases = [("fake", Plain(), self.ledger(), "fake mode runs only a fake transport"),
+                 ("paid", provider, self.ledger(self.tmp / "p" / "ledger-pilot.jsonl", mode="paid"),
+                  "paid mode runs only the HTTPS transport"),
+                 ("fake", provider, self.ledger(self.tmp / "q" / "ledger-pilot.jsonl", mode="paid"), "a paid ledger"),
+                 ("fake", provider, self.ledger(self.tmp / "r" / "ledger-pilot.jsonl", mode=None), "a None ledger")]
+        for mode, transport, led, message in cases:
+            with self.assertRaisesRegex(ValueError, message):
+                RS.run_stage("P1", self.root, its, mode=mode, transport=transport, ledger=led,
+                             read_images=lambda e: e, workspace="w", openai_project="p", counter=provider)
+        self.assertEqual(provider.sent, [])
+        self.assertFalse(self.root.exists())
+
     def test_p3_and_eval_refuse_a_rubric_that_is_not_frozen(self):
         with mock.patch.object(R, "RUBRIC_STATUS", "draft"):
             led = self.ledger()
@@ -327,8 +431,9 @@ class TestGating(RunnerCase):
             self.assertFalse((self.root / "P3").exists())
             with self.assertRaisesRegex(RS.StageRefused, "frozen rubric"):
                 self.stage("EVAL", items(1, "e"), self.ledger(budget="evaluation"))
-            with self.assertRaises(ValueError):
-                RS.run_stage("P3", self.root, items(1, "3"), mode="paid", transport=D.FakeTransport(), ledger=led,
+            paid = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid")
+            with self.assertRaisesRegex(ValueError, "waived only with the fake transport"):
+                RS.run_stage("P3", self.root, items(1, "3"), mode="paid", transport=StandInHttps(), ledger=paid,
                              read_images=lambda e: e, workspace="w", openai_project="p", counter=RS.ScriptedProvider(),
                              rubric_check=False)
             report, _ = self.stage("P3", items(1, "3"), led, rubric_check=False)
@@ -365,40 +470,62 @@ class TestRunRecords(RunnerCase):
         halt = AttemptLog(root / "P2" / "attempt_log").halts()[0]
         self.assertIn("was seen before", halt["failed_checks"][0])
 
-    def test_a_raw_response_without_its_record_is_refused_before_anything_is_reserved(self):
-        led = self.ledger()
-        its = items(1, "a")
+    def stop_between_writes(self, slot, cut=False):
+        """write_attempt that, for ``slot``, writes the raw response (or half of it) and stops
+        before the record."""
         real = AttemptLog.write_attempt
 
-        class Fresh(RS.ScriptedProvider):
-            """A provider gives a resent request a new response id."""
-
-            def _exchange(self, request, stage, ref, kind):
-                return super()._exchange(request, stage, ref + "_resent", kind)
-
-        def stop_between_writes(log, record, raw):
-            if record["slot"] == "A2":
-                folder = log.slot_dir(record["trace_key"], record["config_sha256"], "A", 2)
-                write_once(folder / "1.raw", raw)
+        def write(log, record, raw):
+            if record["slot"] == slot:
+                folder = log.slot_dir(record["trace_key"], record["config_sha256"], record["judge"], record["repeat"])
+                write_once(folder / f"{record['attempt']}.raw", raw[:len(raw) // 2] if cut else raw)
                 raise KeyboardInterrupt
             return real(log, record, raw)
+        return mock.patch.object(AttemptLog, "write_attempt", write)
 
-        with mock.patch.object(AttemptLog, "write_attempt", stop_between_writes):
+    def test_a_raw_response_without_its_record_is_rebuilt_and_never_sent_again(self):
+        for slot in ("A1", "A2"):
+            self.root = self.tmp / f"run-{slot}"
+            led = self.ledger(self.tmp / f"ledgers-{slot}" / "ledger-pilot.jsonl")
+            its = items(1, "a")
+            with self.stop_between_writes(slot):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.stage("P1", its, led)
+            made = len(reserves(led))
+            self.assertEqual(led.open_reservations()[0]["slot"], slot)
+            report, provider = self.stage("P1", its, led)
+            self.assertTrue(report["complete"], report["stopped"])
+            rest = ["A", "A", "A", "B"][int(slot[1]):]
+            self.assertEqual([r.judge for r in provider.sent], rest)          # the stopped slot is not resent
+            self.assertEqual(len(reserves(led)), made + len(rest))
+            log = AttemptLog(self.root / "P1" / "attempt_log")
+            records = log.attempts(its[0].trace_key, R.config_sha256(), "A", int(slot[1]))
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertEqual((rec["outcome"], rec["http_status"], rec["recovered"]["http_status"]),
+                             ("VALID", 200, "inferred from the stream"))
+            self.assertEqual(rec["response_id"], f"msg_P1_{its[0].trace_key}_{slot}_1")
+            self.assertEqual(rec["recovered"]["checks_not_applied"], ["anthropic-workspace-id header"])
+            stopped = next(e for e in reserves(led) if e["slot"] == slot)
+            self.assertEqual(led.reservations[stopped["id"]]["state"], "settled")
+            self.assertEqual(report["attempts_rebuilt_at_start"],
+                             [{"trace_key": its[0].trace_key, "slot": slot, "attempt": 1, "outcome": "VALID",
+                               "http_status": 200}])
+            self.assertEqual(led.totals()["held"], 0)
+
+    def test_a_cut_raw_response_without_its_record_is_a_transport_failure_and_is_retried(self):
+        led = self.ledger()
+        its = items(1, "a")
+        with self.stop_between_writes("A2", cut=True):
             with self.assertRaises(KeyboardInterrupt):
                 self.stage("P1", its, led)
-        made = len(reserves(led))
         report, provider = self.stage("P1", its, led)
-        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("orphan_attempt", "A2"))
-        self.assertEqual(provider.sent, [])
-        self.assertEqual(len(reserves(led)), made)
-        self.assertEqual(led.entries[-1]["reason"], "orphan_attempt")
-        folder = AttemptLog(self.root / "P1" / "attempt_log").slot_dir(its[0].trace_key, R.config_sha256(), "A", 2)
-        (folder / "1.raw").rename(self.tmp / "inspected-A2-1.raw")
-        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
-            report["stopped"]["halt_id"], "Inspected the raw response and moved it aside.", R.config_sha256(), at="now")
-        report, provider = self.stage("P1", its, led, provider=Fresh("central"))
         self.assertTrue(report["complete"], report["stopped"])
-        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "B"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B"][1:])
+        records = AttemptLog(self.root / "P1" / "attempt_log").attempts(its[0].trace_key, R.config_sha256(), "A", 2)
+        self.assertEqual([(r["outcome"], r["http_status"]) for r in records], [("TRANSPORT", 200), ("VALID", 200)])
+        a2 = [e for e in reserves(led) if e["slot"] == "A2"]
+        self.assertEqual([led.reservations[e["id"]]["state"] for e in a2], ["held", "settled"])
 
     def test_a_halt_attempt_without_its_halt_record_is_an_unresolved_halt(self):
         led = self.ledger()
@@ -518,7 +645,7 @@ class TestEval(RunnerCase):
         return {"manifest": str(path), "sha256": R.sha256_bytes(path.read_bytes()), "freeze_tag": "freeze-1"}
 
     def eval_ledger(self, clock=time.time):
-        return S.Ledger(RS.ledger_path(self.ledgers, "evaluation"), "evaluation", clock)
+        return S.Ledger(RS.ledger_path(self.ledgers, "evaluation"), "evaluation", clock, mode="fake")
 
     def eval(self, panel, its=None, clock=time.time, provider=None):
         with self.eval_ledger(clock) as led:
@@ -618,10 +745,10 @@ class TestEval(RunnerCase):
             led.close_reservation(rid, None)
         now[0] += 25 * 3600
         provider = RS.ScriptedProvider()
-        with self.assertRaisesRegex(RS.StageRefused, "older than a day"):
+        with self.assertRaisesRegex(RS.StageRefused, "more than 23 hours old"):
             self.eval(self.write_manifest(), clock=clock, provider=provider)
         self.assertEqual(provider.sent, [])
-        now[0] -= 2 * 3600                                              # 23 hours after that call
+        now[0] -= 3 * 3600                                              # 22 hours after that call
         report, provider = self.eval(self.write_manifest(), clock=clock)
         self.assertEqual((report["stopped"], len(provider.sent)), (None, 8))
 
@@ -666,10 +793,10 @@ class TestPaidMode(unittest.TestCase):
             with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
                 RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", openai_project="proj_study")
             https.assert_not_called()
-        led = S.Ledger(self.tmp / "ledger-pilot.jsonl", "pilot")
+        led = S.Ledger(self.tmp / "ledger-pilot.jsonl", "pilot", mode="paid")
         self.addCleanup(led.close)
         with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
-            RS.run_stage("P1", self.tmp / "run", items(1, "a"), mode="paid", transport=D.FakeTransport(), ledger=led,
+            RS.run_stage("P1", self.tmp / "run", items(1, "a"), mode="paid", transport=StandInHttps(), ledger=led,
                          read_images=lambda e: e, workspace="wrkspc_study", openai_project="proj_study")
         self.assertFalse((self.tmp / "run").exists())
         self.assertEqual(len(led.entries), 1)

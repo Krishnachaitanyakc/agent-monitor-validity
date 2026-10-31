@@ -108,9 +108,11 @@ RESUME_RULES = {
     "reconciliation": "nothing was sent; answer the failed reconciliation (correct --budget), then note this halt",
     "reconcile_due": "nothing was sent; reconcile the evaluation ledger with both providers' usage, note this "
                      "halt, and run the stage again",
-    "long_context": "nothing was sent; the B request is above the long-context threshold",
-    "orphan_attempt": "nothing was sent; inspect the raw response, move it out of the slot folder, note this "
-                      "halt, and resume",
+    "long_context": "nothing of the trajectory was sent; the B request is above the long-context threshold, and "
+                    "the gate is applied again on resume",
+    "orphan_attempt": "nothing was sent; leave the raw response where it is, since the next start rebuilds its "
+                      "attempt record from it, then note this halt and resume",
+    "over_reservation": "check the token count behind the reservation before resuming",
 }
 FAKE_TRANSPORT = "fake transport with scripted provider-shaped streams"
 
@@ -412,14 +414,22 @@ class StageLog(AttemptLog):
             "judge": judge, "model_requested": self.models[judge], "model": model,
             "first_attempt": f"{self.stage}/{attempt_ref}", "config_sha256": config_sha256}))
 
-    def claim_response_id(self, provider: str, response_id: str, attempt_ref: str) -> bool:
+    def _response_id_path(self, provider: str, response_id: str) -> Path:
         digest = hashlib.sha256(f"{provider}\n{response_id}".encode("utf-8")).hexdigest()
+        return self.shared / "response_ids" / f"{digest}.json"
+
+    def claim_response_id(self, provider: str, response_id: str, attempt_ref: str) -> bool:
         try:
-            write_once(self.shared / "response_ids" / f"{digest}.json", _record_bytes(
+            write_once(self._response_id_path(provider, response_id), _record_bytes(
                 {"provider": provider, "id": response_id, "attempt": f"{self.stage}/{attempt_ref}"}))
         except WriteOnceError:
             return False
         return True
+
+    def owns_response_id(self, provider: str, response_id: str, attempt_ref: str) -> bool:
+        path = self._response_id_path(provider, response_id)
+        return (path.is_file()
+                and json.loads(path.read_text(encoding="utf-8")).get("attempt") == f"{self.stage}/{attempt_ref}")
 
 
 def run_record(run_root: Path, mode: str, scopes: dict) -> dict:
@@ -549,6 +559,50 @@ def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str, 
                                    "or replaced, so nothing is sent")
 
 
+def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: str, slots) -> list:
+    """Attempt records rebuilt from raw responses whose records were never written (a stop
+    between the two writes), so the call is never sent again; each must have its
+    reservation in the ledger, which then closes from the rebuilt record."""
+    rebuilt = []
+    for item in items:
+        for j, r in slots:
+            n = len(log.attempts(item.trace_key, config_sha256, j, r)) + 1
+            raw = log.slot_dir(item.trace_key, config_sha256, j, r) / f"{n}.raw"
+            if not raw.exists():
+                continue
+            match = [e for e in ledger.entries if e["type"] == "reserve" and e.get("run") == run_id
+                     and e.get("stage") == stage and (e.get("trace_key"), e.get("config_sha256"), e.get("judge"),
+                                                      e.get("repeat"), e.get("attempt"))
+                     == (item.trace_key, config_sha256, j, r, n)]
+            if len(match) != 1:
+                raise StageRefused(f"{raw} has no attempt record and no reservation in the {ledger.budget} "
+                                   "ledger, so nothing is sent")
+            record = D.recover_attempt(log, match[0])
+            rebuilt.append({"trace_key": item.trace_key, "slot": f"{j}{r}", "attempt": n,
+                            "outcome": record["outcome"], "http_status": record["http_status"]})
+    return rebuilt
+
+
+def record_over_reservation_halts(log, ledger, run_id: str, stage: str, config_sha256: str, clock) -> list:
+    """Halt records for this run's stage's calls that settled above their reservation with
+    no halt record naming them (a stop before it was written); each is then unresolved
+    until a correction note."""
+    named = {rid for h in log.halts() if h.get("halt_kind") == "over_reservation"
+             for rid in (h.get("reservations") or [])}
+    by_case = {}
+    for e in ledger.entries:
+        if e["type"] == "settle" and e.get("over_reservation") and e["id"] not in named:
+            r = ledger.reservations[e["id"]]
+            if r.get("run") == run_id and r.get("stage") == stage:
+                by_case.setdefault(r.get("trace_key"), []).append(e["id"])
+    return [log.write_halt({
+        "trace_key": key, "config_sha256": config_sha256, "slot": None, "attempt": None,
+        "halt_kind": "over_reservation", "reservations": ids, "failed_checks": [], "error": None, "http_status": None,
+        "detail": f"{len(ids)} call(s) settled above their reservation with no halt record; recorded at stage start",
+        "at": _now(clock), "recorded_at_start": True, "resume_rule": RESUME_RULES["over_reservation"]})
+        for key, ids in by_case.items()]
+
+
 def record_unrecorded_halts(log, items, config_sha256: str, slots, clock) -> list:
     """Halt records for slots whose last attempt is a HALT with no halt record (a stop
     between the two writes); each is then unresolved until a correction note."""
@@ -649,13 +703,19 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         raise ValueError(f"{stage} spends from the {spec.budget} budget, not {ledger.budget}")
     if mode not in ("fake", "paid"):
         raise ValueError(f"mode is fake or paid, not {mode!r}")
+    if mode == "fake" and not isinstance(transport, D.FakeTransport):
+        raise ValueError("fake mode runs only a fake transport")
+    if mode == "paid" and not isinstance(transport, D.HttpsTransport):
+        raise ValueError("paid mode runs only the HTTPS transport")
+    if ledger.mode != mode:
+        raise ValueError(f"{ledger.path} is a {ledger.mode} ledger; a {mode} stage spends only from a {mode} one")
+    if not rubric_check and not isinstance(transport, D.FakeTransport):
+        raise ValueError("the frozen-rubric rule is waived only with the fake transport")
     if mode == "paid" and counter is None:
         raise StageRefused(NO_COUNTER)
     if mode == "paid" and not (workspace and openai_project):
         raise StageRefused("paid mode needs the study's workspace and OpenAI project")
     scopes = {"anthropic": workspace, "openai": openai_project or (FAKE_PROJECT if mode == "fake" else None)}
-    if mode == "paid" and not rubric_check:
-        raise ValueError("the frozen-rubric rule is waived only in fake mode")
     config_hash = R.config_sha256(b_model=b_model, caching=spec.caching)
     rubric_status = R.config_record(b_model=b_model, caching=spec.caching)["rubric"]["status"]
     if rubric_check and spec.name in FROZEN_RUBRIC_STAGES and rubric_status != "frozen":
@@ -680,12 +740,14 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         "ledger": {"budget": ledger.budget, "file": ledger.path.name, "id": ledger.ledger_id},
         "scripted_usage": getattr(transport, "profile", None), "panel": panel_record and panel_record["sha256"],
         "cases": [[i.trace_key, i.pack_sha256] for i in items]}, "inputs")
-    recovered = ledger.recover(run_roots={run["run_id"]: run_root})
-    if spec.budget == "evaluation" and ledger.reconcile_due() is not None:
-        raise StageRefused("the evaluation ledger has calls older than a day since its last reconciliation; "
-                           "reconcile before resuming")
     log_root = (stage_dir / "attempt_log").resolve()
     log = StageLog(log_root, run_root, stage, {"A": R.A_MODEL, "B": b_model})
+    rebuilt = rebuild_orphans(log, ledger, items, run["run_id"], stage, config_hash, spec.slots)
+    recovered = ledger.recover(run_roots={run["run_id"]: run_root})
+    record_over_reservation_halts(log, ledger, run["run_id"], stage, config_hash, clock)
+    if spec.budget == "evaluation" and ledger.reconcile_due(S.TRAJECTORY_MARGIN_S) is not None:
+        raise StageRefused("the evaluation ledger has calls more than 23 hours old since its last reconciliation; "
+                           "reconcile before resuming")
     record_unrecorded_halts(log, items, config_hash, spec.slots, clock)
     pending = log.unresolved_halts()
     if pending:
@@ -698,7 +760,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     metered = S.MeteredTransport(transport, ledger, run["run_id"], stage, log_root, run_root=run_root, scopes=scopes)
     sleep = sleep or (lambda s: None)
     rows, stopped = [], None
-    report_args = (spec, run, items, log, ledger, config_hash, mode, b_model)
+    report_args = (spec, run, items, log, ledger, config_hash, mode, b_model, rebuilt)
     for item in items:
         if _slots_ended(log, item.trace_key, config_hash, spec.slots):
             rows.append({"trace_key": item.trace_key, "eligible": True})
@@ -727,12 +789,12 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         rows.append({"trace_key": item.trace_key, "eligible": True, "fallback_applied": prep["fallback"]["applied"],
                      "inputs": {j: {k: v for k, v in inputs[j].items() if k != "request_sha256"} for j in "AB"}})
         del prep
-        metered.begin(item.trace_key, config_hash, log, spec.slots, inputs)
-        if hasattr(transport, "begin"):
-            transport.begin(spec, item.trace_key, config_hash, log)
         seq = len(ledger.entries)
         result = None
         try:
+            metered.begin(item.trace_key, config_hash, log, spec.slots, inputs, reqs)
+            if hasattr(transport, "begin"):
+                transport.begin(spec, item.trace_key, config_hash, log)
             result = D.dispatch_trajectory(item.trace_key, reqs, config_hash, metered, log, workspace,
                                            sleep=sleep, clock=clock, slots=spec.slots)
         except S.SpendHalt as e:
@@ -745,19 +807,21 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         finally:
             metered.finish()
             del reqs
-        over = [e for e in ledger.entries[seq:] if e["type"] == "settle" and e["over_reservation"]]
-        if over and stopped is None:
-            halt_id = log.write_halt({
-                "trace_key": item.trace_key, "config_sha256": config_hash, "slot": None, "attempt": None,
-                "halt_kind": "over_reservation", "failed_checks": [], "error": None, "http_status": None,
-                "detail": f"{len(over)} call(s) settled above their reservation; the stage halts once the "
-                          "trajectory finishes, and the cap counts the actual settled spend", "at": _now(clock),
-                "resume_rule": "check the token count behind the reservation before resuming"})
-            stopped = {"halt_id": halt_id, "kind": "over_reservation", "trace_key": item.trace_key, "slot": None}
         if result is not None and result["halted"] and stopped is None:
             halt = next(h for h in log.halts() if h["halt_id"] == result["halt_id"])
             stopped = {"halt_id": halt["halt_id"], "kind": halt["halt_kind"], "trace_key": item.trace_key,
                        "slot": halt["slot"]}
+        over = [e for e in ledger.entries[seq:] if e["type"] == "settle" and e["over_reservation"]]
+        if over:                                # recorded even when another halt ended the trajectory
+            halt_id = log.write_halt({
+                "trace_key": item.trace_key, "config_sha256": config_hash, "slot": None, "attempt": None,
+                "halt_kind": "over_reservation", "reservations": [e["id"] for e in over], "failed_checks": [],
+                "error": None, "http_status": None,
+                "detail": f"{len(over)} call(s) settled above their reservation; the stage halts once the "
+                          "trajectory finishes, and the cap counts the actual settled spend", "at": _now(clock),
+                "resume_rule": RESUME_RULES["over_reservation"]})
+            if stopped is None:
+                stopped = {"halt_id": halt_id, "kind": "over_reservation", "trace_key": item.trace_key, "slot": None}
         report = stage_report(*report_args, rows, stopped, recovered, previous, panel_record, planned, settings)
         _write_progress(stage_dir, report)
         record_mark(run_root, ledger, mode, clock)
@@ -779,8 +843,8 @@ def _write_progress(stage_dir: Path, report: dict) -> None:
 
 # ---------------------------------------------------------------- report
 
-def stage_report(spec, run, items, log, ledger, config_hash, mode, b_model, rows, stopped, recovered, previous,
-                 panel_record, planned, settings) -> dict:
+def stage_report(spec, run, items, log, ledger, config_hash, mode, b_model, rebuilt, rows, stopped, recovered,
+                 previous, panel_record, planned, settings) -> dict:
     names = [f"{j}{r}" for j, r in spec.slots]
     finals, records, b_records, ended = {s: [] for s in names}, [], [], 0
     ineligible = [r["trace_key"] for r in rows if not r["eligible"]]
@@ -858,6 +922,7 @@ def stage_report(spec, run, items, log, ledger, config_hash, mode, b_model, rows
         "previous_report": previous, "panel": panel_record,
         "cases": {"planned": planned, "given": len(items), "ended": ended, "ineligible": ineligible},
         "recovered_at_start": [{"id": e["id"], "type": e["type"]} for e in recovered],
+        "attempts_rebuilt_at_start": rebuilt,
         "gates": {"note": GATES_NOTE, "invalid_share": invalid, "cache_hit_share": cache, "spend": spend,
                   "output_cap_reached": capped, "halts": halts, "capability_check_b": capability},
         "trajectories": rows,

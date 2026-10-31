@@ -31,7 +31,11 @@ plus r stays at or below the budget's cap: $95 for the pilot stages together, $2
 the evaluation. Otherwise a refusal is written and ``SpendHalt`` is raised before
 anything is sent. In the evaluation a call is also refused (``reconcile_due``) while the
 oldest settled or held call that no passing reconciliation follows is more than 24 hours
-old.
+old. Two refusals apply to a whole trajectory before its first call, so no A call of a
+trajectory that cannot finish is sent and a refusal never falls between A1 and its
+repeats: in the evaluation, once that oldest call is more than 23 hours old
+(``TRAJECTORY_MARGIN_S``), and a B request counted above 272,000 input tokens. The
+per-call checks stay as a backstop.
 
 **Ledger.** One append-only JSONL file per budget; each line is flushed and fsynced
 before the next step, so a reservation is on disk before its request leaves. Its header
@@ -132,6 +136,7 @@ ESTIMATE_FACTOR = 2
 CAPS = {"pilot": Decimal("95"), "evaluation": Decimal("285")}
 RECONCILE_TOLERANCE = Decimal("0.01")
 DAILY_RECONCILE_S = 24 * 3600
+TRAJECTORY_MARGIN_S = 3600          # a trajectory starts only with an hour left before the daily rule
 B_INPUT_LIMIT = MODIFIERS["openai"]["long_context"]["above_input_tokens"]
 RESERVATION_RULE = "r = (I x 1.02 + 256) x p_in x 1.25 + max_output x p_out"
 OUTPUT_CAP_RULE = "max_output is the request body's max_tokens (A) or max_output_tokens (B)"
@@ -336,6 +341,13 @@ def attempt_log_root(entry: dict, base=None, run_roots=None) -> Path:
         if base is not None and not run_root.is_absolute():
             run_root = Path(base) / run_root
     return Path(run_root) / log_root
+
+
+def orphan_raw(entry: dict, base=None, run_roots=None) -> Path:
+    """Where a reservation's raw response is, whether or not its attempt record was written."""
+    log = AttemptLog(attempt_log_root(entry, base, run_roots))
+    return (log.slot_dir(entry["trace_key"], entry["config_sha256"], entry["judge"], entry["repeat"])
+            / f"{entry['attempt']}.raw")
 
 
 def recorded_attempt(entry: dict, base=None, run_roots=None):
@@ -546,14 +558,14 @@ class Ledger:
         refused = self._append(dict(entry, type="refuse", reason=kind, **extra))
         raise SpendHalt(kind, message, refused)
 
-    def reconcile_due(self):
+    def reconcile_due(self, margin_s=0):
         """The oldest settled or held call that no passing reconciliation follows, when it is
-        more than a day old; otherwise None."""
+        more than a day old, less ``margin_s`` seconds; otherwise None."""
         last_ok = max((e["seq"] for e in self.entries if e["type"] == "reconcile" and e["ok"]), default=-1)
         for e in self.entries:
             if (e["type"] == "reserve" and e["seq"] > last_ok
                     and self.reservations[e["id"]]["state"] in ("settled", "held")):
-                return e if self.clock() - timestamp(e["at"]) > DAILY_RECONCILE_S else None
+                return e if self.clock() - timestamp(e["at"]) > DAILY_RECONCILE_S - margin_s else None
         return None
 
     def reserve(self, fields: dict, amount: Decimal) -> str:
@@ -874,13 +886,16 @@ def open_budget_ledger(root, budget: str, mode: str, *, create=False, new_budget
 class MeteredTransport:
     """A transport wrapper: each send reserves on the ledger first, one call at a time.
 
-    ``begin`` names the trajectory and the input count each judge's request is priced at.
-    ``scopes`` maps each provider to the study scope its calls run under (the Anthropic
-    workspace, the OpenAI project), which each reservation records.
-    Before a send, the previous reservation is closed from the attempt record the
-    dispatcher wrote for it; ``finish`` closes the last one after the trajectory. A slot
-    folder holding a raw response without its attempt record (a stop between the two
-    writes) is refused before anything is reserved or sent.
+    ``begin`` names the trajectory, its requests and the input count each judge's request
+    is priced at, and refuses the whole trajectory before its first call when the
+    evaluation's daily reconciliation falls due within ``TRAJECTORY_MARGIN_S`` or B's
+    count is above the long-context threshold. ``scopes`` maps each provider to the study
+    scope its calls run under (the Anthropic workspace, the OpenAI project), which each
+    reservation records. Before a send, the previous reservation is closed from the
+    attempt record the dispatcher wrote for it; ``finish`` closes the last one after the
+    trajectory. A slot folder holding a raw response without its attempt record (a stop
+    between the two writes, which the stage runner rebuilds at start) is refused before
+    anything is reserved or sent.
     """
 
     def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root, run_root=None, scopes=None):
@@ -898,17 +913,56 @@ class MeteredTransport:
         self._open = None
         self.ctx = None
 
-    def begin(self, trace_key: str, config_sha256: str, log, slots, inputs: dict) -> None:
+    def begin(self, trace_key: str, config_sha256: str, log, slots, inputs: dict, requests: dict) -> None:
         self.finish()
         self.ctx = {"trace_key": trace_key, "config_sha256": config_sha256, "log": log,
                     "slots": tuple(slots), "inputs": inputs}
+        pending = [j for j, r in self.ctx["slots"] if not D._slot_done(log.attempts(trace_key, config_sha256, j, r))]
+        if not pending:
+            return
+        due = self.ledger.reconcile_due(TRAJECTORY_MARGIN_S) if self.ledger.budget == "evaluation" else None
+        if due is not None:
+            fields, amount, _ = self._fields(requests[pending[0]])
+            self.ledger.refuse(fields, amount, "reconcile_due",
+                               f"the call reserved at {due['at']} is more than "
+                               f"{(DAILY_RECONCILE_S - TRAJECTORY_MARGIN_S) // 3600} hours old and no passing "
+                               "reconciliation follows it, so the trajectory does not start; reconcile the evaluation "
+                               "ledger, record a note, and resume",
+                               oldest_unreconciled=due["id"], before_trajectory=True)
+        if "B" in pending and (inputs["B"].get("input_tokens") or 0) > B_INPUT_LIMIT:
+            fields, amount, _ = self._fields(requests["B"])
+            self.ledger.refuse(fields, amount, "long_context",
+                               f"the B request's input count {inputs['B']['input_tokens']} is above {B_INPUT_LIMIT} "
+                               "tokens, which the provider prices at a long-context rate, so the trajectory does not "
+                               "start", before_trajectory=True)
+
+    def _fields(self, request) -> tuple:
+        """(reservation fields, amount, slot folder) for the next send of ``request``."""
+        c = self.ctx
+        basis = c["inputs"][request.judge]
+        if request.sha256 != basis["request_sha256"]:
+            raise ValueError(f"the {request.judge} request is not the one this trajectory was priced for")
+        (judge, repeat), attempt = next_attempt(c["log"], c["trace_key"], c["config_sha256"], request.judge,
+                                                c["slots"])
+        amount = reservation(request.model, basis["input_tokens"], basis["max_output_tokens"])
+        fields = {"run": self.run, "stage": self.stage, "trace_key": c["trace_key"],
+                  "config_sha256": c["config_sha256"], "judge": judge, "repeat": repeat,
+                  "slot": f"{judge}{repeat}", "attempt": attempt, "provider": request.provider,
+                  "model": request.model, "request_sha256": request.sha256,
+                  "input_tokens": basis["input_tokens"], "input_source": basis["input_source"],
+                  "max_output_tokens": basis["max_output_tokens"], "run_root": self.run_root_rel,
+                  "log_root": self.log_root, "scope": self.scopes.get(request.provider)}
+        return fields, amount, c["log"].slot_dir(c["trace_key"], c["config_sha256"], judge, repeat)
 
     def _close_open(self) -> None:
         if self._open is not None:
             rid, self._open = self._open, None
             roots = {self.run: self.run_root} if self.run_root is not None else None
-            self.ledger.close_reservation(rid, recorded_attempt(self.ledger.reservations[rid],
-                                                                self.ledger.path.parent, roots))
+            entry = self.ledger.reservations[rid]
+            found = recorded_attempt(entry, self.ledger.path.parent, roots)
+            if found is None and orphan_raw(entry, self.ledger.path.parent, roots).exists():
+                return                # left open: the next start rebuilds its record from the raw response
+            self.ledger.close_reservation(rid, found)
 
     def finish(self) -> None:
         if not self._busy.acquire(blocking=False):
@@ -923,27 +977,13 @@ class MeteredTransport:
             raise ConcurrentCall("a call is already in flight; calls go out one at a time")
         try:
             self._close_open()
-            c = self.ctx
-            basis = c["inputs"][request.judge]
-            if request.sha256 != basis["request_sha256"]:
-                raise ValueError(f"the {request.judge} request is not the one this trajectory was priced for")
-            (judge, repeat), attempt = next_attempt(c["log"], c["trace_key"], c["config_sha256"],
-                                                    request.judge, c["slots"])
-            amount = reservation(request.model, basis["input_tokens"], basis["max_output_tokens"])
-            fields = {"run": self.run, "stage": self.stage, "trace_key": c["trace_key"],
-                      "config_sha256": c["config_sha256"], "judge": judge, "repeat": repeat,
-                      "slot": f"{judge}{repeat}", "attempt": attempt, "provider": request.provider,
-                      "model": request.model, "request_sha256": request.sha256,
-                      "input_tokens": basis["input_tokens"], "input_source": basis["input_source"],
-                      "max_output_tokens": basis["max_output_tokens"], "run_root": self.run_root_rel,
-                      "log_root": self.log_root, "scope": self.scopes.get(request.provider)}
-            folder = c["log"].slot_dir(c["trace_key"], c["config_sha256"], judge, repeat)
+            fields, amount, folder = self._fields(request)
             orphans = (sorted(p.name for p in folder.glob("*.raw") if not p.with_suffix(".json").exists())
                        if folder.is_dir() else [])
             if orphans:
                 self.ledger.refuse(fields, amount, "orphan_attempt",
-                                   f"{folder} holds {', '.join(orphans)} without its attempt record; inspect it, "
-                                   "nothing sent")
+                                   f"{folder} holds {', '.join(orphans)} without its attempt record; nothing was "
+                                   "sent, and the next start rebuilds the record from the raw response")
             self._open = self.ledger.reserve(fields, amount)
             return self.inner.send(request)
         finally:

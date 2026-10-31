@@ -23,6 +23,13 @@ cache tokens; the ``anthropic-workspace-id`` header is the study workspace when 
 given. B: the model string equals the first recorded; ``service_tier`` is ``default``;
 ``cached_tokens`` and ``cache_write_tokens`` are 0. A field that is not reported fails.
 
+**Recovery.** A stop between the two writes of an attempt leaves its raw response without
+its record. ``recover_attempt`` rebuilds that record from the bytes as the dispatcher
+would have classified them, so the call is never sent again and nothing is chosen by
+reading it. The status and headers were not kept: bytes that start the provider's stream
+are taken as HTTP 200, anything else as no response (TRANSPORT), and the workspace header
+check is listed as not applied.
+
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with
 ``urllib`` and reads the event stream; it refuses to exist unless paid calls are
@@ -40,6 +47,7 @@ from http.client import HTTPException
 from . import requests as R
 from .outcomes import (ABSTAIN, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TERMINAL,
                        TRANSPORT, VALID, Exchange, canonical_outcome)
+from .streams import parse_sse
 
 CACHE_LIFETIME_S = 300
 PROMPT_SLOTS = (("A", 1), ("B", 1))          # prompt development: A1 and B1 only
@@ -157,6 +165,19 @@ def response_checks(provider: str, summary: dict, headers: dict, first_model, wo
     return fails
 
 
+def _identity_checks(log, provider: str, judge: str, config_sha256: str, summary: dict, headers: dict, workspace,
+                     ref: str) -> list:
+    """The per-response checks of a complete response, with the first model string and the
+    response id recorded as the dispatcher records them."""
+    first = log.first_model(config_sha256, judge)
+    checks = response_checks(provider, summary, headers, first, workspace)
+    if not checks and first is None:
+        log.set_first_model(config_sha256, judge, summary.get("model"), ref)
+    if summary.get("id") and not log.claim_response_id(provider, summary["id"], ref):
+        checks.append(f"provider response id {summary['id']!r} was seen before")
+    return checks
+
+
 def _backoff(retry: int, headers: dict) -> float:
     wait = BACKOFF_BASE_S * 2 ** (retry - 1)
     try:
@@ -228,12 +249,8 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
             headers = {k.lower(): v for k, v in (exchange.headers or {}).items()}
             checks = []
             if oc["outcome"] in TERMINAL and summary.get("complete"):
-                first = log.first_model(config_sha256, judge)
-                checks = response_checks(request.provider, summary, headers, first, workspace)
-                if not checks and first is None:
-                    log.set_first_model(config_sha256, judge, summary.get("model"), ref)
-                if summary.get("id") and not log.claim_response_id(request.provider, summary["id"], ref):
-                    checks.append(f"provider response id {summary['id']!r} was seen before")
+                checks = _identity_checks(log, request.provider, judge, config_sha256, summary, headers, workspace,
+                                          ref)
             outcome, halt_kind = oc["outcome"], oc["halt_kind"]
             if checks:
                 outcome, halt_kind = HALT, "response_check"
@@ -277,6 +294,65 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
             results[slot] = _slot_result(records)
             break
     return {"halted": False, "halt_id": None, "slots": results}
+
+
+# ---------------------------------------------------------------- recovery
+
+STREAM_STARTS = {"anthropic": ("message_start",),
+                 "openai": ("response.created", "response.in_progress", "response.queued")}
+
+
+def _stream_started(provider: str, raw: bytes) -> bool:
+    events = parse_sse(raw)
+    if not events:
+        return False
+    try:
+        first = json.loads(events[0][1])
+    except ValueError:
+        return False
+    return isinstance(first, dict) and first.get("type") in STREAM_STARTS[provider]
+
+
+def recover_attempt(log, reservation: dict) -> dict:
+    """Write and return the record of the attempt ``reservation`` paid for, rebuilt from its
+    raw response, whose record was never written (see the module docstring)."""
+    trace_key, config_sha256 = reservation["trace_key"], reservation["config_sha256"]
+    judge, repeat, attempt, provider = (reservation["judge"], reservation["repeat"], reservation["attempt"],
+                                        reservation["provider"])
+    slot = f"{judge}{repeat}"
+    raw = (log.slot_dir(trace_key, config_sha256, judge, repeat) / f"{attempt}.raw").read_bytes()
+    status = 200 if _stream_started(provider, raw) else None
+    exchange = Exchange(status, {}, raw, None if status else "the response's status was not kept", None)
+    oc = canonical_outcome(provider, exchange)
+    summary = oc["summary"] or {}
+    checks, ref = [], f"{trace_key}/{slot}/{attempt}"
+    if oc["outcome"] in TERMINAL and summary.get("complete"):
+        first = log.first_model(config_sha256, judge)
+        checks = response_checks(provider, summary, {}, first, None)
+        if not checks and first is None:
+            log.set_first_model(config_sha256, judge, summary.get("model"), ref)
+        rid = summary.get("id")             # the stopped process may have claimed it for this attempt
+        if rid and not log.claim_response_id(provider, rid, ref) and not log.owns_response_id(provider, rid, ref):
+            checks.append(f"provider response id {rid!r} was seen before")
+    outcome, halt_kind = oc["outcome"], oc["halt_kind"]
+    if checks:
+        outcome, halt_kind = HALT, "response_check"
+    record = {
+        "trace_key": trace_key, "config_sha256": config_sha256, "judge": judge, "repeat": repeat, "slot": slot,
+        "attempt": attempt, "provider": provider, "request_sha256": reservation["request_sha256"],
+        "request_bytes": None, "model_requested": reservation["model"], "started_at": None, "finished_at": None,
+        "first_byte_after_s": None, "seconds_since_previous_a_start": None, "within_cache_lifetime": None,
+        "http_status": status, "transport_error": exchange.transport_error, "response_headers": {},
+        "outcome": outcome, "halt_kind": halt_kind, "detail": oc["detail"], "response_outcome": oc["outcome"],
+        "failed_checks": checks, "error": oc["error"], "response_id": summary.get("id"),
+        "response_model": summary.get("model"), "stop": summary.get("stop_reason") or summary.get("terminal_event"),
+        "usage": summary.get("usage") or {}, "parse": oc["parse"],
+        "recovered": {"from": f"{attempt}.raw",
+                      "http_status": "inferred from the stream" if status else "unknown; taken as no response",
+                      "checks_not_applied": ["anthropic-workspace-id header"] if provider == "anthropic" else []},
+    }
+    log.complete_attempt(record)
+    return record
 
 
 # ---------------------------------------------------------------- capability check

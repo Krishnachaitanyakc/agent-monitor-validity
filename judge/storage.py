@@ -89,6 +89,19 @@ class AttemptLog:
         write_once(folder / f"{n}.json", _json(record))
         return folder / f"{n}.json"
 
+    def complete_attempt(self, record: dict) -> Path:
+        """Write the record of an attempt whose raw bytes are on disk without it (a stop
+        between the two writes of ``write_attempt``). The index must be the next one."""
+        key = (record["trace_key"], record["config_sha256"], record["judge"], record["repeat"])
+        n = record["attempt"]
+        if n != len(self.attempts(*key)) + 1:
+            raise ValueError(f"attempt {n} is not the next index for slot {record['judge']}{record['repeat']}")
+        folder = self.slot_dir(*key)
+        raw = (folder / f"{n}.raw").read_bytes()
+        record = dict(record, raw_sha256=hashlib.sha256(raw).hexdigest(), raw_bytes=len(raw))
+        write_once(folder / f"{n}.json", _json(record))
+        return folder / f"{n}.json"
+
     # -------------------------------------------------------------- halts
 
     def halts(self) -> list:
@@ -128,12 +141,20 @@ class AttemptLog:
         write_once(self.root / "first_model" / _name(config_sha256, "config hash") / f"{judge}.json",
                    _json({"model": model, "first_attempt": attempt_ref}))
 
+    def _response_id_path(self, provider: str, response_id: str) -> Path:
+        digest = hashlib.sha256(f"{provider}\n{response_id}".encode("utf-8")).hexdigest()
+        return self.root / "response_ids" / f"{digest}.json"
+
     def claim_response_id(self, provider: str, response_id: str, attempt_ref: str) -> bool:
         """Record a complete response's provider id; False if it was seen before."""
-        digest = hashlib.sha256(f"{provider}\n{response_id}".encode("utf-8")).hexdigest()
         try:
-            write_once(self.root / "response_ids" / f"{digest}.json",
+            write_once(self._response_id_path(provider, response_id),
                        _json({"provider": provider, "id": response_id, "attempt": attempt_ref}))
         except WriteOnceError:
             return False
         return True
+
+    def owns_response_id(self, provider: str, response_id: str, attempt_ref: str) -> bool:
+        """Whether the provider id was claimed for this very attempt."""
+        path = self._response_id_path(provider, response_id)
+        return path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("attempt") == attempt_ref
