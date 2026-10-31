@@ -173,6 +173,19 @@ MUTATIONS = [
      '        return SETTLE, Decimal(0), dict.fromkeys(TOKEN_KINDS, 0), "no response"'),
     ("loosen the reconciliation threshold", "judge/spend.py",
      'RECONCILE_TOLERANCE = Decimal("0.01")', 'RECONCILE_TOLERANCE = Decimal("0.02")'),
+    ("allow paid mode with only one condition", "scripts/run_stage.py",
+     "    if missing:\n        raise StageRefused(\"paid mode needs",
+     "    if len(missing) == 3:\n        raise StageRefused(\"paid mode needs"),
+    ("run EVAL without a panel manifest", "scripts/run_stage.py",
+     '    if spec.name == "EVAL":\n        panel_record = verify_panel(panel, config_hash, items, repo)',
+     '    if False:\n        panel_record = verify_panel(panel, config_hash, items, repo)'),
+    ("start a stage without the previous stage's report", "scripts/run_stage.py",
+     '    if not path.is_file():\n        raise StageRefused(f"{spec.name} needs',
+     '    if False:\n        raise StageRefused(f"{spec.name} needs'),
+    ("start a stage before the previous one is reconciled", "scripts/run_stage.py",
+     "    if not reconciled:", "    if False:"),
+    ("remove the guard install from the stage runner", "scripts/run_stage.py",
+     "    fence.install(profile, data_root, fence.load_config(required=True))", "    pass"),
 ]
 
 

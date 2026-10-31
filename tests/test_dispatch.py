@@ -312,6 +312,21 @@ class TestDispatch(LogCase):
         self.assertEqual([r["seconds_since_previous_a_start"] for r in recs], [None, 3.0, 3.0, None])
         self.assertEqual([r["within_cache_lifetime"] for r in recs], [None, True, True, None])
 
+    def test_a_slot_subset_runs_in_order_and_nothing_else_is_accepted(self):
+        transport = D.FakeTransport([self.f.a(), self.f.b()])
+        result = D.dispatch_trajectory(KEY, self.reqs, self.config, transport, self.log, WS, sleep=self.sleeps.append,
+                                       clock=self.clock, slots=(("A", 1), ("B", 1)))
+        self.assertEqual([r.judge for r in transport.sent], ["A", "B"])
+        self.assertEqual(sorted(result["slots"]), ["A1", "B1"])
+        self.assertEqual(self.records("A2"), [])
+        for bad in ((), (("B", 1),), (("A", 2), ("A", 1)), (("A", 1), ("A", 1)), (("A", 1), ("A", 4)),
+                    (("A", 1), ("B", 1), ("A", 2))):
+            transport = D.FakeTransport([self.f.a()])
+            with self.assertRaises(ValueError):
+                D.dispatch_trajectory("t2222222222222222", self.reqs, self.config, transport, self.log, WS,
+                                      slots=bad)
+            self.assertEqual(transport.sent, [])
+
     def test_no_answer_reaches_a_later_call(self):
         first = self.f.a(text=answer(rationale=CANARY_ANSWER))
         _, t = self.run_slots(first, self.f.a(), self.f.a(), self.f.b())

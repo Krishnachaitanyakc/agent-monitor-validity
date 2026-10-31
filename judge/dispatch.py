@@ -184,13 +184,18 @@ def _slot_result(records: list) -> dict:
 
 
 def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, transport, log,
-                        workspace, sleep=time.sleep, clock=time.time) -> dict:
+                        workspace, sleep=time.sleep, clock=time.time, slots=R.SLOTS) -> dict:
     """Run slots A1, A2, A3 and B1 for one trajectory, serially (see the module docstring).
 
     ``requests`` maps "A" and "B" to the ``PreparedRequest`` built for this trajectory.
     ``workspace`` is the study's Anthropic workspace ID, or None where no real workspace
-    exists (the dry run). Returns {"halted": bool, "halt_id", "slots": {slot: result}}.
+    exists (the dry run). ``slots`` runs a subset of the four in the same order, starting
+    with A1; prompt development sends A1 and B1 only. Returns {"halted": bool, "halt_id",
+    "slots": {slot: result}}.
     """
+    slots = tuple(slots)
+    if not slots or slots[0] != ("A", 1) or slots != tuple(s for s in R.SLOTS if s in slots):
+        raise ValueError(f"slots {slots} are not A1 followed by others of {R.SLOTS} in order")
     pending = log.unresolved_halts()
     if pending:
         raise HaltPending(f"{len(pending)} halt(s) need a correction note before resuming: "
@@ -204,7 +209,7 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
         if problems:
             raise ValueError(f"the {judge} request differs from the request-field table: {problems}")
     results, last_a_start = {}, None
-    for judge, repeat in R.SLOTS:
+    for judge, repeat in slots:
         slot = f"{judge}{repeat}"
         request = requests[judge]
         records = log.attempts(trace_key, config_sha256, judge, repeat)
