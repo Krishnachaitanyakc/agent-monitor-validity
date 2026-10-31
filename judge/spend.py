@@ -32,7 +32,8 @@ log, which keeps the raw response:
 - no attempt record at all also holds it.
 
 After a restart, an open reservation counts as spent until ``recover`` matches it to its
-attempt record in the same way.
+attempt record in the same way. A reservation names its run and attempt log relative to the
+ledger's folder, so the ledger and its run folders can move together.
 
 **Reconciliation.** ``read_usage_export`` reads a provider usage export (``EXPORT_FIELDS``,
 as CSV or JSON). ``Ledger.reconcile`` prices it with the same table and compares each
@@ -178,9 +179,11 @@ def charge(provider: str, model: str, status, raw: bytes):
     return SETTLE, call_cost(model, tokens), tokens, "response usage"
 
 
-def recorded_attempt(entry: dict):
-    """(attempt record, raw bytes) for a reservation, or None if no attempt was recorded."""
-    log = AttemptLog(entry["log_root"])
+def recorded_attempt(entry: dict, base=None):
+    """(attempt record, raw bytes) for a reservation, or None if no attempt was recorded.
+    A relative ``log_root`` is read from ``base``, the ledger's folder."""
+    root = Path(entry["log_root"])
+    log = AttemptLog(Path(base) / root if base is not None and not root.is_absolute() else root)
     records = log.attempts(entry["trace_key"], entry["config_sha256"], entry["judge"], entry["repeat"])
     if len(records) < entry["attempt"]:
         return None
@@ -349,8 +352,9 @@ class Ledger:
                              "basis": detail, "price_table": PRICE_TABLE_VERSION,
                              "over_reservation": cost > Decimal(r["amount_usd"]), "at": _now(self.clock)})
 
-    def recover(self, find=recorded_attempt) -> list:
+    def recover(self, find=None) -> list:
         """Close every reservation left open by an earlier process (see the module docstring)."""
+        find = find or (lambda entry: recorded_attempt(entry, self.path.parent))
         closed = []
         for r in self.open_reservations():
             found = find(r)
@@ -452,7 +456,8 @@ class MeteredTransport:
     """
 
     def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root):
-        self.inner, self.ledger, self.run, self.stage, self.log_root = inner, ledger, run, stage, str(log_root)
+        self.inner, self.ledger, self.run, self.stage = inner, ledger, run, stage
+        self.log_root = os.path.relpath(Path(log_root).resolve(), ledger.path.parent.resolve())
         self._busy = threading.Lock()
         self._open = None
         self.ctx = None
@@ -465,7 +470,7 @@ class MeteredTransport:
     def _close_open(self) -> None:
         if self._open is not None:
             rid, self._open = self._open, None
-            self.ledger.close_reservation(rid, recorded_attempt(self.ledger.reservations[rid]))
+            self.ledger.close_reservation(rid, recorded_attempt(self.ledger.reservations[rid], self.ledger.path.parent))
 
     def finish(self) -> None:
         if not self._busy.acquire(blocking=False):

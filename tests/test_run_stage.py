@@ -104,9 +104,11 @@ class TestPilot(RunnerCase):
         self.assertLessEqual(committed, CAP)
         self.assertGreater(committed + Decimal(refusal["amount_usd"]), CAP)
         reserves = [e for e in led.entries if e["type"] == "reserve"]
-        attempts = sum(len(AttemptLog(Path(r["log_root"])).attempts(r["trace_key"], r["config_sha256"], r["judge"],
-                                                                      r["repeat"])) > 0 for r in reserves[-1:])
-        self.assertEqual(attempts, 1)
+        last = reserves[-1]
+        self.assertEqual((last["run"], last["log_root"]), ("pilot-2", "pilot-2/P3/attempt_log"))
+        sent = AttemptLog(self.tmp / last["log_root"]).attempts(last["trace_key"], last["config_sha256"],
+                                                                last["judge"], last["repeat"])
+        self.assertEqual(len(sent), 1)
         # The refused call was never sent, and a note does not raise the cap.
         log = AttemptLog(self.tmp / "pilot-2" / "P3" / "attempt_log")
         halt = log.halts()[0]
@@ -311,8 +313,8 @@ class TestEval(RunnerCase):
 
     def test_eval_needs_the_pilot_ledger_reconciled(self):
         with S.Ledger(RS.ledger_path(self.root, "pilot"), "pilot") as pilot:
-            rid = pilot.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": str(self.root),
-                                 "stage": "P3"}, Decimal("0.1"))
+            rid = pilot.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": ".", "stage": "P3"},
+                                Decimal("0.1"))
             pilot.close_reservation(rid, None)
         with self.assertRaisesRegex(RS.StageRefused, "reconcile the pilot ledger"):
             self.eval(self.write_manifest())

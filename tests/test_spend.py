@@ -265,6 +265,23 @@ class TestLedger(LedgerCase):
                          [("settle", rid, Decimal("0.18"))])
         self.assertEqual(led.totals()["committed"], Decimal("0.18"))
 
+    def test_a_ledger_moved_with_its_run_folder_still_recovers(self):
+        pack = synthetic_pack(1)
+        req = R.prepare(pack, images_for(pack))["requests"]["A"]
+        config, before, after = R.config_sha256(), self.tmp / "before", self.tmp / "after"
+        led = S.Ledger(before / "ledger-pilot.jsonl", "pilot")
+        f = fields(trace_key=KEY, config_sha256=config, judge="A", repeat=1, attempt=1, request_sha256=req.sha256,
+                   log_root="run/P1/attempt_log")
+        led.reserve(f, S.reservation(A, 60000, 32000))
+        led.close()
+        AttemptLog(before / "run/P1/attempt_log").write_attempt(
+            {"trace_key": KEY, "config_sha256": config, "judge": "A", "repeat": 1, "attempt": 1,
+             "request_sha256": req.sha256, "http_status": 200}, a_raw(read=60000, out=3000))
+        before.rename(after)
+        with S.Ledger(after / "ledger-pilot.jsonl", "pilot") as led:
+            self.assertEqual([e["type"] for e in led.recover()], ["settle"])
+            self.assertEqual(led.totals()["committed"], Decimal("0.042"))
+
 
 class MeteredCase(LedgerCase):
     def setUp(self):

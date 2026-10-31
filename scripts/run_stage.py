@@ -138,6 +138,11 @@ def export_path(run_root, budget: str) -> Path:
     return Path(run_root) / f"fake_provider_export-{budget}.csv"
 
 
+def run_id(run_root, ledger) -> str:
+    """How a ledger names a run: its folder, relative to the ledger's own."""
+    return os.path.relpath(Path(run_root).resolve(), ledger.path.parent.resolve())
+
+
 # ---------------------------------------------------------------- inputs
 
 def load_items(packs, provenance, split="dev") -> list:
@@ -320,12 +325,12 @@ def check_previous(spec: Stage, run_root: Path, ledger, mode: str):
     if report.get("mode") != mode:
         raise StageRefused(f"{prev.name} ran in {report.get('mode')} mode; {spec.name} would run in {mode} mode")
     if prev.budget == ledger.budget:
-        reconciled = ledger.reconciled_after_last_call(str(run_root), prev.name)
+        reconciled = ledger.reconciled_after_last_call(run_id(run_root, ledger), prev.name)
     elif not ledger_path(run_root, prev.budget).is_file():
         raise StageRefused(f"no {prev.budget} ledger in {run_root}")
     else:
         with S.Ledger(ledger_path(run_root, prev.budget), prev.budget) as prev_ledger:
-            reconciled = prev_ledger.reconciled_after_last_call(str(run_root), prev.name)
+            reconciled = prev_ledger.reconciled_after_last_call(run_id(run_root, prev_ledger), prev.name)
     if not reconciled:
         raise StageRefused(f"reconcile the {prev.budget} ledger with the providers' usage after {prev.name} "
                            f"before starting {spec.name}")
@@ -430,7 +435,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     if pending:
         raise StageRefused(f"{stage} has halts without a correction note: "
                            + ", ".join(h["halt_id"] for h in pending))
-    metered = S.MeteredTransport(transport, ledger, str(run_root), stage, log_root)
+    metered = S.MeteredTransport(transport, ledger, run_id(run_root, ledger), stage, log_root)
     sleep = sleep or (lambda s: None)
     rows, stopped = [], None
     for item in items:
@@ -549,7 +554,7 @@ def stage_report(spec, run_root, items, log, ledger, config_hash, mode, rows, st
     else:
         cache = {"not_applicable": "this stage sends no cache control"}
 
-    spend = ledger.summary(run=str(run_root), stage=spec.name)
+    spend = ledger.summary(run=run_id(run_root, ledger), stage=spec.name)
     spent = Decimal(spend["selected_spent_usd"])
     per_case = spent / ended if ended else None
 
