@@ -62,5 +62,5 @@ On Oct 30, at commit `53569bf`, the dry run over 19 development packs built ever
 
 ## Not done yet
 
-- Provider token counts. Spending controls and the stage runner are in [RUNNER.md](RUNNER.md).
-- The study workspace ID for A's header check; the dry run uses a stand-in.
+- A provider token-count client; paid mode is refused until it exists. Spending controls and the stage runner are in [RUNNER.md](RUNNER.md).
+- The study workspace ID itself. The stage runner takes it as `--workspace` and records it in `stage.json`; the dry runs use a stand-in.

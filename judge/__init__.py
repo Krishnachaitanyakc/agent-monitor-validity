@@ -17,6 +17,7 @@ docs/REQUESTS.md for the request layer and docs/RUNNER.md for the stage runner. 
 - ``storage``: the write-once attempt log, halts and correction notes.
 - ``dispatch``: the serial dispatcher, the per-response checks, the fallback capability
   check, and the fake and HTTPS transports.
-- ``spend``: prices, reservations, the spending caps, the write-ahead ledger and
-  reconciliation against a provider usage export.
+- ``spend``: prices and documented price modifiers, reservations, the spending caps, one
+  write-ahead ledger per budget, and reconciliation against a usage export in the
+  runner's own format.
 """
