@@ -30,7 +30,7 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies fifty-eight deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies seventy-one deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests
@@ -140,9 +140,13 @@ Each element an action names gets one status: `resolved` or `ambiguous` when one
 
 [REQUESTS.md](REQUESTS.md) describes the request layer in `judge/`: rubric v0 (a draft), schema S and its parser, the exact request body for each judge with its request hash and the config hash, the shared screenshot fallback and fit check, the outcome table, the write-once attempt log and the serial dispatcher. `scripts/dry_run.py` builds both requests for every development pack with the `dev_only` guard installed and dispatches them through a fake transport; it makes no network call. `tests/test_requests.py`, `tests/test_dispatch.py` and `tests/test_dry_run.py` add 77 tests, and `tests/mutations.py` twenty breaks, from a repeat body that differs from A1 and a 400 counted as an invalid verdict to sampling parameters, caching on judge B and a screenshot hash in a request.
 
+## Stage runner
+
+[RUNNER.md](RUNNER.md) describes the spending controls in `judge/spend.py` and the stage runner, `scripts/run_stage.py`: stages P1 to P3 and EVAL, the gates each stage reports, the reservation and the cap, the write-ahead ledger, restart and reconciliation, and the three conditions for paid mode. P1 to P3 install `dev_only` and EVAL installs `pre_join`. `scripts/dry_run_stages.py` runs P1 to P3 on development packs through the fake transport with the `dev_only` guard installed and every socket refused. `tests/test_spend.py`, `tests/test_run_stage.py` and `tests/test_dry_run_stages.py` add 48 tests, `tests/test_dispatch.py` one more for the dispatcher's slot subset, and `tests/mutations.py` thirteen breaks, from dropping the 1.25 factor and writing the reservation after sending to paid mode with one condition and EVAL without a panel manifest.
+
 ## Not done yet
 
-- Spending controls, provider token counts and the pilot runner. The request layer's dry run uses a fake transport only.
+- A provider token-count client. Until one is reviewed, the stage runner reserves with twice the request layer's estimate.
 - Evaluation label unlocking, which the runner restores after validating complete prediction records, valid verdicts and model roles, and their binding to the frozen panel and run manifest.
 - Unsure or missing primary labels are handled at the label join (proposed): excluded from the error-based quantities and reported by count. No test label field is read before the join.
 - The README, charter and codebook still describe the earlier three-mentee design. A separate docs PR reconciles them before the main run, as the brief asks, and retires the multi-source `scripts/collect_traces.py` stub.

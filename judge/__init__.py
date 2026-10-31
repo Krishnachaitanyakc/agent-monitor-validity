@@ -1,7 +1,7 @@
 """Evidence packs and judge requests, built from monitor-view records.
 
-Standard library only. See docs/PACK_WALKTHROUGH.md for the pack layer and
-docs/REQUESTS.md for the request layer. The pieces:
+Standard library only. See docs/PACK_WALKTHROUGH.md for the pack layer,
+docs/REQUESTS.md for the request layer and docs/RUNNER.md for the stage runner. The pieces:
 
 - ``acted``: what each action acted on, read from the tree and element properties of the
   step that chose it.
