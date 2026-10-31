@@ -432,9 +432,28 @@ class TestRunRecords(RunnerCase):
         lines = path.read_text().splitlines()
         self.assertEqual(json.loads(lines[-1])["type"], "settle")
         path.write_text("\n".join(lines[:-1]) + "\n")                # the last settlement rolled back
+        provider, led = RS.ScriptedProvider(), self.ledger()
+        with self.assertRaisesRegex(RS.StageRefused, "rolled back or cut"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        (self.root / "ledger_marks-pilot.jsonl").unlink()            # the progress file still holds a mark
+        with self.assertRaisesRegex(RS.StageRefused, "progress.json recorded entry"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+
+    def test_a_ledger_that_differs_from_a_recorded_mark_is_refused(self):
+        led = self.ledger()
+        report, _ = self.stage("P1", items(1, "a"), led)
+        self.reconcile(led)
+        led.close()
+        path = RS.ledger_path(self.ledgers, "pilot")
+        lines = path.read_text().splitlines()
+        entry = json.loads(lines[1])
+        entry["amount_usd"] = "0.01"                                  # same length, one amount edited
+        path.write_text("\n".join([lines[0], json.dumps(entry, sort_keys=True)] + lines[2:]) + "\n")
         provider = RS.ScriptedProvider()
-        with self.assertRaisesRegex(RS.StageRefused, "rolled back or replaced"):
-            self.stage("P1", its, self.ledger(), provider=provider)
+        with self.assertRaisesRegex(RS.StageRefused, "differs, up to entry"):
+            self.stage("P2", items(1, "b"), self.ledger(), provider=provider)
         self.assertEqual(provider.sent, [])
 
     def test_an_attempt_without_its_reservation_is_refused(self):
@@ -463,7 +482,11 @@ class TestRunRecords(RunnerCase):
         report, provider = self.stage("P1", items(1, "a"), led)
         self.reconcile(led, provider)
         fresh = self.ledger(self.tmp / "elsewhere" / "ledger-pilot.jsonl")
-        with self.assertRaisesRegex(RS.StageRefused, "ran on pilot ledger"):
+        with self.assertRaisesRegex(RS.StageRefused, "recorded pilot ledger"):
+            self.stage("P2", items(1, "b"), fresh)
+        (self.root / "ledger_marks-pilot.jsonl").unlink()
+        (self.root / "P1" / "progress.json").unlink()
+        with self.assertRaisesRegex(RS.StageRefused, "ran on pilot ledger"):     # stage.json still names it
             self.stage("P2", items(1, "b"), fresh)
         self.assertFalse((self.root / "P2").exists())
 
@@ -667,6 +690,7 @@ class CommandCase(FixtureCase):
                           "--provenance", str(self.inputs / "provenance.jsonl"), "--out", str(self.tmp / "packs")])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.root = self.tmp / "run"
+        self.ledger_root = RS.ledger_root(self.tmp)
         self.ledgers = RS.ledger_dir(self.tmp, "fake")
 
     def env(self):
@@ -683,8 +707,8 @@ class CommandCase(FixtureCase):
                 str(self.tmp), "--packs", str(self.tmp / "packs"), "--provenance",
                 str(self.inputs / "provenance.jsonl")] + list(extra)
 
-    def reconcile(self, export):
-        return self.command(["scripts/run_stage.py", "reconcile", "--run-root", str(self.root), "--data-root",
+    def reconcile(self, export, root=None):
+        return self.command(["scripts/run_stage.py", "reconcile", "--run-root", str(root or self.root), "--data-root",
                              str(self.tmp), "--budget", "pilot", "--export", str(export)])
 
 
@@ -727,8 +751,9 @@ class TestCommands(CommandCase):
         self.assertIn("every socket refused", report["settings"]["transport"])
         ledger_id = report["ledger"]["id"]
         self.assertEqual(sorted(p.name for p in self.ledgers.iterdir()),
-                         ["budgets.jsonl", f"fake_provider_export-pilot-{ledger_id}.csv", "ledger-pilot.jsonl"])
-        self.assertFalse(any(p.name.startswith("ledger") for p in self.root.iterdir()))
+                         [f"fake_provider_export-pilot-{ledger_id}.csv", "ledger-pilot.jsonl"])
+        self.assertEqual(sorted(p.name for p in self.ledger_root.iterdir()), ["budgets.jsonl", "fake", "marks-pilot.jsonl"])
+        self.assertFalse(any(p.name.startswith("ledger-") for p in self.root.iterdir()))
 
         r = self.command(self.stage_args("P2"))
         self.assertNotEqual(r.returncode, 0)
@@ -764,11 +789,11 @@ class TestCommands(CommandCase):
         self.assertFalse((self.root / "P3").exists())
 
     def test_two_run_roots_share_one_ledger_and_the_second_is_refused_at_the_cap(self):
-        with S.open_budget_ledger(self.ledgers, "pilot", "fake", create=True) as led:
+        with S.open_budget_ledger(self.ledger_root, "pilot", "fake", create=True) as led:
             rid = led.reserve({"provider": "anthropic", "model": R.A_MODEL, "run": "earlier", "stage": "P1"},
                               Decimal("93.75"))
             led.close_reservation(rid, None)                    # held: counted as spent for good
-        first, second = self.tmp / "run-a", self.tmp / "run-b"
+        first, second = self.tmp / "out" / "run-a", self.tmp / "out" / "run-b"
         r = self.command(self.stage_args("P1", root=first))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         a = json.loads((first / "P1" / "report.json").read_text())
@@ -780,23 +805,50 @@ class TestCommands(CommandCase):
         self.assertEqual(b["gates"]["spend"]["budget_committed_usd"], a["gates"]["spend"]["budget_committed_usd"])
         self.assertEqual(b["ledger"]["id"], a["ledger"]["id"])
         for root in (first, second):
-            self.assertFalse(any(p.name.startswith("ledger") for p in root.iterdir()))
-        with S.open_budget_ledger(self.ledgers, "pilot", "fake") as led:
+            self.assertFalse(any(p.name.startswith("ledger-") for p in root.iterdir()))
+        with S.open_budget_ledger(self.ledger_root, "pilot", "fake") as led:
             self.assertEqual(led.totals()["committed"], Decimal("94.578"))
             ledger_id = led.ledger_id
 
         # Moving the ledger aside does not start a fresh cap without a new-budget note.
         RS.ledger_path(self.ledgers, "pilot").rename(self.ledgers / "ledger-pilot-moved.jsonl")
-        third = self.tmp / "run-c"
+        third = self.tmp / "out" / "run-c"
         r = self.command(self.stage_args("P1", root=third))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("was created here before", r.stderr)
         r = self.command(self.stage_args("P1", "--new-budget-note", "A second pilot budget, approved in writing.",
                                          root=third))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        with S.open_budget_ledger(self.ledgers, "pilot", "fake") as led:
+        with S.open_budget_ledger(self.ledger_root, "pilot", "fake") as led:
             self.assertEqual((led.header["new_budget_note"], led.header["replaces"]),
                              ("A second pilot budget, approved in writing.", [ledger_id]))
+            new_id = led.ledger_id
+        # The new ledger's first reconciliation sees only its own calls.
+        export = RS.export_path(self.ledgers, "pilot", new_id)
+        r = self.reconcile(export, root=third)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RECONCILED", r.stdout)
+        self.assertTrue(RS.export_path(self.ledgers, "pilot", ledger_id).exists())
+
+    def test_a_restored_older_ledger_copy_is_refused_for_every_run_root(self):
+        path = RS.ledger_path(self.ledgers, "pilot")
+        first = self.tmp / "out" / "run-a"
+        r = self.command(self.stage_args("P1", "--scripted-usage", "extreme", root=first))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        full = path.read_bytes()
+        path.write_bytes(full[:full.index(b"\n") + 1])                 # a copy holding only its header
+        for root in (first, self.tmp / "out" / "run-b"):
+            r = self.command(self.stage_args("P1", root=root))
+            self.assertNotEqual(r.returncode, 0, root)
+            self.assertIn("rolled back or cut", r.stderr)
+        (self.ledger_root / S.marks_name("pilot")).unlink()           # the run root's marks still catch it
+        r = self.command(self.stage_args("P1", root=self.tmp / "out" / "run-b"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ledger_marks-pilot.jsonl recorded entry", r.stderr)
+        self.assertFalse((self.tmp / "out" / "run-b").exists())
+        path.write_bytes(full)
+        r = self.command(self.stage_args("P1", root=self.tmp / "out" / "run-b"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_paid_flags_without_all_three_and_p3_or_eval_on_a_draft_rubric_are_refused(self):
         empty = self.tmp / "empty.txt"

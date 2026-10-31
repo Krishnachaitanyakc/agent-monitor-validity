@@ -179,9 +179,14 @@ def _record_bytes(record: dict) -> bytes:
     return (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def ledger_root(data_root) -> Path:
+    """The folder of every ledger, its register and the marks files, shared by every run root."""
+    return Path(data_root) / "out" / "ledgers"
+
+
 def ledger_dir(data_root, mode: str) -> Path:
-    """The one fixed folder of a mode's ledgers, shared by every run root."""
-    return Path(data_root) / "out" / "ledgers" / mode
+    """The one fixed folder of a mode's ledgers."""
+    return ledger_root(data_root) / mode
 
 
 def ledger_path(folder, budget: str) -> Path:
@@ -440,6 +445,45 @@ def run_mode(run_root: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def marks_path(run_root: Path, budget: str) -> Path:
+    return Path(run_root) / f"ledger_marks-{budget}.jsonl"
+
+
+def record_mark(run_root: Path, ledger, mode: str, clock=time.time) -> None:
+    """Add the ledger's mark to the run root's marks file for its budget, under the run's mode."""
+    line = json.dumps(dict(ledger.mark(), mode=mode, at=_now(clock)), sort_keys=True) + "\n"
+    with open(marks_path(run_root, ledger.budget), "ab") as f:
+        f.write(line.encode("utf-8"))
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def run_root_marks(run_root: Path, budget: str, mode: str) -> list:
+    """(where, mark) for every mark of the budget's ledger in ``mode`` that a run root
+    recorded: its marks file and the progress files of the budget's stages."""
+    run_root = Path(run_root)
+    path = marks_path(run_root, budget)
+    out = [(str(path), m) for m in (_jsonl(path) if path.is_file() else []) if m.get("mode") == mode]
+    for name in (n for n, st in STAGES.items() if st.budget == budget):
+        progress = run_root / name / "progress.json"
+        if progress.is_file():
+            report = json.loads(progress.read_text(encoding="utf-8"))
+            led = report.get("ledger") or {}
+            if report.get("mode") == mode and led.get("id"):
+                out.append((str(progress), {"ledger_id": led["id"], "seq": led.get("last_seq"),
+                                            "sha256": led.get("sha256")}))
+    return out
+
+
+def peer_marks(data_root: Path, run_root: Path, budget: str, mode: str) -> list:
+    """The marks of ``run_root`` and of every run root directly under <data-root>/out."""
+    out_dir = Path(data_root) / "out"
+    roots = {Path(run_root)}
+    if out_dir.is_dir():
+        roots |= {c for c in out_dir.iterdir() if c.is_dir() and (c / "run.json").is_file()}
+    return [m for root in sorted(roots) for m in run_root_marks(root, budget, mode)]
+
+
 # ---------------------------------------------------------------- stage checks
 
 def check_previous(spec: Stage, run_root: Path, ledger, mode: str, run: dict):
@@ -473,13 +517,22 @@ def check_previous(spec: Stage, run_root: Path, ledger, mode: str, run: dict):
     return str(path)
 
 
-def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str) -> None:
+def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str, mode: str) -> None:
     """Every stage of this budget in the run root ran on this ledger, the ledger is not
-    shorter than any of their progress files recorded, and every attempt they logged has
-    its reservation in it. Otherwise the ledger was rolled back or replaced."""
+    shorter than, and does not differ from, any mark the run root recorded, and every
+    attempt its stages logged has its reservation in it. Otherwise the ledger was rolled
+    back or replaced."""
     reserved = {(e.get("run"), e.get("stage"), e.get("trace_key"), e.get("judge"), e.get("repeat"),
                  e.get("attempt"), e.get("request_sha256")) for e in ledger.entries if e["type"] == "reserve"}
-    last_seq = len(ledger.entries) - 1
+    for where, mark in run_root_marks(run_root, spec.budget, mode):
+        if mark["ledger_id"] == ledger.ledger_id:
+            try:
+                ledger.check_mark(mark, where)
+            except S.LedgerError as e:
+                raise StageRefused(str(e)) from None
+        elif mark["ledger_id"] not in ledger.header.get("replaces", []):
+            raise StageRefused(f"{where} recorded {spec.budget} ledger {mark['ledger_id']}; this one is "
+                               f"{ledger.ledger_id}, so nothing is sent")
     for name in (n for n, s in STAGES.items() if s.budget == spec.budget):
         folder = run_root / name
         if (folder / "stage.json").is_file():
@@ -487,12 +540,6 @@ def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str) 
             if used.get("id") != ledger.ledger_id:
                 raise StageRefused(f"{name} ran on {spec.budget} ledger {used.get('id')}; this one is "
                                    f"{ledger.ledger_id}, so nothing is sent")
-        if (folder / "progress.json").is_file():
-            seen = (json.loads((folder / "progress.json").read_text(encoding="utf-8")).get("ledger") or {}).get(
-                "last_seq")
-            if isinstance(seen, int) and last_seq < seen:
-                raise StageRefused(f"the {spec.budget} ledger ends at entry {last_seq}, but {name}'s progress "
-                                   f"recorded entry {seen}: it was rolled back or replaced, so nothing is sent")
         for path in sorted((folder / "attempt_log" / "attempts").glob("*/*/*/*.json")):
             rec = json.loads(path.read_text(encoding="utf-8"))
             key = (run_id, name, rec.get("trace_key"), rec.get("judge"), rec.get("repeat"), rec.get("attempt"),
@@ -625,7 +672,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     stage_dir = run_root / stage
     if (stage_dir / "report.json").exists():
         raise StageRefused(f"{stage} is already complete: {stage_dir / 'report.json'}")
-    check_ledger_against_logs(spec, run_root, ledger, run["run_id"])
+    check_ledger_against_logs(spec, run_root, ledger, run["run_id"], mode)
     stage_dir.mkdir(parents=True, exist_ok=True)
     _fixed_record(stage_dir / "stage.json", {
         "stage": stage, "mode": mode, "config_sha256": config_hash, "b_model": b_model, "workspace": workspace,
@@ -713,10 +760,12 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
                        "slot": halt["slot"]}
         report = stage_report(*report_args, rows, stopped, recovered, previous, panel_record, planned, settings)
         _write_progress(stage_dir, report)
+        record_mark(run_root, ledger, mode, clock)
         if stopped is not None:
             break
     report = stage_report(*report_args, rows, stopped, recovered, previous, panel_record, planned, settings)
     _write_progress(stage_dir, report)
+    record_mark(run_root, ledger, mode, clock)
     if report["complete"]:
         write_once(stage_dir / "report.json", _record_bytes(report))
     return report
@@ -893,8 +942,9 @@ def cmd_run(args) -> int:
                 "approval_note": {"path": str(note), "sha256": fetch.sha256_file(note)} if note else None,
                 "inputs": {"packs": [str(Path(p).expanduser().resolve()) for p in args.packs],
                            "provenance": [str(Path(p).expanduser().resolve()) for p in args.provenance]}}
-    with S.open_budget_ledger(ledger_dir(data_root, mode), spec.budget, mode, create=True,
-                              new_budget_note=args.new_budget_note) as ledger:
+    with S.open_budget_ledger(ledger_root(data_root), spec.budget, mode, create=True,
+                              new_budget_note=args.new_budget_note,
+                              marks=peer_marks(data_root, run_root, spec.budget, mode)) as ledger:
         if mode == "fake":
             transport.period_start = ledger.created_at
             transport.export = export_path(ledger.path.parent, spec.budget, ledger.ledger_id)
@@ -918,13 +968,16 @@ def cmd_reconcile(args) -> int:
         rows, sha = S.read_usage_export(export)
     except ValueError as e:
         raise StageRefused(f"the export is refused: {e}") from None
-    with S.open_budget_ledger(ledger_dir(data_root, run["mode"]), args.budget, run["mode"]) as ledger:
+    with S.open_budget_ledger(ledger_root(data_root), args.budget, run["mode"],
+                              marks=peer_marks(data_root, run_root, args.budget, run["mode"])) as ledger:
         ledger.recover(run_roots={run["run_id"]: run_root})
         try:
             entry = ledger.reconcile(rows, sha, scopes={"anthropic": run.get("workspace"),
                                                         "openai": run.get("openai_project")})
         except ValueError as e:
             raise StageRefused(f"the export is refused: {e}") from None
+        finally:
+            record_mark(run_root, ledger, run["mode"])
     for p, v in entry["providers"].items():
         c = entry["coverage"].get(p) or {}
         print(f"{p}: export ${v['export_usd']}, ledger ${v['ledger_usd']}, excess share {v['excess_share']}; "
@@ -946,9 +999,11 @@ def cmd_correct(args) -> int:
             args.halt, args.note, stage_record["config_sha256"], at=_now())
     else:
         run = run_mode(run_root)
-        with S.open_budget_ledger(ledger_dir(data_root, run["mode"]), args.budget, run["mode"]) as ledger:
+        with S.open_budget_ledger(ledger_root(data_root), args.budget, run["mode"],
+                                  marks=peer_marks(data_root, run_root, args.budget, run["mode"])) as ledger:
             entry = ledger.record_correction(args.note)
             adjusted = [e for e in ledger.adjustments if e["reconcile_seq"] == entry["reconcile_seq"]]
+            record_mark(run_root, ledger, run["mode"])
         for e in adjusted:
             print(f"{e['provider']}: ${e['cost_usd']} settled as an adjustment to the provider's reported usage")
     print("correction recorded")

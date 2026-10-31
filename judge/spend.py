@@ -37,11 +37,14 @@ old.
 before the next step, so a reservation is on disk before its request leaves. Its header
 names the budget, the cap, the pricing hash, the mode and a random ledger id. One process
 holds the file (an exclusive lock) and at most one reservation is open at a time, so
-calls go out one at a time. ``open_budget_ledger`` keeps each budget's ledger at one fixed
-place shared by every run, with a register of every ledger created there, so a moved or
-deleted ledger is never silently replaced by a fresh cap: a second ledger for a budget
-needs a new-budget note, which its header keeps. A reservation closes from its attempt
-record in the attempt log, which keeps the raw response:
+calls go out one at a time. Each entry extends a hash chain over the file's lines, and
+a mark (ledger id, last entry, chain link) records where a ledger stood.
+``open_budget_ledger`` keeps each budget's ledger at one fixed place shared by every run,
+with a register of every ledger created there and the ledger's mark after every entry;
+it refuses a ledger that is shorter than, or differs from, any mark of it, and starts a
+second ledger for a budget only with a new-budget note, which its header keeps (see its
+docstring for what these checks cover). A reservation closes from its attempt record in
+the attempt log, which keeps the raw response:
 
 - a complete response settles at the cost of the usage it reports (input, cache write,
   cache read and output tokens), or as the price modifiers above say;
@@ -379,13 +382,15 @@ class Ledger:
             self._f.close()
             raise LedgerError(f"{self.path} is held by another run; one run at a time") from None
         self.entries, self.reservations, self.adjustments, self._blocking, self._failures = [], {}, [], None, []
+        self.chain, self.on_append = [], None
         try:
             self._f.seek(0)
             data = self._f.read()
             if data and not data.endswith(b"\n"):
                 raise LedgerError(f"{self.path} ends in a partial line; inspect it before any further call")
-            for line in data.decode("utf-8").splitlines():
+            for line in data.split(b"\n")[:-1]:
                 self._apply(json.loads(line))
+                self._link(line + b"\n")
             if not self.entries:
                 self._append({"type": "ledger", "budget": budget, "cap_usd": usd(self.cap),
                               "ledger_id": secrets.token_hex(8), "mode": mode, "price_table": PRICE_TABLE_VERSION,
@@ -477,7 +482,34 @@ class Ledger:
         self._f.flush()
         os.fsync(self._f.fileno())
         self._apply(entry)
+        self._link(line)
+        if self.on_append is not None:
+            self.on_append(self)
         return entry
+
+    # -------------------------------------------------------------- marks
+
+    def _link(self, line: bytes) -> None:
+        """Extend the hash chain: entry n's link is the SHA-256 of link n-1 and line n."""
+        prev = bytes.fromhex(self.chain[-1]) if self.chain else b""
+        self.chain.append(hashlib.sha256(prev + line).hexdigest())
+
+    def mark(self) -> dict:
+        """Where the ledger stands: its id, its last entry and that entry's chain link."""
+        return {"ledger_id": self.ledger_id, "seq": len(self.entries) - 1, "sha256": self.chain[-1]}
+
+    def check_mark(self, mark: dict, where: str) -> None:
+        """Refuse this ledger if it is shorter than a mark recorded at ``where``, or differs
+        from the ledger that mark was taken of."""
+        seq, sha = mark.get("seq"), mark.get("sha256")
+        if not (isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0):
+            raise LedgerError(f"{where} records no usable mark of {self.path}")
+        if seq >= len(self.entries):
+            raise LedgerError(f"{self.path} ends at entry {len(self.entries) - 1}, but {where} recorded entry {seq}: "
+                              "it was rolled back or cut, so nothing is sent")
+        if sha is not None and self.chain[seq] != sha:
+            raise LedgerError(f"{self.path} differs, up to entry {seq}, from what {where} recorded: it was replaced "
+                              "or edited, so nothing is sent")
 
     # -------------------------------------------------------------- totals
 
@@ -712,7 +744,8 @@ class Ledger:
         over = [e for e in self.entries if e["type"] == "settle" and e["over_reservation"] and e["id"] in ids]
         amounts = [Decimal(r["amount_usd"]) for r in rows]
         return {"budget": self.budget, "cap_usd": usd(self.cap),
-                "ledger": {"file": self.path.name, "id": self.ledger_id, "last_seq": len(self.entries) - 1},
+                "ledger": {"file": self.path.name, "id": self.ledger_id, "last_seq": len(self.entries) - 1,
+                           "sha256": self.chain[-1]},
                 "price_table": PRICE_TABLE_VERSION, "budget_committed_usd": usd(ta["committed"]),
                 "budget_settled_usd": usd(ta["settled"]), "budget_held_usd": usd(ta["held"]),
                 "budget_open_usd": usd(ta["open"]), "budget_adjusted_usd": usd(self.adjusted()),
@@ -738,53 +771,101 @@ def _note_given(note) -> bool:
     return isinstance(note, str) and bool(note.strip())
 
 
-def _register(folder: Path, led: Ledger) -> None:
-    line = json.dumps({"budget": led.budget, "ledger_id": led.ledger_id, "file": led.path.name, "mode": led.mode,
-                       "created_at": led.created_at, "new_budget_note": led.header.get("new_budget_note"),
-                       "replaces": led.header.get("replaces", [])}, sort_keys=True) + "\n"
-    with open(folder / REGISTER_NAME, "ab") as f:
-        f.write(line.encode("utf-8"))
+def marks_name(budget: str) -> str:
+    return f"marks-{budget}.jsonl"
+
+
+def _jsonl(path: Path) -> list:
+    return ([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if path.is_file() else [])
+
+
+def _append_line(path: Path, record: dict) -> None:
+    with open(path, "ab") as f:
+        f.write((json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
         f.flush()
         os.fsync(f.fileno())
 
 
-def open_budget_ledger(folder, budget: str, mode: str, *, create=False, new_budget_note=None,
-                       clock=time.time) -> Ledger:
-    """The budget's one ledger, ``folder``/ledger-<budget>.jsonl, shared by every run.
+def _register(root: Path, led: Ledger) -> None:
+    _append_line(root / REGISTER_NAME, {
+        "budget": led.budget, "ledger_id": led.ledger_id, "file": f"{led.mode}/{led.path.name}", "mode": led.mode,
+        "created_at": led.created_at, "new_budget_note": led.header.get("new_budget_note"),
+        "replaces": led.header.get("replaces", [])})
 
-    ``budgets.jsonl`` in ``folder`` lists every ledger created there. A ledger is created
-    only with ``create``. Once a ledger for the budget has been created, another one (after
-    the first was moved aside or deleted) needs ``new_budget_note``, which the new ledger's
-    header keeps; otherwise a fresh cap would quietly replace the spend already committed.
+
+def _keep_marks(root: Path, led: Ledger) -> None:
+    """After every entry, the ledger's mark goes to the budget's marks file beside the register."""
+    def write(ledger):
+        _append_line(root / marks_name(ledger.budget), dict(ledger.mark(), mode=ledger.mode))
+    led.on_append = write
+    write(led)
+
+
+def open_budget_ledger(root, budget: str, mode: str, *, create=False, new_budget_note=None, marks=(),
+                       clock=time.time) -> Ledger:
+    """The budget's one ledger in a mode, ``root``/<mode>/ledger-<budget>.jsonl, shared by every run.
+
+    ``root`` holds the register, ``budgets.jsonl``, which lists every ledger created under
+    it in every mode, and one marks file per budget, ``marks-<budget>.jsonl``, which gets
+    the ledger's mark (id, last entry, chain link) after every entry. ``marks`` adds
+    (where, mark) pairs that run roots recorded. A ledger shorter than any mark of it, or
+    differing from it, is refused; so is one when a mark names a ledger of the budget that
+    is neither this one nor one it replaces.
+
+    A ledger is created only with ``create``. Once the register or a mark names a ledger
+    for the budget, another one (after the first was moved aside or deleted) needs
+    ``new_budget_note``, which the new ledger's header keeps with the ids it replaces;
+    otherwise a fresh cap would quietly replace the spend already committed. These checks
+    hold within one ``root`` while its register, marks file or a marking run root remains;
+    a copy of the whole data root carries copies of its ledgers, which no check here can
+    tell apart.
     """
-    folder = Path(folder)
+    root = Path(root)
+    folder = root / mode
     path = folder / ledger_name(budget)
-    register = folder / REGISTER_NAME
-    entries = ([json.loads(line) for line in register.read_text(encoding="utf-8").splitlines() if line.strip()]
-               if register.is_file() else [])
-    earlier = [e for e in entries if e.get("budget") == budget]
+    register = root / REGISTER_NAME
+    earlier = [e for e in _jsonl(register) if e.get("budget") == budget and e.get("mode") == mode]
+    recorded = [(str(root / marks_name(budget)), m) for m in _jsonl(root / marks_name(budget))
+                if m.get("mode") == mode] + list(marks)
+    known = sorted({e["ledger_id"] for e in earlier} | {m["ledger_id"] for _, m in recorded if m.get("ledger_id")})
     if path.exists():
         if _note_given(new_budget_note):
             raise LedgerError(f"{path} exists; a new-budget note starts a new {budget} ledger only after this one "
                               "is moved aside")
         led = Ledger(path, budget, clock, mode=mode)
-        if led.ledger_id not in {e.get("ledger_id") for e in earlier}:
-            if earlier and not _note_given(led.header.get("new_budget_note")):
-                led.close()
-                raise LedgerError(f"{path} is not the {budget} ledger registered in {register}")
-            _register(folder, led)            # created, then stopped before its registration
+        try:
+            if led.ledger_id not in {e.get("ledger_id") for e in earlier}:
+                if earlier and not _note_given(led.header.get("new_budget_note")):
+                    raise LedgerError(f"{path} is not the {budget} ledger registered in {register}")
+                _register(root, led)            # created, then stopped before its registration
+            for where, m in recorded:
+                if m.get("ledger_id") == led.ledger_id:
+                    led.check_mark(m, where)
+                elif m.get("ledger_id") not in led.header.get("replaces", []):
+                    raise LedgerError(f"{where} recorded {budget} ledger {m.get('ledger_id')}, which is neither "
+                                      f"{path}'s ledger {led.ledger_id} nor one it replaces; restore that ledger")
+            _keep_marks(root, led)
+        except BaseException:
+            led.close()
+            raise
         return led
     if not create:
         raise LedgerError(f"no {budget} ledger at {path}")
     others = sorted(p.name for p in folder.glob(f"ledger-{budget}*")) if folder.is_dir() else []
-    if (earlier or others) and not _note_given(new_budget_note):
-        before = ", ".join([f"{e['ledger_id']} created {e['created_at']}" for e in earlier] + others)
+    if (known or others) and not _note_given(new_budget_note):
+        before = ", ".join(known + others)
         raise LedgerError(f"a {budget} ledger was created here before ({before}) and is not at {path}; restore it, "
                           f"or give a new-budget note to start a new {budget} budget")
     folder.mkdir(parents=True, exist_ok=True)
     led = Ledger(path, budget, clock, mode=mode, new_budget_note=new_budget_note if _note_given(new_budget_note)
-                 else None, replaces=[e["ledger_id"] for e in earlier])
-    _register(folder, led)
+                 else None, replaces=known)
+    try:
+        _register(root, led)
+        _keep_marks(root, led)
+    except BaseException:
+        led.close()
+        raise
     return led
 
 

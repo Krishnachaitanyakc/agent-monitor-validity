@@ -833,26 +833,35 @@ class TestDailyReconciliation(LedgerCase):
 
 
 class TestBudgetLedger(unittest.TestCase):
-    """One ledger per budget at one fixed place, and no silent second ledger."""
+    """One ledger per budget at one fixed place, with marks, and no silent second ledger."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.folder = self.tmp / "ledgers"
+        self.root = self.tmp / "ledgers"
+        self.folder = self.root / "fake"
+        self.path = self.folder / "ledger-pilot.jsonl"
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
     def open(self, **kw):
-        led = S.open_budget_ledger(self.folder, "pilot", "fake", **kw)
+        led = S.open_budget_ledger(self.root, "pilot", "fake", **kw)
         self.addCleanup(led.close)
         return led
 
     def register(self):
-        return [json.loads(x) for x in (self.folder / S.REGISTER_NAME).read_text().splitlines()]
+        return [json.loads(x) for x in (self.root / S.REGISTER_NAME).read_text().splitlines()]
+
+    def marks(self):
+        return [json.loads(x) for x in (self.root / S.marks_name("pilot")).read_text().splitlines()]
+
+    def spend_some(self, led, n=3):
+        for _ in range(n):
+            led.close_reservation(led.reserve(fields(), Decimal("1")), None)
 
     def test_one_ledger_is_created_once_and_shared(self):
         with self.assertRaisesRegex(S.LedgerError, "no pilot ledger"):
-            S.open_budget_ledger(self.folder, "pilot", "fake")
+            S.open_budget_ledger(self.root, "pilot", "fake")
         led = self.open(create=True)
         first = led.ledger_id
         led.close_reservation(led.reserve(fields(), Decimal("1")), None)
@@ -860,44 +869,115 @@ class TestBudgetLedger(unittest.TestCase):
         again = self.open(create=True)
         self.assertEqual((again.ledger_id, again.totals()["committed"], again.mode), (first, Decimal("1"), "fake"))
         self.assertEqual([(e["budget"], e["ledger_id"], e["file"]) for e in self.register()],
-                         [("pilot", first, "ledger-pilot.jsonl")])
+                         [("pilot", first, "fake/ledger-pilot.jsonl")])
+        self.assertEqual([(m["ledger_id"], m["seq"], m["mode"]) for m in self.marks()],
+                         [(first, 0, "fake"), (first, 1, "fake"), (first, 2, "fake"), (first, 2, "fake")])
+        self.assertEqual(self.marks()[-1]["sha256"], again.mark()["sha256"])
         again.close()
         with self.assertRaisesRegex(S.LedgerError, "not a paid one"):
-            S.open_budget_ledger(self.folder, "pilot", "paid")
-        evaluation = S.open_budget_ledger(self.folder, "evaluation", "fake", create=True)
+            S.Ledger(self.path, "pilot", mode="paid")
+        evaluation = S.open_budget_ledger(self.root, "evaluation", "fake", create=True)
         self.addCleanup(evaluation.close)
         self.assertNotEqual(evaluation.ledger_id, first)
+        paid = S.open_budget_ledger(self.root, "pilot", "paid", create=True)  # another mode: its own ledger
+        self.addCleanup(paid.close)
+        self.assertEqual(paid.path, self.root / "paid" / "ledger-pilot.jsonl")
 
     def test_a_second_ledger_for_a_budget_needs_a_new_budget_note(self):
         led = self.open(create=True)
         first = led.ledger_id
         led.close()
-        path = self.folder / "ledger-pilot.jsonl"
         for gone in ("moved", "deleted"):
             if gone == "moved":
-                path.rename(self.folder / "ledger-pilot-old.jsonl")
+                self.path.rename(self.folder / "ledger-pilot-old.jsonl")
             else:
                 (self.folder / "ledger-pilot-old.jsonl").unlink()
             with self.assertRaisesRegex(S.LedgerError, "was created here before"):
-                S.open_budget_ledger(self.folder, "pilot", "fake", create=True)
+                S.open_budget_ledger(self.root, "pilot", "fake", create=True)
             with self.assertRaisesRegex(S.LedgerError, "was created here before"):
-                S.open_budget_ledger(self.folder, "pilot", "fake", create=True, new_budget_note="  ")
-            self.assertFalse(path.exists())
+                S.open_budget_ledger(self.root, "pilot", "fake", create=True, new_budget_note="  ")
+            self.assertFalse(self.path.exists())
         led = self.open(create=True, new_budget_note="A new pilot budget, approved in writing on the study channel.")
         self.assertEqual((led.header["new_budget_note"], led.header["replaces"]),
                          ("A new pilot budget, approved in writing on the study channel.", [first]))
         self.assertEqual([e["ledger_id"] for e in self.register()], [first, led.ledger_id])
         led.close()
         with self.assertRaisesRegex(S.LedgerError, "moved aside"):
-            S.open_budget_ledger(self.folder, "pilot", "fake", new_budget_note="Another one.")
+            S.open_budget_ledger(self.root, "pilot", "fake", new_budget_note="Another one.")
+
+    def test_a_deleted_mode_folder_still_needs_a_new_budget_note(self):
+        led = self.open(create=True)
+        self.spend_some(led, 90)
+        led.close()
+        shutil.rmtree(self.folder)
+        with self.assertRaisesRegex(S.LedgerError, "was created here before"):
+            S.open_budget_ledger(self.root, "pilot", "fake", create=True)
+        self.assertFalse(self.path.exists())
 
     def test_an_unregistered_ledger_in_the_fixed_place_is_refused(self):
         self.open(create=True).close()
-        path = self.folder / "ledger-pilot.jsonl"
-        path.unlink()
-        S.Ledger(path, "pilot", mode="fake").close()                   # made by hand, outside the register
+        self.path.unlink()
+        S.Ledger(self.path, "pilot", mode="fake").close()               # made by hand, outside the register
         with self.assertRaisesRegex(S.LedgerError, "not the pilot ledger registered"):
-            S.open_budget_ledger(self.folder, "pilot", "fake")
+            S.open_budget_ledger(self.root, "pilot", "fake")
+
+    def test_a_restored_older_copy_or_a_cut_ledger_is_refused(self):
+        led = self.open(create=True)
+        header = self.path.read_bytes()
+        self.spend_some(led)
+        led.close()
+        full = self.path.read_bytes()
+        self.path.write_bytes(header)                                  # an older copy: only its header
+        with self.assertRaisesRegex(S.LedgerError, "rolled back or cut"):
+            S.open_budget_ledger(self.root, "pilot", "fake")
+        lines = full.splitlines(keepends=True)
+        self.path.write_bytes(b"".join(lines[:-1]))                    # the last line cut off
+        with self.assertRaisesRegex(S.LedgerError, "rolled back or cut"):
+            S.open_budget_ledger(self.root, "pilot", "fake")
+        edited = json.loads(lines[1])
+        edited["amount_usd"] = "0.01"
+        self.path.write_bytes(lines[0] + (json.dumps(edited, sort_keys=True) + "\n").encode() + b"".join(lines[2:]))
+        with self.assertRaisesRegex(S.LedgerError, "differs, up to entry 1,"):
+            S.open_budget_ledger(self.root, "pilot", "fake")
+        self.path.write_bytes(full)
+        self.open().close()
+
+    def test_a_failed_reconciliation_cut_from_the_ledger_is_refused(self):
+        led = self.open(create=True)
+        led.close_reservation(led.reserve(fields(), Decimal("1")), ({"http_status": 200}, a_raw(inp=100000, out=0)))
+        row = {"provider": "anthropic", "model": A, "tokens": {"input": 10000000, "cache_write": 0, "cache_read": 0,
+                                                                "output": 0}, "cost_usd": None,
+               "period_start": START, "period_end": S._now(time.time), "scope": "wrkspc_study"}
+        self.assertFalse(led.reconcile([row], "inflated")["ok"])
+        led.close()
+        lines = self.path.read_bytes().splitlines(keepends=True)
+        self.assertEqual(json.loads(lines[-1])["type"], "reconcile")
+        self.path.write_bytes(b"".join(lines[:-1]))
+        with self.assertRaisesRegex(S.LedgerError, "rolled back or cut"):
+            S.open_budget_ledger(self.root, "pilot", "fake")
+
+    def test_a_run_roots_marks_outlast_a_deleted_register(self):
+        led = self.open(create=True)
+        self.spend_some(led)
+        mark = ("run-a/ledger_marks-pilot.jsonl", dict(led.mark()))
+        first = led.ledger_id
+        led.close()
+        saved = self.path.read_bytes()
+        shutil.rmtree(self.root)                                       # the register and marks file go too
+        with self.assertRaisesRegex(S.LedgerError, f"created here before \\({first}\\)"):
+            S.open_budget_ledger(self.root, "pilot", "fake", create=True, marks=[mark])
+        self.folder.mkdir(parents=True)
+        self.path.write_bytes(saved[:saved.index(b"\n") + 1])           # its header only, restored by hand
+        with self.assertRaisesRegex(S.LedgerError, "rolled back or cut"):
+            S.open_budget_ledger(self.root, "pilot", "fake", marks=[mark])
+        self.path.unlink()
+        led = self.open(create=True, marks=[mark], new_budget_note="The first pilot ledger was lost; approved anew.")
+        self.assertEqual(led.header["replaces"], [first])
+        led.close()
+        self.open(marks=[mark]).close()                                # the replaced ledger's mark is accepted
+        stray = ("run-b/ledger_marks-pilot.jsonl", {"ledger_id": "0" * 16, "seq": 0, "sha256": None})
+        with self.assertRaisesRegex(S.LedgerError, "nor one it replaces"):
+            S.open_budget_ledger(self.root, "pilot", "fake", marks=[stray])
 
 
 class TestSimulatedPilot(LedgerCase):
