@@ -1,17 +1,29 @@
 """Spending controls: prices, reservations, the cap, a write-ahead ledger and reconciliation.
 
 **Prices.** One versioned table, ``PRICES``, in dollars per million tokens, from the setup
-note's section 4.1: ``claude-sonnet-5`` $2 input, $2.50 cache write (five minutes), $0.20
-cache read and $10 output; ``gpt-6-sol`` $2 input and $10 output, with no caching, so any
-cached token it reports is priced as input. A model outside the table cannot be
-reserved. Every amount is an exact decimal.
+note and the provider facts it relies on: ``claude-sonnet-5`` $2 input, $2.50 cache write
+(five minutes), $0.20 cache read and $10 output; ``gpt-6-sol`` and its first fallback
+``gpt-6.1-sol`` $2 input and $10 output, with no caching. A model outside the table
+cannot be reserved. Every amount is an exact decimal.
+
+**Price modifiers.** ``MODIFIERS`` holds the documented rates a response can show beyond
+the table: for A, ``inference_geo`` "us" at 1.1x every token and one-hour cache writes at
+$4 per million; for B, cached input ($0.20, or $0.10 on ``gpt-6.1-sol``), cache writes at
+the 12-hour rate (2.5x input, the higher of the two documented write rates), input above
+272,000 tokens at 2x input and cache and 1.5x output, and the flex, priority and
+ultrafast tiers. A complete response that shows a modifier settles at the larger of its
+reservation and its cost under the modifier. One that shows a modifier with no
+documented price (an A tier other than standard, an A region other than global or us, a
+B tier not listed, or a value that is not reported) holds its whole reservation. A B
+call whose input count is above 272,000 tokens is refused before it is reserved.
 
 **Reservation.** Before each call, r = (I x 1.02 + 256) x p_in x 1.25 + max_output x p_out.
 I is the provider's pre-send token count when one is supplied, and otherwise
 ``ESTIMATE_FACTOR`` (2) times the request layer's estimate, whose text rate and B image
 count are unmeasured. The 1.25 prices every input token as a cache write, so a repeat that
 misses the cache stays inside its reservation. max_output is the request's own output
-cap, 32,000 tokens.
+cap, 32,000 tokens. The ledger header keeps the SHA-256 of the price table, the modifiers
+and these reservation constants, and a ledger written under other values is refused.
 
 **Admission.** A call is admitted only if settled spend plus open and held reservations
 plus r stays at or below the budget's cap: $95 for the pilot stages together, $285 for
@@ -25,9 +37,11 @@ calls go out one at a time. A reservation closes from its attempt record in the 
 log, which keeps the raw response:
 
 - a complete response settles at the cost of the usage it reports (input, cache write,
-  cache read and output tokens);
-- a non-2xx error response settles at zero, since providers do not bill errors;
-- no response, a stream that did not complete, or usage not reported in full holds the
+  cache read and output tokens), or as the price modifiers above say;
+- a non-2xx error response settles at zero: Anthropic does not bill failed requests;
+  OpenAI's behaviour is unverified and covered by reconciliation;
+- no response, a stream that did not complete, an Anthropic stream whose
+  ``message_delta`` did not report final usage, or usage not reported in full holds the
   whole reservation, which then counts as spent for good;
 - no attempt record at all also holds it.
 
@@ -58,14 +72,26 @@ from . import dispatch as D
 from .storage import AttemptLog
 from .streams import anthropic_summary, openai_summary
 
-PRICE_TABLE_VERSION = "prices-2026-10-28"
+PRICE_TABLE_VERSION = "prices-2026-10-28-r2"
 PRICES = {
     "claude-sonnet-5": {"provider": "anthropic", "input": "2", "cache_write": "2.50", "cache_read": "0.20",
                         "output": "10"},
     "gpt-6-sol": {"provider": "openai", "input": "2", "cache_write": None, "cache_read": None, "output": "10"},
+    "gpt-6.1-sol": {"provider": "openai", "input": "2", "cache_write": None, "cache_read": None, "output": "10"},
 }
-PRICE_TABLE_SHA256 = hashlib.sha256(json.dumps({"version": PRICE_TABLE_VERSION, "prices": PRICES},
-                                               sort_keys=True).encode("utf-8")).hexdigest()
+MODIFIERS = {
+    "anthropic": {
+        "inference_geo": {"global": "1", "us": "1.1"},
+        "service_tier": {"standard": "1"},
+        "cache_write_1h_per_million": {"claude-sonnet-5": "4"},
+    },
+    "openai": {
+        "service_tier": {"default": "1", "flex": "0.5", "priority": "2", "ultrafast": "6"},
+        "cache_read_per_million": {"gpt-6-sol": "0.20", "gpt-6.1-sol": "0.10"},
+        "cache_write_per_million": {"gpt-6-sol": "5", "gpt-6.1-sol": "5"},
+        "long_context": {"above_input_tokens": 272000, "input_and_cache": "2", "output": "1.5"},
+    },
+}
 TOKEN_KINDS = ("input", "cache_write", "cache_read", "output")
 MILLION = Decimal(1000000)
 
@@ -75,7 +101,9 @@ WRITE_FACTOR = Decimal("1.25")
 ESTIMATE_FACTOR = 2
 CAPS = {"pilot": Decimal("95"), "evaluation": Decimal("285")}
 RECONCILE_TOLERANCE = Decimal("0.01")
+B_INPUT_LIMIT = MODIFIERS["openai"]["long_context"]["above_input_tokens"]
 RESERVATION_RULE = "r = (I x 1.02 + 256) x p_in x 1.25 + max_output x p_out"
+OUTPUT_CAP_RULE = "max_output is the request body's max_tokens (A) or max_output_tokens (B)"
 
 SETTLE, HOLD = "settle", "hold"
 EXPORT_FIELDS = ("provider", "model", "input_tokens", "cache_write_tokens", "cache_read_tokens",
@@ -91,7 +119,7 @@ class ConcurrentCall(RuntimeError):
 
 
 class SpendHalt(RuntimeError):
-    """A call was refused before sending: the cap, or a failed reconciliation."""
+    """A call was refused before sending: the cap, a reconciliation, or another reservation check."""
 
     def __init__(self, kind: str, message: str, entry: dict):
         super().__init__(message)
@@ -106,6 +134,19 @@ def _now(clock) -> str:
     return datetime.fromtimestamp(clock(), timezone.utc).isoformat(timespec="milliseconds")
 
 
+def pricing_record() -> dict:
+    """What fixes every amount the ledger records: prices, modifiers and the reservation constants."""
+    return {"version": PRICE_TABLE_VERSION, "prices_per_million_tokens": PRICES, "modifiers": MODIFIERS,
+            "reservation": {"rule": RESERVATION_RULE, "input_margin": usd(INPUT_MARGIN),
+                            "input_pad_tokens": INPUT_PAD_TOKENS, "write_factor": usd(WRITE_FACTOR),
+                            "estimate_factor": ESTIMATE_FACTOR, "output_cap_rule": OUTPUT_CAP_RULE,
+                            "b_input_limit_tokens": B_INPUT_LIMIT}}
+
+
+def pricing_sha256() -> str:
+    return hashlib.sha256(json.dumps(pricing_record(), sort_keys=True).encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------- prices and reservations
 
 def price(model: str) -> dict:
@@ -117,7 +158,8 @@ def price(model: str) -> dict:
 
 
 def call_cost(model: str, tokens: dict) -> Decimal:
-    """The cost of one call's usage; a kind with no price (B's cache) is priced as input."""
+    """The cost of disjoint token counts at the table's prices; a kind with no price (B's
+    cache) is priced as input."""
     p = price(model)
     return sum((Decimal(tokens[k]) * (p[k] if p[k] is not None else p["input"]) for k in TOKEN_KINDS),
                Decimal(0))
@@ -149,34 +191,93 @@ def _int(v):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
 
-def billable_tokens(provider: str, usage: dict):
-    """{kind: tokens} from a response's normalized usage, or None when it is incomplete."""
+def priced_usage(provider: str, model: str, summary: dict):
+    """(tokens, cost, modifiers, undocumented) for a complete response, or None when its
+    usage is not reported in full. ``tokens`` are disjoint counts; ``cost`` applies every
+    documented modifier the response shows, each listed in ``modifiers``; a modifier with
+    no documented price is listed in ``undocumented``."""
+    u, p, m = summary.get("usage") or {}, price(model), MODIFIERS[provider]
+    mods, unknown = [], []
     if provider == "anthropic":
-        tokens = {"input": _int(usage.get("input_tokens")), "cache_write": _int(usage.get("cache_write_tokens")),
-                  "cache_read": _int(usage.get("cache_read_tokens")), "output": _int(usage.get("output_tokens"))}
-        one_hour = usage.get("cache_write_1h_tokens")
-        if None in tokens.values() or one_hour or (tokens["cache_write"] and one_hour is None):
-            return None                       # one-hour writes have no price in the table
-        return tokens
-    inp, out = _int(usage.get("input_tokens")), _int(usage.get("output_tokens"))
-    if inp is None or out is None:
+        tokens = {"input": _int(u.get("input_tokens")), "cache_write": _int(u.get("cache_write_tokens")),
+                  "cache_read": _int(u.get("cache_read_tokens")), "output": _int(u.get("output_tokens"))}
+        one_hour = _int(u.get("cache_write_1h_tokens"))
+        if None in tokens.values() or (tokens["cache_write"] and one_hour is None):
+            return None                       # the five-minute and one-hour split is not reported
+        one_hour = one_hour or 0
+        if one_hour > tokens["cache_write"]:
+            return None
+        cost = call_cost(model, dict(tokens, cache_write=tokens["cache_write"] - one_hour))
+        if one_hour:
+            rate = m["cache_write_1h_per_million"].get(model)
+            if rate is None:
+                unknown.append("one-hour cache writes")
+            else:
+                cost += Decimal(one_hour) * Decimal(rate) / MILLION
+                mods.append(f"{one_hour} one-hour cache write tokens at ${rate} per million")
+        for field in ("service_tier", "inference_geo"):
+            value = u.get(field)
+            factor = m[field].get(value) if isinstance(value, str) else None
+            if factor is None:
+                unknown.append(f"{field} {value!r}")
+            elif Decimal(factor) != 1:
+                cost *= Decimal(factor)
+                mods.append(f"{field} {value} at {factor}x every token")
+        return tokens, cost, mods, unknown
+    inp, out = _int(u.get("input_tokens")), _int(u.get("output_tokens"))
+    read, write = _int(u.get("cache_read_tokens")), _int(u.get("cache_write_tokens"))
+    if None in (inp, out, read, write) or read + write > inp:
         return None
-    return {"input": inp, "cache_write": 0, "cache_read": 0, "output": out}   # input includes any cached
+    tokens = {"input": inp - read - write, "cache_write": write, "cache_read": read, "output": out}
+    cost = call_cost(model, dict(tokens, cache_write=0, cache_read=0))
+    if read or write:
+        r_read, r_write = m["cache_read_per_million"].get(model), m["cache_write_per_million"].get(model)
+        if r_read is None or r_write is None:
+            unknown.append("cache tokens")
+        else:
+            cost += (Decimal(read) * Decimal(r_read) + Decimal(write) * Decimal(r_write)) / MILLION
+            mods.append(f"{read} cached and {write} cache-write input tokens at ${r_read} and ${r_write} "
+                        "per million")
+    lc = m["long_context"]
+    if inp > lc["above_input_tokens"]:
+        out_cost = Decimal(out) * p["output"]
+        cost = (cost - out_cost) * Decimal(lc["input_and_cache"]) + out_cost * Decimal(lc["output"])
+        mods.append(f"{inp} input tokens, above {lc['above_input_tokens']}: input and cache at "
+                    f"{lc['input_and_cache']}x, output at {lc['output']}x")
+    tier = summary.get("service_tier")
+    factor = m["service_tier"].get(tier) if isinstance(tier, str) else None
+    if factor is None:
+        unknown.append(f"service_tier {tier!r}")
+    elif Decimal(factor) != 1:
+        cost *= Decimal(factor)
+        mods.append(f"service_tier {tier} at {factor}x every token")
+    return tokens, cost, mods, unknown
 
 
-def charge(provider: str, model: str, status, raw: bytes):
-    """(SETTLE, cost, tokens, detail) or (HOLD, None, None, reason) for one finished attempt."""
+def charge(provider: str, model: str, status, raw: bytes, reserved=Decimal(0)):
+    """(SETTLE, cost, tokens, detail) or (HOLD, None, None, reason) for one finished attempt
+    whose reservation was ``reserved``."""
     if status is None:
         return HOLD, None, None, "no response arrived; the provider may still bill the request"
     if not 200 <= status < 300:
-        return SETTLE, Decimal(0), dict.fromkeys(TOKEN_KINDS, 0), f"HTTP {status} error response, not billed"
+        return SETTLE, Decimal(0), dict.fromkeys(TOKEN_KINDS, 0), (
+            f"HTTP {status} error response, settled at zero: Anthropic does not bill failed requests; "
+            "OpenAI's behaviour is unverified and covered by reconciliation")
     s = anthropic_summary(raw) if provider == "anthropic" else openai_summary(raw)
     if not s["complete"]:
         return HOLD, None, None, "the stream did not complete, so its usage is unknown"
-    tokens = billable_tokens(provider, s["usage"])
-    if tokens is None:
+    if provider == "anthropic" and not s["usage_final"]:
+        return HOLD, None, None, "the stream's message_delta did not report final usage"
+    priced = priced_usage(provider, model, s)
+    if priced is None:
         return HOLD, None, None, "the response did not report its usage in full"
-    return SETTLE, call_cost(model, tokens), tokens, "response usage"
+    tokens, cost, mods, unknown = priced
+    if unknown:
+        return HOLD, None, None, "the response shows a price modifier with no documented price: " + "; ".join(unknown)
+    if mods:
+        return SETTLE, max(Decimal(reserved), cost), tokens, (
+            "the larger of the reservation and the response usage under documented modifiers: " + "; ".join(mods))
+    return SETTLE, cost, tokens, "response usage"
 
 
 def recorded_attempt(entry: dict, base=None):
@@ -234,9 +335,8 @@ class Ledger:
                 self._apply(json.loads(line))
             if not self.entries:
                 self._append({"type": "ledger", "budget": budget, "cap_usd": usd(self.cap),
-                              "price_table": PRICE_TABLE_VERSION, "price_table_sha256": PRICE_TABLE_SHA256,
-                              "prices_per_million_tokens": PRICES, "reservation_rule": RESERVATION_RULE,
-                              "estimate_factor": ESTIMATE_FACTOR, "created_at": _now(clock)})
+                              "price_table": PRICE_TABLE_VERSION, "pricing_sha256": pricing_sha256(),
+                              "pricing": pricing_record(), "created_at": _now(clock)})
                 if created:
                     fd = os.open(self.path.parent, os.O_RDONLY)
                     try:
@@ -244,10 +344,10 @@ class Ledger:
                     finally:
                         os.close(fd)
             head = self.entries[0]
-            if (head.get("type"), head.get("budget"), head.get("cap_usd"), head.get("price_table_sha256")) != (
-                    "ledger", budget, usd(self.cap), PRICE_TABLE_SHA256):
-                raise LedgerError(f"{self.path} is not a {budget} ledger under cap ${usd(self.cap)} and "
-                                  f"price table {PRICE_TABLE_VERSION}")
+            if (head.get("type"), head.get("budget"), head.get("cap_usd"), head.get("pricing_sha256")) != (
+                    "ledger", budget, usd(self.cap), pricing_sha256()):
+                raise LedgerError(f"{self.path} is not a {budget} ledger under cap ${usd(self.cap)}, price table "
+                                  f"{PRICE_TABLE_VERSION} and these reservation constants")
         except BaseException:
             self.close()
             raise
@@ -330,6 +430,10 @@ class Ledger:
             refused = self._append(dict(entry, type="refuse", reason="reconciliation",
                                         reconcile_seq=self._blocking["seq"]))
             raise SpendHalt("reconciliation", "a failed reconciliation has no correction note yet", refused)
+        if fields.get("provider") == "openai" and (fields.get("input_tokens") or 0) > B_INPUT_LIMIT:
+            refused = self._append(dict(entry, type="refuse", reason="long_context"))
+            raise SpendHalt("long_context", f"the B request's input count {fields['input_tokens']} is above "
+                            f"{B_INPUT_LIMIT} tokens, which the provider prices at a long-context rate", refused)
         if not t["committed"] + amount <= self.cap:
             refused = self._append(dict(entry, type="refuse", reason="spend_cap"))
             raise SpendHalt("spend_cap", f"the reservation of ${usd(amount)} on ${usd(t['committed'])} already "
@@ -345,7 +449,8 @@ class Ledger:
             return self._append({"type": "hold", "id": rid, "reason": "no attempt was recorded for it",
                                  "at": _now(self.clock)})
         record, raw = found
-        kind, cost, tokens, detail = charge(r["provider"], r["model"], record["http_status"], raw)
+        kind, cost, tokens, detail = charge(r["provider"], r["model"], record["http_status"], raw,
+                                            reserved=Decimal(r["amount_usd"]))
         if kind == HOLD:
             return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock)})
         return self._append({"type": "settle", "id": rid, "cost_usd": usd(cost), "tokens": tokens,

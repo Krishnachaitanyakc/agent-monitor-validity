@@ -33,20 +33,25 @@ A, B = R.A_MODEL, R.B_MODEL
 CAP = S.CAPS["pilot"]
 
 
-def a_raw(inp=0, write=0, read=0, out=3000, stop="end_turn", msg_id="msg_1"):
+def a_raw(inp=0, write=0, read=0, out=3000, stop="end_turn", msg_id="msg_1", one_hour=0, tier="standard",
+          geo="global", final_usage=True):
     usage = {"input_tokens": inp, "cache_creation_input_tokens": write, "cache_read_input_tokens": read,
-             "cache_creation": {"ephemeral_5m_input_tokens": write, "ephemeral_1h_input_tokens": 0}}
-    events = anthropic_events(answer() if stop == "end_turn" else None, stop_reason=stop, msg_id=msg_id, usage=usage)
+             "cache_creation": {"ephemeral_5m_input_tokens": write - one_hour, "ephemeral_1h_input_tokens": one_hour}}
+    events = anthropic_events(answer() if stop == "end_turn" else None, stop_reason=stop, msg_id=msg_id, usage=usage,
+                              service_tier=tier, inference_geo=geo)
     for _, obj in events:
         if obj.get("type") == "message_delta":
-            obj["usage"] = {"output_tokens": out}
+            if final_usage:
+                obj["usage"] = {"output_tokens": out}
+            else:
+                del obj["usage"]
     return sse(events)
 
 
-def b_raw(inp=60000, out=3000, resp_id="resp_1"):
-    usage = {"input_tokens": inp, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+def b_raw(inp=60000, out=3000, resp_id="resp_1", cached=0, written=0, tier="default"):
+    usage = {"input_tokens": inp, "input_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
              "output_tokens": out, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": inp + out}
-    return sse(openai_events(answer(), resp_id=resp_id, usage=usage))
+    return sse(openai_events(answer(), resp_id=resp_id, usage=usage, service_tier=tier))
 
 
 def fields(provider="anthropic", model=A, **kw):
@@ -73,12 +78,23 @@ class LedgerCase(unittest.TestCase):
 
 class TestPrices(unittest.TestCase):
     def test_one_versioned_table(self):
-        self.assertEqual(S.PRICE_TABLE_VERSION, "prices-2026-10-28")
+        self.assertEqual(S.PRICE_TABLE_VERSION, "prices-2026-10-28-r2")
         self.assertEqual(S.PRICES[A], {"provider": "anthropic", "input": "2", "cache_write": "2.50",
                                        "cache_read": "0.20", "output": "10"})
-        self.assertEqual(S.PRICES[B], {"provider": "openai", "input": "2", "cache_write": None, "cache_read": None,
-                                       "output": "10"})
+        for model in (B, "gpt-6.1-sol"):
+            self.assertEqual(S.PRICES[model], {"provider": "openai", "input": "2", "cache_write": None,
+                                               "cache_read": None, "output": "10"})
+        self.assertEqual(sorted(S.PRICES), sorted((A, B) + R.B_FALLBACK_MODELS))
         self.assertEqual(S.CAPS, {"pilot": Decimal("95"), "evaluation": Decimal("285")})
+
+    def test_the_documented_modifiers(self):
+        a, b = S.MODIFIERS["anthropic"], S.MODIFIERS["openai"]
+        self.assertEqual((a["inference_geo"], a["service_tier"], a["cache_write_1h_per_million"]),
+                         ({"global": "1", "us": "1.1"}, {"standard": "1"}, {A: "4"}))
+        self.assertEqual(b["service_tier"], {"default": "1", "flex": "0.5", "priority": "2", "ultrafast": "6"})
+        self.assertEqual((b["cache_read_per_million"], b["cache_write_per_million"]),
+                         ({B: "0.20", "gpt-6.1-sol": "0.10"}, {B: "5", "gpt-6.1-sol": "5"}))
+        self.assertEqual(b["long_context"], {"above_input_tokens": 272000, "input_and_cache": "2", "output": "1.5"})
 
     def test_setup_note_costs_per_call(self):
         cost = S.call_cost
@@ -92,7 +108,7 @@ class TestPrices(unittest.TestCase):
         self.assertEqual(cost(B, {"input": 0, "cache_write": 0, "cache_read": 1000, "output": 0}), Decimal("0.002"))
 
     def test_a_model_outside_the_table_cannot_be_reserved(self):
-        for model in ("gpt-6.1-sol", "claude-sonnet-5.5"):
+        for model in ("gpt-5.6-sol", "claude-sonnet-5.5"):
             with self.assertRaises(ValueError):
                 S.reservation(model, 1000, 32000)
 
@@ -162,9 +178,83 @@ class TestCharge(unittest.TestCase):
         self.assertEqual(S.charge("anthropic", A, 200, raw[:len(raw) // 2])[0], S.HOLD)
         no_usage = sse(openai_events(answer(), usage={"input_tokens": None}))
         self.assertEqual(S.charge("openai", B, 200, no_usage)[0], S.HOLD)
-        one_hour = sse(anthropic_events(answer(), usage={"cache_creation_input_tokens": 500, "cache_creation": {
-            "ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 500}}))
-        self.assertEqual(S.charge("anthropic", A, 200, one_hour)[0], S.HOLD)
+        no_split = sse(anthropic_events(answer(), usage={"cache_creation_input_tokens": 500, "cache_creation": {}}))
+        self.assertEqual(S.charge("anthropic", A, 200, no_split)[0], S.HOLD)
+        self.assertIn("Anthropic does not bill failed requests; OpenAI's behaviour is unverified",
+                      S.charge("openai", B, 400, b"")[3])
+
+    def test_an_anthropic_stream_without_final_usage_holds(self):
+        kind, cost, _, reason = S.charge("anthropic", A, 200, a_raw(inp=60000, out=3000, final_usage=False))
+        self.assertEqual((kind, cost), (S.HOLD, None))
+        self.assertIn("message_delta did not report final usage", reason)
+        self.assertEqual(S.charge("anthropic", A, 200, a_raw(inp=60000, out=3000))[:2], (S.SETTLE, Decimal("0.15")))
+
+
+class TestModifiers(unittest.TestCase):
+    """A documented modifier settles at the larger of the reservation and its cost under it."""
+
+    r = S.reservation(A, 60000, 32000)
+
+    def charge(self, provider, model, raw, reserved=None):
+        return S.charge(provider, model, 200, raw, reserved=self.r if reserved is None else reserved)
+
+    def test_an_a_region_other_than_global(self):
+        kind, cost, _, detail = self.charge("anthropic", A, a_raw(inp=60000, out=3000, geo="us"))
+        self.assertEqual((kind, cost), (S.SETTLE, self.r))
+        self.assertIn("inference_geo us at 1.1x", detail)
+        kind, cost, _, _ = self.charge("anthropic", A, a_raw(inp=60000, out=3000, geo="us"), reserved=Decimal(0))
+        self.assertEqual(cost, Decimal("0.165"))
+        kind, cost, _, detail = self.charge("anthropic", A, a_raw(inp=60000, out=3000, geo="eu"))
+        self.assertEqual((kind, cost), (S.HOLD, None))
+        self.assertIn("no documented price: inference_geo 'eu'", detail)
+
+    def test_a_service_tier_other_than_standard_or_default(self):
+        for tier in ("priority", "batch", None):
+            self.assertEqual(self.charge("anthropic", A, a_raw(inp=60000, tier=tier))[0], S.HOLD, tier)
+        for tier, plain in (("priority", Decimal("0.30")), ("ultrafast", Decimal("0.90")), ("flex", Decimal("0.075"))):
+            kind, cost, _, _ = self.charge("openai", B, b_raw(60000, 3000, tier=tier), reserved=Decimal(0))
+            self.assertEqual((kind, cost), (S.SETTLE, plain), tier)
+            self.assertEqual(self.charge("openai", B, b_raw(60000, 3000, tier=tier))[1], max(self.r, plain))
+        self.assertEqual(self.charge("openai", B, b_raw(60000, 3000, tier="scale"))[0], S.HOLD)
+        self.assertEqual(self.charge("openai", B, b_raw(60000, 3000))[1], Decimal("0.15"))    # default: as reported
+
+    def test_b_cache_read_or_write_tokens(self):
+        kind, cost, tokens, detail = self.charge("openai", B, b_raw(60000, 3000, cached=50000, written=10000),
+                                                 reserved=Decimal(0))
+        self.assertEqual(tokens, {"input": 0, "cache_write": 10000, "cache_read": 50000, "output": 3000})
+        self.assertEqual(cost, Decimal("0.09"))                  # $0.20 and $5 per million, plus output
+        self.assertIn("50000 cached and 10000 cache-write", detail)
+        self.assertEqual(self.charge("openai", B, b_raw(60000, 3000, cached=50000, written=10000))[1], self.r)
+        _, cost, _, _ = S.charge("openai", "gpt-6.1-sol", 200, b_raw(60000, 3000, cached=60000), reserved=Decimal(0))
+        self.assertEqual(cost, Decimal("0.036"))                 # $0.10 per million on the fallback
+        self.assertEqual(self.charge("openai", B, b_raw(60000, 3000, cached=60001))[0], S.HOLD)
+
+    def test_a_one_hour_cache_writes(self):
+        kind, cost, tokens, detail = self.charge("anthropic", A, a_raw(write=60000, one_hour=60000, out=3000),
+                                                 reserved=Decimal(0))
+        self.assertEqual((kind, cost), (S.SETTLE, Decimal("0.27")))      # $4 per million, plus output
+        self.assertIn("60000 one-hour cache write tokens at $4 per million", detail)
+        _, cost, _, _ = self.charge("anthropic", A, a_raw(write=60000, one_hour=30000, out=3000), reserved=Decimal(0))
+        self.assertEqual(cost, Decimal("0.225"))
+        self.assertEqual(self.charge("anthropic", A, a_raw(write=60000, one_hour=60000, out=3000))[1], self.r)
+
+    def test_b_input_above_272000_tokens(self):
+        kind, cost, _, detail = self.charge("openai", B, b_raw(300000, 3000))
+        self.assertEqual((kind, cost), (S.SETTLE, Decimal("1.245")))     # 2x input, 1.5x output
+        self.assertIn("above 272000", detail)
+        self.assertEqual(self.charge("openai", B, b_raw(272000, 3000), reserved=Decimal(0))[1], Decimal("0.574"))
+
+    def test_the_ledger_settles_a_modified_call_at_its_reservation_or_more(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        with S.Ledger(tmp / "ledger-pilot.jsonl", "pilot") as led:
+            rid = led.reserve(fields(), self.r)
+            entry = led.close_reservation(rid, ({"http_status": 200}, a_raw(inp=60000, out=3000, geo="us")))
+            self.assertEqual((entry["type"], Decimal(entry["cost_usd"]), entry["over_reservation"]),
+                             ("settle", self.r, False))
+            rid = led.reserve(fields("openai", B), Decimal("0.5"))
+            entry = led.close_reservation(rid, ({"http_status": 200}, b_raw(300000, 3000)))
+            self.assertEqual((Decimal(entry["cost_usd"]), entry["over_reservation"]), (Decimal("1.245"), True))
 
 
 class TestLedger(LedgerCase):
@@ -175,8 +265,9 @@ class TestLedger(LedgerCase):
         rows = self.lines()
         self.assertEqual([r["type"] for r in rows], ["ledger", "reserve", "hold"])
         self.assertEqual([r["seq"] for r in rows], [0, 1, 2])
-        self.assertEqual((rows[0]["budget"], rows[0]["cap_usd"], rows[0]["price_table"], rows[0]["estimate_factor"]),
-                         ("pilot", "95", S.PRICE_TABLE_VERSION, 2))
+        self.assertEqual((rows[0]["budget"], rows[0]["cap_usd"], rows[0]["price_table"],
+                          rows[0]["pricing"]["reservation"]["estimate_factor"], rows[0]["pricing_sha256"]),
+                         ("pilot", "95", S.PRICE_TABLE_VERSION, 2, S.pricing_sha256()))
         self.assertEqual(rows[1]["committed_before_usd"], "0")
 
     def test_admission_at_the_cap_boundary(self):
@@ -223,9 +314,23 @@ class TestLedger(LedgerCase):
             f.write(b'{"type": "reserve", "seq": 1')        # a torn last line
         with self.assertRaises(S.LedgerError):
             S.Ledger(self.path, "pilot")
-        self.path.write_text(json.dumps(dict(self.lines_of_header(), price_table_sha256="0" * 64)) + "\n")
+        self.path.write_text(json.dumps(dict(self.lines_of_header(), pricing_sha256="0" * 64)) + "\n")
         with self.assertRaises(S.LedgerError):
             S.Ledger(self.path, "pilot")
+
+    def test_a_changed_reservation_constant_refuses_a_resumed_ledger(self):
+        self.ledger().close()
+        for name, value in (("ESTIMATE_FACTOR", 3), ("WRITE_FACTOR", Decimal("1.2")), ("INPUT_MARGIN", Decimal("1")),
+                            ("INPUT_PAD_TOKENS", 0), ("OUTPUT_CAP_RULE", "max_output is 16,000"),
+                            ("B_INPUT_LIMIT", 300000)):
+            with mock.patch.object(S, name, value):
+                with self.assertRaises(S.LedgerError, msg=name):
+                    S.Ledger(self.path, "pilot")
+        with mock.patch.dict(S.PRICES, {"gpt-9": {"provider": "openai", "input": "1", "cache_write": None,
+                                                  "cache_read": None, "output": "1"}}):
+            with self.assertRaises(S.LedgerError):
+                S.Ledger(self.path, "pilot")
+        self.ledger().close()                                # unchanged values open it again
 
     def lines_of_header(self):
         return json.loads(self.path.read_text().splitlines()[0])
@@ -420,6 +525,18 @@ class TestMetered(MeteredCase):
             self.dispatch(Broken(), led)
         self.assertEqual([r["state"] for r in led.reservations.values()], ["held"])
         self.assertEqual(self.log.attempts(KEY, self.config, "A", 1), [])
+
+    def test_a_b_call_above_272000_input_tokens_is_refused_before_it_is_reserved(self):
+        led = self.ledger()
+        self.inputs["B"] = dict(self.inputs["B"], input_tokens=272001)
+        inner = D.FakeTransport([self.ex_a(write=60000), self.ex_a(read=60000), self.ex_a(read=60000)])
+        with self.assertRaises(S.SpendHalt) as cm:
+            self.dispatch(inner, led)
+        self.assertEqual((cm.exception.kind, cm.exception.entry["slot"]), ("long_context", "B1"))
+        self.assertEqual([r.judge for r in inner.sent], ["A", "A", "A"])
+        self.assertEqual([e["slot"] for e in led.entries if e["type"] == "reserve"], ["A1", "A2", "A3"])
+        self.inputs["B"] = dict(self.inputs["B"], input_tokens=272000)
+        self.assertEqual(led.reserve(dict(fields("openai", B), input_tokens=272000), Decimal("0.5"))[0], "r")
 
     def test_a_request_must_be_the_one_priced(self):
         led = self.ledger()
