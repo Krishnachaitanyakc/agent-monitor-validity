@@ -32,7 +32,7 @@ from test_requests import answer, images_for, synthetic_pack  # noqa: E402
 
 A, B = R.A_MODEL, R.B_MODEL
 CAP = S.CAPS["pilot"]
-START, END = "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z"        # a period that covers every test ledger
+START = "2026-01-01T00:00:00Z"                  # a period start before every test ledger's creation
 
 
 def a_raw(inp=0, write=0, read=0, out=3000, stop="end_turn", msg_id="msg_1", one_hour=0, tier="standard",
@@ -65,12 +65,18 @@ class LedgerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.path = self.tmp / "ledger-pilot.jsonl"
+        self.t = [1800000000.0]
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
+    def tick(self):
+        """The ledgers' clock: one second later at every reading, so entries never share a time."""
+        self.t[0] += 1
+        return self.t[0]
+
     def ledger(self, budget="pilot"):
-        led = S.Ledger(self.path, budget)
+        led = S.Ledger(self.path, budget, clock=self.tick)
         self.addCleanup(led.close)
         return led
 
@@ -565,11 +571,12 @@ class TestReconcile(LedgerCase):
             path.write_text("\n".join(lines) + "\n")
         return S.read_usage_export(path)
 
-    @staticmethod
-    def row(provider, model, inp=0, write=0, read=0, out=0, cost="", start=START, end=END, scope=None):
+    def row(self, provider, model, inp=0, write=0, read=0, out=0, cost="", start=START, end=None, scope=None):
+        """An export row whose period ends now, when the export is taken, unless ``end`` is given."""
         return {"provider": provider, "model": model, "input_tokens": inp, "cache_write_tokens": write,
                 "cache_read_tokens": read, "output_tokens": out, "cost_usd": cost, "period_start": start,
-                "period_end": end, "scope": scope or ("wrkspc_study" if provider == "anthropic" else "proj_study")}
+                "period_end": end or S._now(lambda: self.t[0]),
+                "scope": scope or ("wrkspc_study" if provider == "anthropic" else "proj_study")}
 
     def test_csv_and_json_exports_read_the_same(self):
         rows = [self.row("anthropic", A, write=60000, out=3000), self.row("openai", B, inp=60000, out=3000, cost="0.2")]
@@ -579,6 +586,7 @@ class TestReconcile(LedgerCase):
         self.assertNotEqual(sha_csv, sha_json)
         self.assertEqual([S.export_usd(r) for r in from_csv], [Decimal("0.18"), Decimal("0.2")])
         self.assertEqual((from_csv[0]["period_start"], from_csv[0]["scope"]), (START, "wrkspc_study"))
+        self.assertEqual(from_csv[0]["period_end"], rows[0]["period_end"])
 
     def test_bad_exports_are_refused(self):
         good = self.row("anthropic", A, out=1)
@@ -614,9 +622,10 @@ class TestReconcile(LedgerCase):
         entry = led.reconcile(rows, sha)
         self.assertFalse(entry["ok"])
         self.assertEqual(entry["providers"]["anthropic"]["excess_share"], "0.010010")
-        self.assertEqual(entry["coverage"], {"anthropic": {"period_start": START, "period_end": END,
+        end = rows[0]["period_end"]
+        self.assertEqual(entry["coverage"], {"anthropic": {"period_start": START, "period_end": end,
                                                            "scope": "wrkspc_study"},
-                                             "openai": {"period_start": START, "period_end": END,
+                                             "openai": {"period_start": START, "period_end": end,
                                                         "scope": "proj_study"}})
         self.assertFalse(led.reconciled_after_last_call())
         with self.assertRaises(S.SpendHalt) as cm:
@@ -639,7 +648,7 @@ class TestReconcile(LedgerCase):
         led = self.ledger()
         self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))          # $0.20
         self.settled(led, "openai", B, b_raw(100000, 0))                     # $0.20
-        rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=150000), self.row("openai", B, inp=95000)])
+        rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=150000), self.row("openai", B, inp=99500)])
         self.assertFalse(led.reconcile(rows, sha)["ok"])
         real_append = led._append
 
@@ -680,14 +689,20 @@ class TestReconcile(LedgerCase):
         now[0] += 60
         self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))
         last = led.entries[-1]["at"]
-        late, _ = self.export("late.csv", [self.row("anthropic", A, inp=100000, start=last)])
+        late, _ = self.export("late.csv", [self.row("anthropic", A, inp=100000, start=last, end=last)])
         with self.assertRaisesRegex(ValueError, "after the ledger was created"):
             led.reconcile(late, "late")
         early, _ = self.export("early.csv", [self.row("anthropic", A, inp=100000, end=led.created_at)])
         with self.assertRaisesRegex(ValueError, "before the ledger's last anthropic call"):
             led.reconcile(early, "early")
+        now[0] += 60
+        future, _ = self.export("future.csv", [self.row("anthropic", A, inp=100000, end=S._now(lambda: now[0] + 1))])
+        with self.assertRaisesRegex(ValueError, "after the time of this reconciliation"):
+            led.reconcile(future, "future")
         exact, _ = self.export("exact.csv", [self.row("anthropic", A, inp=100000, start=led.created_at, end=last)])
         self.assertEqual(led.reconcile(exact, "exact")["coverage"]["anthropic"]["period_end"], last)
+        taken, _ = self.export("taken.csv", [self.row("anthropic", A, inp=100000, end=S._now(lambda: now[0]))])
+        self.assertTrue(led.reconcile(taken, "taken")["ok"])
 
     def test_an_export_missing_a_provider_is_refused(self):
         led = self.ledger()
@@ -698,6 +713,94 @@ class TestReconcile(LedgerCase):
             led.reconcile(rows, sha)
         rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=1000), self.row("openai", B, inp=1000)])
         self.assertTrue(led.reconcile(rows, sha)["ok"])
+
+    def test_a_provider_whose_calls_all_settled_at_zero_still_needs_export_rows(self):
+        led = self.ledger()
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))
+        for _ in range(10):                                          # every B call an HTTP 400, settled at $0
+            led.close_reservation(led.reserve(fields("openai", B), Decimal("1")), ({"http_status": 400}, b"{}"))
+        self.assertEqual(led.totals()["committed"], Decimal("0.2"))
+        rows, sha = self.export("a.csv", [self.row("anthropic", A, inp=100000)])
+        with self.assertRaisesRegex(ValueError, r"no rows for \['openai'\]"):
+            led.reconcile(rows, sha)
+        late = self.row("openai", B, end=led.created_at)               # zero tokens, but ends too early
+        rows, sha = self.export("b.csv", [self.row("anthropic", A, inp=100000), late])
+        with self.assertRaisesRegex(ValueError, "before the ledger's last openai call"):
+            led.reconcile(rows, sha)
+        rows, sha = self.export("c.csv", [self.row("anthropic", A, inp=100000), self.row("openai", B)])
+        entry = led.reconcile(rows, sha)
+        self.assertTrue(entry["ok"])
+        self.assertEqual(sorted(entry["coverage"]), ["anthropic", "openai"])
+        rows, sha = self.export("d.csv", [self.row("anthropic", A, inp=100000), self.row("openai", B, inp=1000)])
+        self.assertFalse(led.reconcile(rows, sha)["ok"])              # OpenAI billed what the ledger holds at $0
+
+    def test_an_export_below_the_usage_the_responses_reported_is_refused(self):
+        led = self.ledger()
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))          # $0.20
+        self.settled(led, "openai", B, b_raw(100000, 0))                     # $0.20
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), None)   # held: not a reported usage
+        for inp, ok in ((98999, False), (99000, True)):
+            rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=inp), self.row("openai", B, inp=100000)])
+            if ok:
+                entry = led.reconcile(rows, sha)
+                self.assertTrue(entry["ok"])
+                self.assertEqual(Decimal(entry["providers"]["anthropic"]["responses_usd"]), Decimal("0.2"))
+            else:
+                with self.assertRaisesRegex(ValueError, "below the \\$0.2 that the ledger's anthropic responses"):
+                    led.reconcile(rows, sha)
+        zero, sha = self.export("zero.csv", [self.row("anthropic", A, scope="wrkspc_default"), self.row("openai", B)])
+        with self.assertRaisesRegex(ValueError, "partial, stale or of another scope"):
+            led.reconcile(zero, sha)
+
+    def test_the_same_export_is_refused_once_calls_were_made_since_it_was_reconciled(self):
+        led = self.ledger()
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))
+        rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=100000)])
+        self.assertTrue(led.reconcile(rows, sha)["ok"])
+        self.assertTrue(led.reconcile(rows, sha)["ok"])                       # no call since: the same bytes pass
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), ({"http_status": 400}, b"{}"))
+        with self.assertRaisesRegex(ValueError, "calls were made since"):
+            led.reconcile(rows, sha)
+        again, sha2 = self.export("v.json", [self.row("anthropic", A, inp=100000)])
+        self.assertNotEqual(sha, sha2)
+        self.assertTrue(led.reconcile(again, sha2)["ok"])
+
+    def test_an_export_of_another_scope_is_refused(self):
+        led = self.ledger()
+        rid = led.reserve(fields(scope="wrkspc_study"), Decimal("1"))
+        led.close_reservation(rid, ({"http_status": 200}, a_raw(inp=100000, out=0)))
+        rid = led.reserve(fields("openai", B, scope="proj_study"), Decimal("1"))
+        led.close_reservation(rid, ({"http_status": 200}, b_raw(100000, 0)))
+        good = [self.row("anthropic", A, inp=100000), self.row("openai", B, inp=100000)]
+        for i, scope in ((0, "wrkspc_default"), (1, "proj_other")):
+            rows = [dict(r) for r in good]
+            rows[i]["scope"] = scope
+            rows, sha = self.export("u.csv", rows)
+            with self.assertRaisesRegex(ValueError, "not the study's"):
+                led.reconcile(rows, sha)
+        rows, sha = self.export("u.csv", good)
+        with self.assertRaisesRegex(ValueError, "not the study's 'wrkspc_run'"):
+            led.reconcile(rows, sha, scopes={"anthropic": "wrkspc_run"})
+        self.assertTrue(led.reconcile(rows, sha, scopes={"anthropic": "wrkspc_study", "openai": "proj_study"})["ok"])
+        rid = led.reserve(fields(scope="wrkspc_second"), Decimal("1"))
+        led.close_reservation(rid, ({"http_status": 400}, b"{}"))
+        rows, sha = self.export("w.csv", [self.row("anthropic", A, inp=100000), self.row("openai", B, inp=100000)])
+        with self.assertRaisesRegex(ValueError, "more than one scope"):
+            led.reconcile(rows, sha)
+
+    def test_a_correction_settles_the_largest_excess_among_failed_reconciliations(self):
+        led = self.ledger()
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))          # $0.20
+        for inp in (5000000, 200000):                                       # $10.00, then $0.40
+            rows, sha = self.export(f"u{inp}.csv", [self.row("anthropic", A, inp=inp)])
+            self.assertFalse(led.reconcile(rows, sha)["ok"])
+        led.record_correction("Checked both exports.")
+        self.assertEqual([(e["provider"], Decimal(e["cost_usd"])) for e in led.entries if e["type"] == "adjust"],
+                         [("anthropic", Decimal("9.8"))])
+        self.assertEqual(led.totals()["committed"], Decimal("10"))
+        led.close()
+        reopened = self.ledger()
+        self.assertEqual((reopened.totals()["committed"], reopened.blocking_reconciliation()), (Decimal("10"), None))
 
 
 class TestDailyReconciliation(LedgerCase):
@@ -715,7 +818,7 @@ class TestDailyReconciliation(LedgerCase):
         self.assertEqual((cm.exception.kind, led.entries[-1]["oldest_unreconciled"]), ("reconcile_due", "r000001"))
         rows = [{"provider": "anthropic", "model": A, "tokens": {"input": 1000, "cache_write": 0, "cache_read": 0,
                                                                   "output": 0}, "cost_usd": None,
-                 "period_start": START, "period_end": END, "scope": "wrkspc_study"}]
+                 "period_start": START, "period_end": S._now(lambda: now[0]), "scope": "wrkspc_study"}]
         self.assertTrue(led.reconcile(rows, "daily")["ok"])
         self.assertIsNone(led.reconcile_due())
         led.reserve(fields(), Decimal("0.5"))

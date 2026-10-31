@@ -175,7 +175,7 @@ def _run_into(staging, data_root, first, everything, args):
         root, ledgers = staging / profile / "run", staging / profile / "ledgers"
         with S.Ledger(RS.ledger_path(ledgers, "pilot"), "pilot", mode="fake") as ledger:
             stages, ok = run_pilot(root, ledger, profile, first, everything, read_images,
-                                   RS.export_path(ledgers, "pilot"), True, settings)
+                                   RS.export_path(ledgers, "pilot", ledger.ledger_id), True, settings)
             totals = ledger.totals()
         complete = all(s["report"]["complete"] for s in stages.values()) and len(stages) == 3
         all_ok &= ok and complete and totals["committed"] <= S.CAPS["pilot"]
@@ -195,7 +195,7 @@ def _run_into(staging, data_root, first, everything, args):
         for k in range(1, MAX_PILOTS + 1):
             root = cap_root / f"pilot-{k:02d}"
             stages, ok = run_pilot(root, ledger, "extreme", first, everything, read_images,
-                                   RS.export_path(cap_ledgers, "pilot"), False, settings)
+                                   RS.export_path(cap_ledgers, "pilot", ledger.ledger_id), False, settings)
             all_ok &= ok
             pilots.append({s: _brief(v["report"])["spend"]["stage_spent_usd"] for s, v in stages.items()})
             stopped = [(s, v["report"]) for s, v in stages.items() if not v["report"]["complete"]]

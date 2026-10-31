@@ -68,14 +68,23 @@ class RunnerCase(unittest.TestCase):
         return led
 
     def stage(self, stage, its, led, profile="central", events=None, root=None, provider=None, **kw):
+        """Run a stage through the fake provider, which adds what it billed to the ledger's
+        usage export, as the stage command does."""
         provider = provider or RS.ScriptedProvider(profile, events=events)
-        report = RS.run_stage(stage, root or self.root, its, mode="fake", transport=provider, ledger=led,
-                              read_images=lambda e: e, workspace=RS.FAKE_WORKSPACE, counter=provider, **kw)
+        provider.export = RS.export_path(led.path.parent, led.budget, led.ledger_id)
+        provider.period_start, provider.clock = led.created_at, kw.get("clock", time.time)
+        try:
+            report = RS.run_stage(stage, root or self.root, its, mode="fake", transport=provider, ledger=led,
+                                  read_images=lambda e: e, workspace=RS.FAKE_WORKSPACE, counter=provider, **kw)
+        finally:
+            provider.write_export()
         return report, provider
 
     @staticmethod
-    def reconcile(led, provider, period_end=None, rows=None):
-        return led.reconcile(provider.export_rows(led.created_at, period_end, rows), "test")
+    def reconcile(led, *_):
+        """Reconcile the ledger with the fake provider's usage export so far."""
+        rows, sha = S.read_usage_export(RS.export_path(led.path.parent, led.budget, led.ledger_id))
+        return led.reconcile(rows, sha)
 
     def run_id(self, root=None):
         return json.loads(((root or self.root) / "run.json").read_text())["run_id"]
@@ -274,7 +283,7 @@ class TestGating(RunnerCase):
             self.stage("P1", its[:1], led)
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="paid", transport=D.FakeTransport(), ledger=led,
-                         read_images=lambda e: e, workspace="w", counter=RS.ScriptedProvider())
+                         read_images=lambda e: e, workspace="w", openai_project="p", counter=RS.ScriptedProvider())
         provider = RS.ScriptedProvider()
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="fake", transport=provider, ledger=led, read_images=lambda e: e,
@@ -287,6 +296,24 @@ class TestGating(RunnerCase):
         with self.assertRaises(ValueError):
             RS.run_stage("EVAL", self.root, its, mode="fake", transport=D.FakeTransport(), ledger=led,
                          read_images=lambda e: e, workspace="w")
+
+    def test_every_stage_of_a_run_keeps_the_workspace_and_project_of_its_first(self):
+        led = self.ledger()
+        report, provider = self.stage("P1", items(1, "a"), led)
+        self.reconcile(led)
+        record = json.loads((self.root / "run.json").read_text())
+        self.assertEqual((record["workspace"], record["openai_project"]), (RS.FAKE_WORKSPACE, RS.FAKE_PROJECT))
+        for scope in ({"workspace": "wrkspc_other"}, {"workspace": RS.FAKE_WORKSPACE, "openai_project": "proj_other"}):
+            provider = RS.ScriptedProvider()
+            kw = dict({"workspace": RS.FAKE_WORKSPACE}, **scope)
+            with self.assertRaisesRegex(RS.StageRefused, "every stage of a run uses the same ones"):
+                RS.run_stage("P2", self.root, items(1, "b"), mode="fake", transport=provider, ledger=led,
+                             read_images=lambda e: e, counter=provider, **kw)
+            self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / "P2").exists())
+        self.assertEqual({e["scope"] for e in reserves(led)}, {RS.FAKE_WORKSPACE, RS.FAKE_PROJECT})
+        report, _ = self.stage("P2", items(1, "b"), led)
+        self.assertEqual((report["complete"], report["settings"]["openai_project"]), (True, RS.FAKE_PROJECT))
 
     def test_p3_and_eval_refuse_a_rubric_that_is_not_frozen(self):
         with mock.patch.object(R, "RUBRIC_STATUS", "draft"):
@@ -302,7 +329,7 @@ class TestGating(RunnerCase):
                 self.stage("EVAL", items(1, "e"), self.ledger(budget="evaluation"))
             with self.assertRaises(ValueError):
                 RS.run_stage("P3", self.root, items(1, "3"), mode="paid", transport=D.FakeTransport(), ledger=led,
-                             read_images=lambda e: e, workspace="w", counter=RS.ScriptedProvider(),
+                             read_images=lambda e: e, workspace="w", openai_project="p", counter=RS.ScriptedProvider(),
                              rubric_check=False)
             report, _ = self.stage("P3", items(1, "3"), led, rubric_check=False)
             self.assertTrue(report["complete"])
@@ -545,14 +572,14 @@ class TestEval(RunnerCase):
         self.assertEqual(len(first.sent), 4)
         with self.eval_ledger(clock) as led:
             self.assertEqual(led.entries[-1]["reason"], "reconcile_due")
-            self.assertTrue(self.reconcile(led, first, period_end=S._now(clock))["ok"])
+            self.assertTrue(self.reconcile(led)["ok"])
         AttemptLog(self.root / "EVAL" / "attempt_log").record_correction(
             report["stopped"]["halt_id"], "Reconciled both providers' usage.", R.config_sha256(), at="now")
         report, second = self.eval(panel, clock=clock)
         self.assertEqual(len(second.sent), 4)
         self.assertEqual((report["complete"], report["stopped"]), (False, None))
         with self.eval_ledger(clock) as led:
-            self.reconcile(led, first, period_end=S._now(clock), rows=first.billed + second.billed)
+            self.reconcile(led)
         report, _ = self.eval(panel, clock=clock)
         self.assertTrue(report["complete"])
 
@@ -598,25 +625,29 @@ class TestPaidMode(unittest.TestCase):
                         if (paid, confirm, note) in ((False, False, None), (True, True, str(self.note))):
                             continue
                         with self.assertRaisesRegex(RS.StageRefused, "missing"):
-                            RS.select_transport(paid, confirm, note, workspace="wrkspc_study", counter=counter)
+                            RS.select_transport(paid, confirm, note, workspace="wrkspc_study", counter=counter,
+                                                openai_project="proj_study")
             https.assert_not_called()
             with self.assertRaisesRegex(RS.StageRefused, "--workspace"):
-                RS.select_transport(True, True, str(self.note), counter=counter)
+                RS.select_transport(True, True, str(self.note), counter=counter, openai_project="proj_study")
+            with self.assertRaisesRegex(RS.StageRefused, "--openai-project"):
+                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter)
             https.assert_not_called()
-            mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter)
+            mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter,
+                                          openai_project="proj_study")
         self.assertEqual(mode, "paid")
         https.assert_called_once_with(confirm_paid_calls=True)
 
     def test_paid_mode_without_a_provider_token_count_is_refused_before_any_transport_exists(self):
         with mock.patch.object(D, "HttpsTransport") as https:
             with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
-                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study")
+                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", openai_project="proj_study")
             https.assert_not_called()
         led = S.Ledger(self.tmp / "ledger-pilot.jsonl", "pilot")
         self.addCleanup(led.close)
         with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
             RS.run_stage("P1", self.tmp / "run", items(1, "a"), mode="paid", transport=D.FakeTransport(), ledger=led,
-                         read_images=lambda e: e, workspace="wrkspc_study")
+                         read_images=lambda e: e, workspace="wrkspc_study", openai_project="proj_study")
         self.assertFalse((self.tmp / "run").exists())
         self.assertEqual(len(led.entries), 1)
 
@@ -694,14 +725,15 @@ class TestCommands(CommandCase):
         self.assertEqual(report["settings"]["fence"]["profiles"], ["dev_only"])
         self.assertEqual(report["cases"], {"planned": 5, "given": 2, "ended": 2, "ineligible": []})
         self.assertIn("every socket refused", report["settings"]["transport"])
+        ledger_id = report["ledger"]["id"]
         self.assertEqual(sorted(p.name for p in self.ledgers.iterdir()),
-                         ["budgets.jsonl", "fake_provider_export-pilot.csv", "ledger-pilot.jsonl"])
+                         ["budgets.jsonl", f"fake_provider_export-pilot-{ledger_id}.csv", "ledger-pilot.jsonl"])
         self.assertFalse(any(p.name.startswith("ledger") for p in self.root.iterdir()))
 
         r = self.command(self.stage_args("P2"))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("reconcile", r.stderr)
-        export = RS.export_path(self.ledgers, "pilot")
+        export = RS.export_path(self.ledgers, "pilot", ledger_id)
         r = self.reconcile(export)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(f"{RS.FAKE_WORKSPACE} from ", r.stdout)
@@ -710,6 +742,12 @@ class TestCommands(CommandCase):
         self.assertIn("cache hits      not applicable", r.stdout)
 
         rows = list(export.read_text().splitlines())
+        other = self.tmp / "other-workspace.csv"
+        other.write_text("\n".join([rows[0]] + [r.replace(RS.FAKE_WORKSPACE, "wrkspc_default") for r in rows[1:]])
+                         + "\n")
+        r = self.reconcile(other)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not the study's 'wrkspc_fake'", r.stderr)
         inflated = self.tmp / "inflated.csv"
         inflated.write_text("\n".join(rows + [rows[1]]) + "\n")
         r = self.reconcile(inflated)

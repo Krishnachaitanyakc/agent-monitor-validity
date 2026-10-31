@@ -188,8 +188,9 @@ def ledger_path(folder, budget: str) -> Path:
     return Path(folder) / S.ledger_name(budget)
 
 
-def export_path(folder, budget: str) -> Path:
-    return Path(folder) / f"fake_provider_export-{budget}.csv"
+def export_path(folder, budget: str, ledger_id: str) -> Path:
+    """The fake provider's usage export for one ledger: a new ledger starts a new export."""
+    return Path(folder) / f"fake_provider_export-{budget}-{ledger_id}.csv"
 
 
 # ---------------------------------------------------------------- inputs
@@ -249,10 +250,10 @@ def paid_conditions(paid, confirm_paid_calls, approval_note) -> list:
     return missing
 
 
-def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, counter=None):
+def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, counter=None, openai_project=None):
     """("fake", None) when no paid condition is given; ("paid", HttpsTransport) when all
-    three hold, a workspace is named and a provider token counter exists; any other
-    combination is refused before a transport exists."""
+    three hold, the study workspace and OpenAI project are named and a provider token
+    counter exists; any other combination is refused before a transport exists."""
     if not (paid or confirm_paid_calls or approval_note):
         return "fake", None
     missing = paid_conditions(paid, confirm_paid_calls, approval_note)
@@ -261,6 +262,8 @@ def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, co
                            "missing: " + "; ".join(missing))
     if not workspace:
         raise StageRefused("paid mode also needs --workspace, the study's Anthropic workspace ID")
+    if not openai_project:
+        raise StageRefused("paid mode also needs --openai-project, the study's OpenAI project ID")
     if counter is None:
         raise StageRefused(NO_COUNTER)
     return "paid", D.HttpsTransport(confirm_paid_calls=confirm_paid_calls)
@@ -274,17 +277,19 @@ class ScriptedProvider(D.FakeTransport):
     (trace key, slot, attempt) to "timeout", "http_400", "refusal", "output_cap" or
     "cache_miss". Each response the fake provider bills is kept in ``billed``;
     ``write_export`` adds them to the usage export at ``export_path``, which states one
-    period from ``period_start`` (the ledger's creation) to the time it is written.
+    period from ``period_start`` (the ledger's creation) to the time it is written, by
+    ``clock``. A provider that was sent requests but billed none gets a zero-token row.
     ``count`` stands in for the provider's pre-send token count.
     """
 
     def __init__(self, profile="central", workspace=FAKE_WORKSPACE, events=None, export_path=None,
-                 project=FAKE_PROJECT):
+                 project=FAKE_PROJECT, clock=time.time):
         super().__init__()
         self.profile = profile
         self.input_tokens, self.output_tokens = USAGE_PROFILES[profile]
         self.workspace, self.project, self.events, self.export = workspace, project, dict(events or {}), export_path
         self.cached, self.billed, self.ctx, self.period_start, self._exported = set(), [], None, None, 0
+        self.clock = clock
 
     def count(self, request) -> int:
         return self.input_tokens
@@ -305,10 +310,14 @@ class ScriptedProvider(D.FakeTransport):
         and the provider's scope."""
         if not period_start:
             raise ValueError("an export period starts at the ledger's creation; give period_start")
-        end = period_end or _now()
+        end = period_end or _now(self.clock)
         scope = {"anthropic": self.workspace, "openai": self.project}
-        return [dict(r, period_start=period_start, period_end=end, scope=scope[r["provider"]])
-                for r in (self.billed if rows is None else rows)]
+        rows = list(self.billed if rows is None else rows)
+        for request in self.sent:
+            if request.provider not in {r["provider"] for r in rows}:
+                rows.append({"provider": request.provider, "model": request.model,
+                             "tokens": dict.fromkeys(S.TOKEN_KINDS, 0), "cost_usd": None})
+        return [dict(r, period_start=period_start, period_end=end, scope=scope[r["provider"]]) for r in rows]
 
     def write_export(self, period_end=None) -> None:
         """Add the calls billed since the last write to the usage export and restate its period."""
@@ -408,16 +417,18 @@ class StageLog(AttemptLog):
         return True
 
 
-def run_record(run_root: Path, mode: str) -> dict:
-    """run.json: the mode, fixed at the first stage, and the run's own id, by which the
-    ledger names it wherever the folder is."""
+def run_record(run_root: Path, mode: str, scopes: dict) -> dict:
+    """run.json: the mode, the study workspace and OpenAI project, fixed at the first
+    stage, and the run's own id, by which the ledger names it wherever the folder is."""
     path = run_root / "run.json"
+    wanted = {"mode": mode, "workspace": scopes["anthropic"], "openai_project": scopes["openai"]}
     if path.exists():
         record = json.loads(path.read_text(encoding="utf-8"))
-        if record.get("mode") != mode:
-            raise StageRefused(f"{path} records {record.get('mode')} mode; a resumed stage must use the same ones")
+        given = {k: record.get(k) for k in wanted}
+        if given != wanted:
+            raise StageRefused(f"{path} records {given}; every stage of a run uses the same ones, not {wanted}")
         return record
-    record = {"mode": mode, "run_id": "run-" + secrets.token_hex(6)}
+    record = dict(wanted, run_id="run-" + secrets.token_hex(6))
     write_once(path, _record_bytes(record))
     return record
 
@@ -573,10 +584,12 @@ def _slots_ended(log, key, config_sha256, slots) -> bool:
 # ---------------------------------------------------------------- run
 
 def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger, read_images, workspace,
-              counter=None, panel=None, repo=REPO, sleep=None, clock=time.time, settings=None,
+              openai_project=None, counter=None, panel=None, repo=REPO, sleep=None, clock=time.time, settings=None,
               b_model=R.B_MODEL, rubric_check=True) -> dict:
     """Run one stage, or resume it, and return its report (see the module docstring).
 
+    ``workspace`` and ``openai_project`` are the study's scopes; fake mode's project
+    defaults to the fake provider's.
     ``counter`` gives each request's input count before it is reserved; paid mode needs
     it. ``rubric_check=False`` waives the frozen-rubric rule of P3 and EVAL, which only
     the fake-mode stage dry run does, and the report says so. A call that settles above
@@ -591,6 +604,9 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         raise ValueError(f"mode is fake or paid, not {mode!r}")
     if mode == "paid" and counter is None:
         raise StageRefused(NO_COUNTER)
+    if mode == "paid" and not (workspace and openai_project):
+        raise StageRefused("paid mode needs the study's workspace and OpenAI project")
+    scopes = {"anthropic": workspace, "openai": openai_project or (FAKE_PROJECT if mode == "fake" else None)}
     if mode == "paid" and not rubric_check:
         raise ValueError("the frozen-rubric rule is waived only in fake mode")
     config_hash = R.config_sha256(b_model=b_model, caching=spec.caching)
@@ -601,7 +617,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     panel_record = None
     if spec.name == "EVAL":
         panel_record = verify_panel(panel, config_hash, items, repo)
-    run = run_record(run_root, mode)
+    run = run_record(run_root, mode, scopes)
     previous = check_previous(spec, run_root, ledger, mode, run)
     planned = panel_record["n"] if panel_record else spec.planned
     if not items or len(items) > planned:
@@ -613,6 +629,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     stage_dir.mkdir(parents=True, exist_ok=True)
     _fixed_record(stage_dir / "stage.json", {
         "stage": stage, "mode": mode, "config_sha256": config_hash, "b_model": b_model, "workspace": workspace,
+        "openai_project": scopes["openai"],
         "ledger": {"budget": ledger.budget, "file": ledger.path.name, "id": ledger.ledger_id},
         "scripted_usage": getattr(transport, "profile", None), "panel": panel_record and panel_record["sha256"],
         "cases": [[i.trace_key, i.pack_sha256] for i in items]}, "inputs")
@@ -627,10 +644,11 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     if pending:
         raise StageRefused(f"{stage} has halts without a correction note: "
                            + ", ".join(h["halt_id"] for h in pending))
-    settings = dict(settings or {}, workspace=workspace, b_model=b_model, rubric_status=rubric_status,
+    settings = dict(settings or {}, workspace=workspace, openai_project=scopes["openai"], b_model=b_model,
+                    rubric_status=rubric_status,
                     rubric_check=("applied" if rubric_check else "waived in a fake-mode dry run")
                     if spec.name in FROZEN_RUBRIC_STAGES else "not required")
-    metered = S.MeteredTransport(transport, ledger, run["run_id"], stage, log_root, run_root=run_root)
+    metered = S.MeteredTransport(transport, ledger, run["run_id"], stage, log_root, run_root=run_root, scopes=scopes)
     sleep = sleep or (lambda s: None)
     rows, stopped = [], None
     report_args = (spec, run, items, log, ledger, config_hash, mode, b_model)
@@ -853,15 +871,15 @@ def cmd_run(args) -> int:
     if args.scripted_usage and (args.paid or args.confirm_paid_calls or args.approval_note):
         raise StageRefused("--scripted-usage is for fake mode only")
     counter = None                          # no provider token-count client exists yet
-    mode, paid = select_transport(args.paid, args.confirm_paid_calls, args.approval_note, args.workspace, counter)
+    mode, paid = select_transport(args.paid, args.confirm_paid_calls, args.approval_note, args.workspace, counter,
+                                  args.openai_project)
     if mode == "fake":
         _forbid_network()
-        transport = ScriptedProvider(args.scripted_usage or "central",
-                                     export_path=export_path(ledger_dir(data_root, mode), spec.budget))
-        counter, workspace = transport, FAKE_WORKSPACE
+        transport = ScriptedProvider(args.scripted_usage or "central")
+        counter, workspace, project = transport, FAKE_WORKSPACE, FAKE_PROJECT
         sleep = None
     else:
-        transport, workspace, sleep = paid, args.workspace, time.sleep
+        transport, workspace, project, sleep = paid, args.workspace, args.openai_project, time.sleep
     items = load_items(args.packs, args.provenance, split="dev" if spec.budget == "pilot" else None)
     panel = ({"manifest": args.panel_manifest, "sha256": args.panel_sha256, "freeze_tag": args.freeze_tag}
              if spec.name == "EVAL" else None)
@@ -879,10 +897,12 @@ def cmd_run(args) -> int:
                               new_budget_note=args.new_budget_note) as ledger:
         if mode == "fake":
             transport.period_start = ledger.created_at
+            transport.export = export_path(ledger.path.parent, spec.budget, ledger.ledger_id)
         try:
             report = run_stage(spec.name, run_root, items, mode=mode, transport=transport, ledger=ledger,
                                read_images=lambda entries: R.read_images(entries, data_root), workspace=workspace,
-                               counter=counter, panel=panel, sleep=sleep, settings=settings, b_model=args.b_model)
+                               openai_project=project, counter=counter, panel=panel, sleep=sleep, settings=settings,
+                               b_model=args.b_model)
         finally:
             if mode == "fake":
                 transport.write_export()
@@ -901,7 +921,8 @@ def cmd_reconcile(args) -> int:
     with S.open_budget_ledger(ledger_dir(data_root, run["mode"]), args.budget, run["mode"]) as ledger:
         ledger.recover(run_roots={run["run_id"]: run_root})
         try:
-            entry = ledger.reconcile(rows, sha)
+            entry = ledger.reconcile(rows, sha, scopes={"anthropic": run.get("workspace"),
+                                                        "openai": run.get("openai_project")})
         except ValueError as e:
             raise StageRefused(f"the export is refused: {e}") from None
     for p, v in entry["providers"].items():
@@ -952,6 +973,7 @@ def main(argv=None) -> int:
     run.add_argument("--confirm-paid-calls", action="store_true", help="passed to the HTTPS transport")
     run.add_argument("--approval-note", help="the file written after the mentor's written go-ahead")
     run.add_argument("--workspace", help="paid mode: the study's Anthropic workspace ID")
+    run.add_argument("--openai-project", help="paid mode: the study's OpenAI project ID")
     run.add_argument("--new-budget-note", help="why a second ledger for this budget is started, after the first "
                      "was moved aside")
     run.add_argument("--panel-manifest", help="EVAL: the frozen panel manifest")

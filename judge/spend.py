@@ -59,14 +59,27 @@ attempt log relative to that run's folder.
 **Reconciliation.** ``read_usage_export`` reads a usage export in the runner's own format
 (``EXPORT_FIELDS``, as CSV or JSON), not a provider's format. Every row states the
 export's period and its scope (the Anthropic workspace or the OpenAI project), the same
-for all of one provider's rows. The export is cumulative from the ledger's creation: a
-period that starts after the ledger's ``created_at`` or ends before the provider's last
-settled or held call is refused. ``Ledger.reconcile`` prices it with the same table and
-compares each provider's total with the ledger's spend on that provider. Usage above the
-ledger by more than 1% fails, and a failed reconciliation refuses every later reservation
-until ``record_correction`` appends a note. The note first appends, for each provider, a
-settled adjustment of the export's excess over the ledger in that failed reconciliation,
-so committed spend never stays below what the provider reported.
+for all of one provider's rows. ``Ledger.reconcile`` refuses (``ValueError``) an export
+that cannot show the ledger's whole life:
+
+- one with no rows for a provider that has any reservation in the ledger, even one whose
+  calls all settled at zero (zero-token rows state that the provider billed nothing);
+- a period that starts after the ledger's ``created_at``, ends before that provider's
+  last settled or held call, or ends after the ledger's clock at reconciliation, since
+  the period ends when the export was taken;
+- a scope other than the one every reservation of that provider names (the run's study
+  workspace or OpenAI project), or other than the run's own when one is given;
+- an export identical (same SHA-256) to one reconciled before calls that were made since;
+- a provider total below the usage the ledger's own responses reported for that provider
+  by more than 1%: such an export is partial, stale or of another scope.
+
+Otherwise it prices the export with the same table and compares each provider's total
+with the ledger's spend on that provider. Usage above the ledger by more than 1% fails,
+and a failed reconciliation refuses every later reservation until ``record_correction``
+appends a note. The note first appends, for each provider, a settled adjustment of the
+largest excess of the export over the ledger among the failed reconciliations since the
+last note, so after it committed spend is no longer below what the provider reported.
+Usage within the 1% tolerance passes with no adjustment.
 """
 
 import csv
@@ -365,7 +378,7 @@ class Ledger:
         except OSError:
             self._f.close()
             raise LedgerError(f"{self.path} is held by another run; one run at a time") from None
-        self.entries, self.reservations, self.adjustments, self._blocking = [], {}, [], None
+        self.entries, self.reservations, self.adjustments, self._blocking, self._failures = [], {}, [], None, []
         try:
             self._f.seek(0)
             data = self._f.read()
@@ -439,17 +452,20 @@ class Ledger:
             if r is None or r["state"] != "open":
                 raise LedgerError(f"{self.path}: {t} for {e['id']}, which is not open")
             r.update(state="settled" if t == "settle" else "held",
-                     cost=Decimal(e["cost_usd"]) if t == "settle" else None, closed_at=e.get("at"))
+                     cost=Decimal(e["cost_usd"]) if t == "settle" else None, closed_at=e.get("at"),
+                     response_usd=e.get("response_usd") if t == "settle" else None)
         elif t == "reconcile":
             if not e["ok"]:
-                self._blocking = e                # a later passing one does not clear it; a note does
+                if self._blocking is None:        # a later passing one does not clear it; a note does
+                    self._blocking = e
+                self._failures.append(e)
         elif t in ("adjust", "correction"):
             if self._blocking is None or e["reconcile_seq"] != self._blocking["seq"]:
                 raise LedgerError(f"{self.path}: an {t} entry must answer the failed reconciliation")
             if t == "adjust":
                 self.adjustments.append(e)
             else:
-                self._blocking = None
+                self._blocking, self._failures = None, []
         elif t not in ("ledger", "refuse"):
             raise LedgerError(f"{self.path}: unknown entry type {t!r}")
         self.entries.append(e)
@@ -545,8 +561,9 @@ class Ledger:
                                             reserved=Decimal(r["amount_usd"]))
         if kind == HOLD:
             return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock)})
+        reported = charge(r["provider"], r["model"], record["http_status"], raw)[1]   # without the reservation floor
         return self._append({"type": "settle", "id": rid, "cost_usd": usd(cost), "tokens": tokens,
-                             "basis": detail, "price_table": PRICE_TABLE_VERSION,
+                             "response_usd": usd(reported), "basis": detail, "price_table": PRICE_TABLE_VERSION,
                              "over_reservation": cost > Decimal(r["amount_usd"]), "at": _now(self.clock)})
 
     def recover(self, find=None, run_roots=None) -> list:
@@ -570,59 +587,100 @@ class Ledger:
                  if r["provider"] == provider and r["state"] in ("settled", "held") and r.get("closed_at")]
         return max(times, key=timestamp) if times else None
 
-    def reconcile(self, rows: list, export_sha256: str) -> dict:
+    def scopes(self) -> dict:
+        """{provider: the scopes its reservations name}; a reservation made with no scope is left out."""
+        out = {}
+        for r in self.reservations.values():
+            if r.get("scope"):
+                out.setdefault(r["provider"], set()).add(r["scope"])
+        return out
+
+    def reconcile(self, rows: list, export_sha256: str, scopes=None) -> dict:
         """Compare a usage export with the ledger; a failure blocks later calls. An export
-        that does not cover the ledger's whole life is refused (``ValueError``)."""
+        that cannot show the ledger's whole life is refused (``ValueError``; see the module
+        docstring). ``scopes`` is the run's {provider: scope}, when known."""
         if self.open_reservations():
             raise LedgerError("recover the open reservation before reconciling")
+        now = self.clock()
+        same = [e["seq"] for e in self.entries if e["type"] == "reconcile" and e["export_sha256"] == export_sha256]
+        if same and any(e["type"] == "reserve" and e["seq"] > max(same) for e in self.entries):
+            raise ValueError(f"this export was reconciled at entry {max(same)} and calls were made since; export "
+                             "the usage again")
         coverage = export_coverage(rows)
+        calls = {}
+        for r in self.reservations.values():
+            calls.setdefault(r["provider"], []).append(r)
+        needed = set(calls) | {e["provider"] for e in self.adjustments}
+        missing = sorted(p for p in needed if p not in coverage)
+        if missing:
+            raise ValueError(f"the export has no rows for {missing}, which have calls in the ledger; export every "
+                             "provider's usage, with zero-token rows for one that billed nothing")
+        named = self.scopes()
         for p, c in sorted(coverage.items()):
             if timestamp(c["period_start"]) > timestamp(self.created_at):
                 raise ValueError(f"the {p} export starts at {c['period_start']}, after the ledger was created at "
                                  f"{self.created_at}; an export is cumulative from the ledger's creation")
+            if timestamp(c["period_end"]) > now:
+                raise ValueError(f"the {p} export ends at {c['period_end']}, after the time of this reconciliation, "
+                                 f"{_now(self.clock)}; its period ends when the export was taken")
             last = self.last_closed_at(p)
             if last is not None and timestamp(c["period_end"]) < timestamp(last):
                 raise ValueError(f"the {p} export ends at {c['period_end']}, before the ledger's last {p} call "
                                  f"was settled or held at {last}")
+            expected = named.get(p, set())
+            if len(expected) > 1:
+                raise ValueError(f"the ledger's {p} calls name more than one scope, {sorted(expected)}; one export "
+                                 "cannot cover them")
+            for want in sorted(expected | ({scopes[p]} if scopes and scopes.get(p) else set())):
+                if c["scope"] != want:
+                    raise ValueError(f"the {p} export's scope is {c['scope']!r}, not the study's {want!r}")
         by_provider = {}
         for row in rows:
             by_provider.setdefault(row["provider"], Decimal(0))
             by_provider[row["provider"]] += export_usd(row)
-        ledger_by = {}
+        ledger_by, reported = {}, {}
         for r in self.reservations.values():
             ledger_by[r["provider"]] = ledger_by.get(r["provider"], Decimal(0)) + self.spent(r)
+            if r["state"] == "settled" and r.get("response_usd") is not None:
+                reported[r["provider"]] = reported.get(r["provider"], Decimal(0)) + Decimal(r["response_usd"])
         for e in self.adjustments:
             ledger_by[e["provider"]] = ledger_by.get(e["provider"], Decimal(0)) + Decimal(e["cost_usd"])
-        missing = sorted(p for p, v in ledger_by.items() if v > 0 and p not in by_provider)
-        if missing:
-            raise ValueError(f"the export has no rows for {missing}; export both providers' usage")
+        for p, floor in sorted(reported.items()):
+            if by_provider.get(p, Decimal(0)) < floor * (1 - RECONCILE_TOLERANCE):
+                raise ValueError(f"the {p} export, ${usd(by_provider.get(p, Decimal(0)).normalize())}, is below the "
+                                 f"${usd(floor.normalize())} that the ledger's {p} responses reported by more than "
+                                 f"{RECONCILE_TOLERANCE:.0%}: it is partial, stale or of another scope; export "
+                                 "again once the provider's usage data is complete")
         providers, ok = {}, True
         for p in sorted(set(by_provider) | set(ledger_by)):
             exported, ledgered = by_provider.get(p, Decimal(0)), ledger_by.get(p, Decimal(0))
             within = exported <= ledgered * (1 + RECONCILE_TOLERANCE)
             ok &= within
             providers[p] = {"export_usd": usd(exported), "ledger_usd": usd(ledgered), "within": within,
+                            "responses_usd": usd(reported.get(p, Decimal(0))),
                             "excess_share": (f"{(exported - ledgered) / ledgered:.6f}" if ledgered else None)}
         return self._append({"type": "reconcile", "ok": ok, "export_sha256": export_sha256,
                              "export_rows": len(rows), "coverage": coverage, "tolerance": usd(RECONCILE_TOLERANCE),
                              "providers": providers, "at": _now(self.clock)})
 
     def record_correction(self, note: str) -> dict:
-        """Answer the failed reconciliation: first a settled adjustment per provider of the
-        export's excess over the ledger in it, then the note, which clears the block."""
+        """Answer the failed reconciliations since the last note: first a settled adjustment
+        per provider of the largest excess of the export over the ledger among them, then
+        the note, which clears the block."""
         if self._blocking is None:
             raise ValueError("no failed reconciliation needs a correction")
         if not (isinstance(note, str) and note.strip()):
             raise ValueError("a correction note is required")
         seq = self._blocking["seq"]
-        for p, v in sorted(self._blocking["providers"].items()):
-            excess = Decimal(v["export_usd"]) - Decimal(v["ledger_usd"])
+        for p in sorted({p for f in self._failures for p in f["providers"]}):
+            excess = max((Decimal(f["providers"][p]["export_usd"]) - Decimal(f["providers"][p]["ledger_usd"])
+                          for f in self._failures if p in f["providers"]), default=Decimal(0))
             done = sum((Decimal(e["cost_usd"]) for e in self.adjustments
                         if e["reconcile_seq"] == seq and e["provider"] == p), Decimal(0))
             if excess > done:
                 self._append({"type": "adjust", "provider": p, "cost_usd": usd(excess - done), "reconcile_seq": seq,
-                              "basis": "the provider's usage above the ledger in the failed reconciliation",
-                              "at": _now(self.clock)})
+                              "basis": "the provider's largest usage above the ledger in the failed reconciliations "
+                                       f"from entry {seq}", "at": _now(self.clock)})
         return self._append({"type": "correction", "reconcile_seq": seq, "note": note, "at": _now(self.clock)})
 
     def blocking_reconciliation(self):
@@ -736,14 +794,17 @@ class MeteredTransport:
     """A transport wrapper: each send reserves on the ledger first, one call at a time.
 
     ``begin`` names the trajectory and the input count each judge's request is priced at.
+    ``scopes`` maps each provider to the study scope its calls run under (the Anthropic
+    workspace, the OpenAI project), which each reservation records.
     Before a send, the previous reservation is closed from the attempt record the
     dispatcher wrote for it; ``finish`` closes the last one after the trajectory. A slot
     folder holding a raw response without its attempt record (a stop between the two
     writes) is refused before anything is reserved or sent.
     """
 
-    def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root, run_root=None):
+    def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root, run_root=None, scopes=None):
         self.inner, self.ledger, self.run, self.stage = inner, ledger, run, stage
+        self.scopes = dict(scopes or {})
         led_dir = ledger.path.parent.resolve()
         if run_root is None:
             self.run_root, self.run_root_rel = None, "."
@@ -794,7 +855,7 @@ class MeteredTransport:
                       "model": request.model, "request_sha256": request.sha256,
                       "input_tokens": basis["input_tokens"], "input_source": basis["input_source"],
                       "max_output_tokens": basis["max_output_tokens"], "run_root": self.run_root_rel,
-                      "log_root": self.log_root}
+                      "log_root": self.log_root, "scope": self.scopes.get(request.provider)}
             folder = c["log"].slot_dir(c["trace_key"], c["config_sha256"], judge, repeat)
             orphans = (sorted(p.name for p in folder.glob("*.raw") if not p.with_suffix(".json").exists())
                        if folder.is_dir() else [])
