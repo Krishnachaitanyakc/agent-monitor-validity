@@ -1,3 +1,4 @@
-# Exact pins for the analysis module. Both releases ship wheels for Python 3.12 and 3.13.
+# Exact pins for the analysis module. Both releases need Python 3.12 or later and ship
+# wheels for 3.12 and 3.13. Install with: pip install --only-binary=:all: -r analysis/requirements.txt
 numpy==2.5.1
 scipy==1.18.0

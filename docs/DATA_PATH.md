@@ -132,7 +132,7 @@ Cues a judge can see in the evidence itself:
 
 - The evidence packer and the pack checks that build each judge's input from the monitor view.
 - Evaluation label unlocking, which the runner restores after validating complete prediction records, valid verdicts and model roles, and their binding to the frozen panel and run manifest.
-- Unsure or missing primary labels are handled at the label join (proposed): excluded from the error-based quantities and reported by count. No test label field is read before the join.
+- Unsure or missing primary labels are handled at the label join, following draft v3.2 of the analysis plan. Such a task stays in the panel. The primary result counts it as not reference-contradicted, per 100 panel tasks; the secondary result is per 100 tasks with a usable label; coverage of Unsure and missing labels is reported separately as unknown. `analysis/sap.py` implements these rules on synthetic inputs. No test label field is read before the join.
 - The README, charter and codebook still describe the earlier three-mentee design. A separate docs PR reconciles them before the main run, as the brief asks, and retires the multi-source `scripts/collect_traces.py` stub.
 
 - Template IDs are not in ARB's metadata. The task-to-template mapping, joined label-free from the original WebArena and VisualWebArena configs pinned to a commit, and the counts behind 243 eligible tasks and 209 templates go to review with the setup materials. The working rule is one trajectory per eligible task.
