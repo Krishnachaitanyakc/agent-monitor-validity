@@ -27,7 +27,7 @@ Only a transport failure is retried: same bytes, same slot, at most three retrie
 
 ## Halts
 
-HTTP 400 or 413, any invalid-request error, 401, 402, 403, 404, and credit, spend or usage limits halt the run. So does a failed per-response check (model string, service tier, region, one-hour cache tokens, workspace header on A; model string, tier, cache tokens and input above 272,000 tokens on B) or a repeated response ID. Nothing more is sent until `AttemptLog.record_correction` stores a note for the halt. A halt uses no retry and is never an invalid verdict. A raw response left without its attempt record by a stop is never sent again: `dispatch.recover_attempt` rebuilds the record from the bytes, as described in [RUNNER.md](RUNNER.md).
+HTTP 400 or 413, any invalid-request error, 401, 402, 403, 404, and credit, spend or usage limits halt the run. So does a failed per-response check (model string, service tier, region, one-hour cache tokens, workspace header on A; model string, tier, cache tokens and input above 272,000 tokens on B) or a repeated response ID. Nothing more is sent until `AttemptLog.record_correction` stores a note for the halt. A halt uses no retry and is never an invalid verdict. A raw response left without its attempt record by a stop gets that record rebuilt from the bytes by `dispatch.recover_attempt`, as described in [RUNNER.md](RUNNER.md): a complete stream is recorded as it was and a slot it ended is never sent again, a provider error body halts or is retried as the dispatcher would have decided, and a cut or unrecognized response is a transport failure, retried under the rule above.
 
 ## Outcomes
 

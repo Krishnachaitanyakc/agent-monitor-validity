@@ -65,8 +65,11 @@ hold within one data root; a copy of the whole data root carries copies of its l
   <stage>/attempt_log/              the write-once attempt log, halts and corrections
   <stage>/progress.json             the gates so far, rewritten after each trajectory
   <stage>/report.json               written once, when every case has ended
-A raw response left without its attempt record by a stop is rebuilt into one at the next
-start and never sent again.
+A raw response left without its attempt record by a stop gets that record rebuilt at the
+next start: a complete stream is recorded as it was, so a slot it ended is never sent
+again; a provider error body is classified as the dispatcher would have, so it halts or
+is retried; a cut or unrecognized response is a transport failure whose slot is retried
+under the usual retry rule.
 The report prints the gates for review and never acts on them to select a judge. A halt
 stops the stage; rerun the same command after recording a correction note.
 """
@@ -599,8 +602,11 @@ def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str, 
 
 def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: str, slots) -> list:
     """Attempt records rebuilt from raw responses whose records were never written (a stop
-    between the two writes), so the call is never sent again; each must have its
-    reservation in the ledger, which then closes from the rebuilt record."""
+    between the two writes), classified as the dispatcher would have: a complete stream
+    is recorded as it was and a slot it ended is never sent again, an error body halts or
+    is retried, and a cut or unrecognized response is a transport failure retried under
+    the usual rule. Each must have its reservation in the ledger, which then closes from
+    the rebuilt record."""
     rebuilt = []
     for item in items:
         for j, r in slots:
