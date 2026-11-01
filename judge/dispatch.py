@@ -307,8 +307,9 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
 
 # ---------------------------------------------------------------- recovery
 
-STREAM_STARTS = {"anthropic": ("message_start",),
-                 "openai": ("response.created", "response.in_progress", "response.queued")}
+# A stream may open with an error event; a JSON error body is never an event.
+STREAM_STARTS = {"anthropic": ("message_start", "error"),
+                 "openai": ("response.created", "response.in_progress", "response.queued", "error")}
 
 
 def _stream_started(provider: str, raw: bytes) -> bool:

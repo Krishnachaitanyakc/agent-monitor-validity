@@ -31,6 +31,7 @@ from judge import requests as R  # noqa: E402
 from judge import spend as S  # noqa: E402
 from judge.outcomes import HALT, Exchange, canonical_outcome, error_body_outcome  # noqa: E402
 from judge.storage import AttemptLog, write_once  # noqa: E402
+from judge.streams import sse  # noqa: E402
 from test_pack import FixtureCase  # noqa: E402
 from test_requests import images_for, synthetic_pack  # noqa: E402
 
@@ -636,6 +637,49 @@ class TestRunRecords(RunnerCase):
         self.assertEqual([(r["outcome"], r["halt_kind"], r["http_status"]) for r in b1], [("HALT", "permission", None)])
         self.assertEqual([(h["slot"], h["halt_kind"]) for h in log.halts()], [("B1", "permission")])
         self.assertEqual(D.capability_check(b1, R.B_MODEL)["checks"]["access"], "failed")
+
+    def test_a_raw_stream_that_opens_with_an_error_event_is_classified_as_the_dispatcher_would(self):
+        def stream(judge, err):
+            event = {"type": "error", "error": err} if judge == "A" else dict(err, type="error")
+            return Exchange(200, {}, sse([("error", event)]), None, None)
+
+        cases = (("A1", stream("A", {"type": "invalid_request_error", "message": "x"}), ("HALT", "request_error")),
+                 ("B1", stream("B", {"code": "insufficient_quota", "message": "x"}), ("HALT", "spend_limit")),
+                 ("A1", stream("A", {"type": "overloaded_error", "message": "x"}), ("TRANSPORT", None)))
+
+        class Opening(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                if request.judge == self.judge:
+                    return self.opening
+                return super()._exchange(request, stage, ref, kind)
+
+        for n, (slot, exchange, expected) in enumerate(cases):
+            self.root = self.tmp / f"run-{n}"
+            led = self.ledger(self.tmp / f"ledgers-{n}" / "ledger-pilot.jsonl")
+            its = items(1, "a")
+            live = canonical_outcome("anthropic" if slot[0] == "A" else "openai", exchange)
+            self.assertEqual((live["outcome"], live["halt_kind"]), expected)
+            opening = Opening("central")
+            opening.judge, opening.opening = slot[0], exchange
+            with self.stop_between_writes(slot):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.stage("P1", its, led, provider=opening)
+            log = AttemptLog(self.root / "P1" / "attempt_log")
+            if expected[0] == "HALT":
+                provider = RS.ScriptedProvider()
+                with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+                    self.stage("P1", its, led, provider=provider)
+                self.assertEqual(provider.sent, [])
+                self.assertEqual([(h["slot"], h["halt_kind"]) for h in log.halts()], [(slot, expected[1])])
+            else:
+                report, provider = self.stage("P1", its, led)
+                self.assertTrue(report["complete"], report["stopped"])
+                self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B"])
+            first = log.attempts(its[0].trace_key, R.config_sha256(), slot[0], 1)[0]
+            self.assertEqual((first["outcome"], first["halt_kind"], first["http_status"],
+                              first["recovered"]["http_status"]), expected + (200, "inferred from the stream"))
+            stopped = next(e for e in reserves(led) if e["slot"] == slot)
+            self.assertEqual(led.reservations[stopped["id"]]["state"], "held")       # the stream did not complete
 
     def test_a_halt_attempt_without_its_halt_record_is_an_unresolved_halt(self):
         led = self.ledger()

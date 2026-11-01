@@ -318,6 +318,11 @@ MUTATIONS = [
      "    if False:\n"),
     ("take no halt kind from a rebuilt OpenAI error body's code", "judge/outcomes.py",
      "    if code in B_ACCESS_CODES:\n", "    if False:\n"),
+    ("rebuild a raw stream that opens with an error event as no response", "judge/dispatch.py",
+     'STREAM_STARTS = {"anthropic": ("message_start", "error"),\n'
+     '                 "openai": ("response.created", "response.in_progress", "response.queued", "error")}',
+     'STREAM_STARTS = {"anthropic": ("message_start",),\n'
+     '                 "openai": ("response.created", "response.in_progress", "response.queued")}'),
     ("start a run under scopes other than those its shared ledger names", "scripts/run_stage.py",
      "    check_ledger_scopes(ledger, scopes)\n", "    pass\n"),
     ("name no modified call when an export falls below the responses' usage", "judge/spend.py",
