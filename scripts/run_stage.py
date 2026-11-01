@@ -69,10 +69,10 @@ its ledgers.
 A raw response left without its attempt record by a stop gets that record rebuilt at the
 next start: a complete stream is recorded as it was, so a slot it ended is never sent
 again; an error event that opens a stream, or a provider error body, halts, ends the
-slot as FILTERED or is retried, as its error shows, and a B error body that is not a
-known transient error halts, since OpenAI marks some halting errors by the status alone;
-a cut or unrecognized response is a transport failure whose slot is retried under the
-usual retry rule.
+slot as FILTERED or is retried, as its error shows, and a B error body that would
+otherwise be a transport failure halts unless it is a known transient error, since
+OpenAI marks some halting errors by the status alone; a cut or unrecognized response is
+a transport failure whose slot is retried under the usual retry rule.
 The report prints the gates for review and never acts on them to select a judge. A halt
 stops the stage; rerun the same command after recording a correction note.
 """

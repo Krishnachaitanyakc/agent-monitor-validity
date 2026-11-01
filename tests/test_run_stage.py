@@ -561,7 +561,7 @@ class TestRunRecords(RunnerCase):
         log = AttemptLog(self.root / "P1" / "attempt_log")
         rec = log.attempts(its[0].trace_key, R.config_sha256(), "A", 1)[0]
         self.assertEqual((rec["outcome"], rec["halt_kind"], rec["http_status"], rec["recovered"]["http_status"]),
-                         ("HALT", "request_error", None, "unknown; an error body, classified as in a stream"))
+                         ("HALT", "request_error", None, "unknown; an error body, classified by its error fields"))
         a1 = next(e for e in reserves(led) if e["slot"] == "A1")
         self.assertEqual(led.reservations[a1["id"]]["state"], "held")              # the status was not kept
         self.assertEqual([e["reason"] for e in led.entries if e["type"] == "hold" and e["id"] == a1["id"]],
@@ -597,7 +597,7 @@ class TestRunRecords(RunnerCase):
         b1 = AttemptLog(self.root / "P1" / "attempt_log").attempts(its[0].trace_key, R.config_sha256(), "B", 1)
         self.assertEqual([(r["outcome"], r["http_status"]) for r in b1], [("TRANSPORT", None), ("VALID", 200)])
 
-    def test_a_raw_openai_error_body_without_its_record_halts_unless_it_is_a_known_transient_error(self):
+    def test_a_raw_openai_error_body_that_would_be_a_transport_failure_halts_unless_known_transient(self):
         def body(etype, code):
             return json.dumps({"error": {"message": "x", "type": etype, "param": None, "code": code}}).encode()
 

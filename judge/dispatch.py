@@ -35,9 +35,9 @@ and a cut stream is TRANSPORT. A JSON error body is classified as the same error
 stream (``outcomes.error_body_outcome``): a request, key, billing, permission, not-found
 or spend-limit error halts until a correction note, a policy error on B is FILTERED and
 ends the slot, and a transient one is TRANSPORT. OpenAI marks some halting errors by the
-status alone, so a B body that is not a known transient error halts. Anything else is
-taken as no response (TRANSPORT), whose slot is retried under the rule above. The
-workspace header check is listed as not applied.
+status alone, so a B body that would otherwise be TRANSPORT halts unless it is a known
+transient error. Anything else is taken as no response (TRANSPORT), whose slot is
+retried under the rule above. The workspace header check is listed as not applied.
 
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with
@@ -363,7 +363,7 @@ def recover_attempt(log, reservation: dict) -> dict:
         "usage": summary.get("usage") or {}, "parse": oc["parse"],
         "recovered": {"from": f"{attempt}.raw",
                       "http_status": ("inferred from the stream" if status else
-                                      "unknown; an error body, classified as in a stream" if error_body else
+                                      "unknown; an error body, classified by its error fields" if error_body else
                                       "unknown; taken as no response"),
                       "checks_not_applied": ["anthropic-workspace-id header"] if provider == "anthropic" else []},
     }
