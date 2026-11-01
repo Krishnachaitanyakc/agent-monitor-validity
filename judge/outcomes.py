@@ -56,6 +56,11 @@ B_REQUEST_CODES = frozenset({"data_residency_mismatch", "invalid_image", "invali
                              "image_file_too_large", "unsupported_image_media_type",
                              "empty_image_file", "failed_to_download_image", "image_file_not_found"})
 IMAGE_ERROR_CODES = frozenset(c for c in B_REQUEST_CODES if "image" in c)
+# OpenAI marks key, permission and not-found errors by the HTTP status alone; these codes
+# name them in a body whose status was not kept.
+B_ACCESS_CODES = {"invalid_api_key": "auth", "unsupported_country_region_territory": "permission",
+                  "model_not_found": "not_found"}
+B_TRANSIENT_TYPES = frozenset({"server_error"})
 
 
 def _result(outcome, detail, halt_kind=None, summary=None, parsed=None, error=None) -> dict:
@@ -118,6 +123,20 @@ def _openai_error(status, err: dict):
     if status in (400, 413) or etype == "invalid_request_error" or code in B_REQUEST_CODES:
         return HALT, "request_error", label
     return TRANSPORT, None, label
+
+
+def _openai_body_error(err: dict):
+    """(outcome, halt kind, detail) for an OpenAI error body whose status was not kept. The
+    status alone marks a 401, 402, 403, 404, 400 or 413 error as one that halts, so a body
+    that would be TRANSPORT halts unless it is a known transient error. A code in
+    ``B_ACCESS_CODES`` names its halt kind."""
+    outcome, kind, label = _openai_error(None, err)
+    code, etype = err.get("code"), err.get("type")
+    if code in B_ACCESS_CODES:
+        return HALT, B_ACCESS_CODES[code], label
+    if outcome == TRANSPORT and code not in B_TRANSIENT_CODES and etype not in B_TRANSIENT_TYPES:
+        return HALT, "request_error", label
+    return outcome, kind, label
 
 
 def _parsed_outcome(text):
@@ -196,11 +215,18 @@ def canonical_outcome(provider: str, exchange: Exchange) -> dict:
 
 def error_body_outcome(provider: str, raw: bytes):
     """The outcome of ``raw`` as a provider's JSON error body whose HTTP status was not
-    kept, classified as the same error in a stream is; None when it is not an error body."""
+    kept; None when it is not an error body. It is classified as the same error in a
+    stream is, which for Anthropic is enough, since its error types mark what its statuses
+    mark. An OpenAI body that would be TRANSPORT halts unless it is a known transient error
+    (``_openai_body_error``)."""
     err = _error_body(raw)
     if not err:
         return None
-    classify = {"anthropic": _anthropic_error, "openai": _openai_error}[provider]
-    outcome, kind, label = classify(None, err)
+    if provider == "anthropic":
+        outcome, kind, label = _anthropic_error(None, err)
+    elif provider == "openai":
+        outcome, kind, label = _openai_body_error(err)
+    else:
+        raise ValueError(f"unknown provider {provider!r}")
     return _result(outcome, "error body, status not kept: " + label.removeprefix("stream "), kind,
                    error=_error_record(err))

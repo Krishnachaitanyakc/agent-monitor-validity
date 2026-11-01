@@ -29,7 +29,7 @@ from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
 from judge import spend as S  # noqa: E402
-from judge.outcomes import Exchange  # noqa: E402
+from judge.outcomes import HALT, Exchange, canonical_outcome, error_body_outcome  # noqa: E402
 from judge.storage import AttemptLog, write_once  # noqa: E402
 from test_pack import FixtureCase  # noqa: E402
 from test_requests import images_for, synthetic_pack  # noqa: E402
@@ -592,6 +592,50 @@ class TestRunRecords(RunnerCase):
         self.assertEqual([r.judge for r in provider.sent], ["B"])
         b1 = AttemptLog(self.root / "P1" / "attempt_log").attempts(its[0].trace_key, R.config_sha256(), "B", 1)
         self.assertEqual([(r["outcome"], r["http_status"]) for r in b1], [("TRANSPORT", None), ("VALID", 200)])
+
+    def test_a_raw_openai_error_body_without_its_record_halts_unless_it_is_a_known_transient_error(self):
+        def body(etype, code):
+            return json.dumps({"error": {"message": "x", "type": etype, "param": None, "code": code}}).encode()
+
+        # OpenAI marks these by the status alone; without it they still halt, under the kind a code names.
+        for status, etype, code, kind in ((403, "request_forbidden", "unsupported_country_region_territory",
+                                           "permission"),
+                                          (401, "invalid_request_error", "invalid_api_key", "auth"),
+                                          (404, "invalid_request_error", "model_not_found", "not_found"),
+                                          (403, "unrecognized_error", None, "request_error"),
+                                          (400, "unrecognized_error", "unrecognized_code", "request_error")):
+            live = canonical_outcome("openai", Exchange(status, {}, body(etype, code), None, None))
+            rebuilt = error_body_outcome("openai", body(etype, code))
+            self.assertEqual(live["outcome"], HALT, status)
+            self.assertEqual((rebuilt["outcome"], rebuilt["halt_kind"]), (HALT, kind), (status, etype, code))
+        for etype, code in (("requests", "rate_limit_exceeded"), ("server_error", None),
+                            ("service_unavailable_error", "server_is_overloaded")):
+            rebuilt = error_body_outcome("openai", body(etype, code))
+            self.assertEqual((rebuilt["outcome"], rebuilt["halt_kind"]), ("TRANSPORT", None), code)
+        self.assertEqual(error_body_outcome("openai", body("invalid_request_error", "invalid_prompt"))["outcome"],
+                         "FILTERED")
+
+        class Forbidden(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                if request.judge == "B":
+                    raw = body("request_forbidden", "unsupported_country_region_territory")
+                    return Exchange(403, {}, raw, None, None)
+                return super()._exchange(request, stage, ref, kind)
+
+        led = self.ledger()
+        its = items(1, "a")
+        with self.stop_between_writes("B1"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led, provider=Forbidden("central"))
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        b1 = log.attempts(its[0].trace_key, R.config_sha256(), "B", 1)
+        self.assertEqual([(r["outcome"], r["halt_kind"], r["http_status"]) for r in b1], [("HALT", "permission", None)])
+        self.assertEqual([(h["slot"], h["halt_kind"]) for h in log.halts()], [("B1", "permission")])
+        self.assertEqual(D.capability_check(b1, R.B_MODEL)["checks"]["access"], "failed")
 
     def test_a_halt_attempt_without_its_halt_record_is_an_unresolved_halt(self):
         led = self.ledger()
