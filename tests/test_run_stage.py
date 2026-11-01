@@ -564,6 +564,9 @@ class TestRunRecords(RunnerCase):
                          ("HALT", "request_error", None, "unknown; an error body, classified as in a stream"))
         a1 = next(e for e in reserves(led) if e["slot"] == "A1")
         self.assertEqual(led.reservations[a1["id"]]["state"], "held")              # the status was not kept
+        self.assertEqual([e["reason"] for e in led.entries if e["type"] == "hold" and e["id"] == a1["id"]],
+                         ["an error body whose status was not kept; held, since the provider may still bill the "
+                          "request"])
         halts = log.halts()
         self.assertEqual([(h["slot"], h["attempt"], h["halt_kind"], h["recorded_at_start"]) for h in halts],
                          [("A1", 1, "request_error", True)])

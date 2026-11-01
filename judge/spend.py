@@ -616,8 +616,11 @@ class Ledger:
         kind, cost, tokens, detail = charge(r["provider"], r["model"], record["http_status"], raw,
                                             reserved=Decimal(r["amount_usd"]))
         if kind == HOLD:
+            if record["http_status"] is None and record.get("recovered") and record.get("error"):
+                detail = ("an error body whose status was not kept; held, since the provider may still bill "
+                          "the request")
             return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock)})
-        reported = charge(r["provider"], r["model"], record["http_status"], raw)[1]   # without the reservation floor
+        reported =charge(r["provider"], r["model"], record["http_status"], raw)[1]   # without the reservation floor
         return self._append({"type": "settle", "id": rid, "cost_usd": usd(cost), "tokens": tokens,
                              "response_usd": usd(reported), "basis": detail, "price_table": PRICE_TABLE_VERSION,
                              "over_reservation": cost > Decimal(r["amount_usd"]), "at": _now(self.clock)})
