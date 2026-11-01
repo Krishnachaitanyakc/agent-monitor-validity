@@ -28,13 +28,16 @@ reported fails.
 **Recovery.** A stop between the two writes of an attempt leaves its raw response without
 its record. ``recover_attempt`` rebuilds that record from the bytes as the dispatcher
 would have classified them, and nothing is chosen by reading it. The status and headers
-were not kept. Bytes that start the provider's stream are taken as HTTP 200, so a
-complete response is recorded as it was and a slot it ended is never sent again, while a
-cut stream is TRANSPORT. A JSON error body is classified as the same error in a stream
-(``outcomes.error_body_outcome``): a request, key, billing, permission, not-found or
-spend-limit error halts until a correction note, and a transient one is TRANSPORT.
-Anything else is taken as no response (TRANSPORT), whose slot is retried under the rule
-above. The workspace header check is listed as not applied.
+were not kept. Bytes that start the provider's stream, or open with its error event, are
+taken as HTTP 200, so a complete response is recorded as it was and a slot it ended is
+never sent again, an error in the stream is classified as the dispatcher classified it,
+and a cut stream is TRANSPORT. A JSON error body is classified as the same error in a
+stream (``outcomes.error_body_outcome``): a request, key, billing, permission, not-found
+or spend-limit error halts until a correction note, a policy error on B is FILTERED and
+ends the slot, and a transient one is TRANSPORT. OpenAI marks some halting errors by the
+status alone, so a B body that is not a known transient error halts. Anything else is
+taken as no response (TRANSPORT), whose slot is retried under the rule above. The
+workspace header check is listed as not applied.
 
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with

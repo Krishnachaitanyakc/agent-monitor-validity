@@ -48,12 +48,13 @@ every run root, so committed spend adds up across runs:
   <data-root>/out/ledgers/fake/fake_provider_export-<budget>-<ledger id>.csv
                                                     the fake provider's usage, per ledger
 Every command refuses a --run-root that is not a folder directly under <data-root>/out
-(other than ledgers/), in fake and paid mode alike, so every start reads every run
-root's marks. A ledger shorter than, or differing from, a mark that the marks file or a
-run root recorded is refused. Once the register or a mark names a ledger for a budget, a
-second one (after it was moved or deleted, even with the whole ledgers/ folder) is
-created only with --new-budget-note, which the new ledger's header keeps. These checks
-hold within one data root; a copy of the whole data root carries copies of its ledgers.
+(other than ledgers/ in any letter case), in fake and paid mode alike, so every start
+reads every run root's marks. A ledger shorter than, or differing from, a mark that the
+marks file or a run root recorded is refused. Once the register or a mark names a ledger
+for a budget, a second one (after it was moved or deleted, even with the whole ledgers/
+folder) is created only with --new-budget-note, which the new ledger's header keeps.
+These checks hold within one data root; a copy of the whole data root carries copies of
+its ledgers.
 
 **Outputs**, under --run-root, directly under <data-root>/out:
   run.json                          the mode, workspace, OpenAI project and the run's id,
@@ -67,9 +68,11 @@ hold within one data root; a copy of the whole data root carries copies of its l
   <stage>/report.json               written once, when every case has ended
 A raw response left without its attempt record by a stop gets that record rebuilt at the
 next start: a complete stream is recorded as it was, so a slot it ended is never sent
-again; a provider error body is classified as the dispatcher would have, so it halts or
-is retried; a cut or unrecognized response is a transport failure whose slot is retried
-under the usual retry rule.
+again; an error event that opens a stream, or a provider error body, halts, ends the
+slot as FILTERED or is retried, as its error shows, and a B error body that is not a
+known transient error halts, since OpenAI marks some halting errors by the status alone;
+a cut or unrecognized response is a transport failure whose slot is retried under the
+usual retry rule.
 The report prints the gates for review and never acts on them to select a judge. A halt
 stops the stage; rerun the same command after recording a correction note.
 """
@@ -605,8 +608,9 @@ def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str, 
 
 def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: str, slots) -> list:
     """Attempt records rebuilt from raw responses whose records were never written (a stop
-    between the two writes), classified as the dispatcher would have: a complete stream
-    is recorded as it was and a slot it ended is never sent again, an error body halts or
+    between the two writes), classified as ``dispatch.recover_attempt`` describes: a
+    complete stream is recorded as it was and a slot it ended is never sent again, an
+    error event that opens a stream or an error body halts, ends the slot as FILTERED or
     is retried, and a cut or unrecognized response is a transport failure retried under
     the usual rule. Each must have its reservation in the ledger, which then closes from
     the rebuilt record."""
