@@ -52,7 +52,7 @@ At each start the runner checks the ledger against the run root's records: every
 - a period starts after the ledger's `created_at`, ends before that provider's last settled or held call, or ends after the time of reconciliation;
 - a scope is not the study's, as each reservation and the run's `run.json` record it;
 - it is identical to an export reconciled before calls that were made since;
-- a provider's total is more than 1% below the usage the ledger's own responses reported, which marks it as partial, stale or of another scope, or as pricing calls under a documented modifier at the base prices, which the refusal names. Anthropic's usage data typically appears within 5 minutes of a request, so export again once it is complete.
+- a provider's total is more than 1% below the usage the ledger's own responses reported, which marks it as partial, stale or of another scope, or as pricing calls under a documented modifier at the base prices; the refusal names those calls. Anthropic's usage data typically appears within 5 minutes of a request, so export again once it is complete.
 
 Usage above the ledger by more than 1% for either provider blocks every later call until `run_stage.py correct --budget` records a note. The note first settles, for each provider, an adjustment of the largest excess of the export over the ledger among the failed reconciliations since the last note, so after it committed spend is no longer below what the provider reported. Usage within the 1% tolerance passes with no adjustment.
 
