@@ -882,7 +882,7 @@ class CommandCase(FixtureCase):
                           "--monitor-view", str(self.inputs / "monitor_view.jsonl"),
                           "--provenance", str(self.inputs / "provenance.jsonl"), "--out", str(self.tmp / "packs")])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.root = self.tmp / "run"
+        self.root = self.tmp / "out" / "run"                 # a run root sits directly under <data-root>/out
         self.ledger_root = RS.ledger_root(self.tmp)
         self.ledgers = RS.ledger_dir(self.tmp, "fake")
 
@@ -1042,6 +1042,28 @@ class TestCommands(CommandCase):
         path.write_bytes(full)
         r = self.command(self.stage_args("P1", root=self.tmp / "out" / "run-b"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_run_root_must_sit_directly_under_the_data_roots_out_folder(self):
+        r = self.command(self.stage_args("P1", root=self.tmp / "out" / "run-a"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        shutil.rmtree(self.ledger_root)                    # every ledger, the register and the marks file
+        elsewhere = (self.tmp / "run", self.tmp / "out" / "nested" / "run", self.ledger_root, self.tmp / "out")
+        for root in elsewhere:
+            r = self.command(self.stage_args("P1", root=root))
+            self.assertNotEqual(r.returncode, 0, root)
+            self.assertIn("--run-root must be a folder directly under", r.stderr)
+        for command in (["reconcile", "--budget", "pilot", "--export", str(self.tmp / "export.csv")],
+                        ["correct", "--budget", "pilot", "--note", "x"]):
+            r = self.command(["scripts/run_stage.py", command[0], "--run-root", str(self.tmp / "run"), "--data-root",
+                              str(self.tmp)] + command[1:])
+            self.assertIn("--run-root must be a folder directly under", r.stderr)
+        self.assertFalse((self.tmp / "run").exists())
+        self.assertFalse(self.ledger_root.exists())
+        # The marks of the run root that is directly under out still refuse a fresh cap.
+        r = self.command(self.stage_args("P1", root=self.tmp / "out" / "run-b"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("was created here before", r.stderr)
+        self.assertFalse(self.ledger_root.exists())
 
     def test_paid_flags_without_all_three_and_p3_or_eval_on_a_draft_rubric_are_refused(self):
         empty = self.tmp / "empty.txt"

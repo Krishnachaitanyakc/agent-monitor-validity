@@ -317,6 +317,9 @@ MUTATIONS = [
      "    check_ledger_scopes(ledger, scopes)\n", "    pass\n"),
     ("name no modified call when an export falls below the responses' usage", "judge/spend.py",
      '+ (f" ({len(raised)} {p} call(s) here: {\', \'.join(raised)})" if raised else "")', '+ ""'),
+    ("accept a run root that is not directly under <data-root>/out", "scripts/run_stage.py",
+     '    run_root = check_run_root(data_root, _outside_repo(Path(args.run_root), "--run-root"))',
+     '    run_root = _outside_repo(Path(args.run_root), "--run-root")'),
 ]
 
 

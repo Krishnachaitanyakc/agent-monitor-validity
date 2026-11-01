@@ -18,7 +18,9 @@ scripted usage, and the reservations use the scripted count as the provider's co
               folders until the $95 cap halts it
 
 Each scenario keeps its pilot ledger in its own ledgers/ folder, apart from its run
-folders, as the runner keeps one ledger per budget for every run. The rubric is still a
+folders, as the runner keeps one ledger per budget for every run; the dry run calls the
+runner's stage function, not the stage command, so its run folders sit inside --out
+rather than directly under <data-root>/out. The rubric is still a
 draft, so P3 runs here as a fake-mode rehearsal with the runner's frozen-rubric rule
 waived; the summary says so, and the runner itself never waives it.
 

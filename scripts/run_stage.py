@@ -47,13 +47,15 @@ every run root, so committed spend adds up across runs:
   <data-root>/out/ledgers/marks-<budget>.jsonl      the ledger's mark after every entry
   <data-root>/out/ledgers/fake/fake_provider_export-<budget>-<ledger id>.csv
                                                     the fake provider's usage, per ledger
-A ledger shorter than, or differing from, a mark that the marks file or a run root
-directly under <data-root>/out recorded is refused. Once the register or a mark names a
-ledger for a budget, a second one (after it was moved or deleted) is created only with
---new-budget-note, which the new ledger's header keeps. These checks hold within one
-data root; a copy of the whole data root carries copies of its ledgers.
+Every command refuses a --run-root that is not a folder directly under <data-root>/out
+(other than ledgers/), in fake and paid mode alike, so every start reads every run
+root's marks. A ledger shorter than, or differing from, a mark that the marks file or a
+run root recorded is refused. Once the register or a mark names a ledger for a budget, a
+second one (after it was moved or deleted, even with the whole ledgers/ folder) is
+created only with --new-budget-note, which the new ledger's header keeps. These checks
+hold within one data root; a copy of the whole data root carries copies of its ledgers.
 
-**Outputs**, under --run-root (outside the repository):
+**Outputs**, under --run-root, directly under <data-root>/out:
   run.json                          the mode, workspace, OpenAI project and the run's id,
                                     fixed at the first stage
   ledger_marks-<budget>.jsonl       the ledger's mark after each trajectory and command
@@ -200,6 +202,16 @@ def ledger_root(data_root) -> Path:
 def ledger_dir(data_root, mode: str) -> Path:
     """The one fixed folder of a mode's ledgers."""
     return ledger_root(data_root) / mode
+
+
+def check_run_root(data_root: Path, run_root: Path) -> Path:
+    """The run root, which must be a folder directly under <data-root>/out other than the
+    ledgers' folder, so that every start reads the marks of every run root."""
+    out_dir = (Path(data_root) / "out").resolve()
+    if run_root.parent != out_dir or run_root.name == ledger_root(data_root).name:
+        raise StageRefused(f"--run-root must be a folder directly under {out_dir}, other than "
+                           f"{ledger_root(data_root).name}/, so that every start reads its ledger marks: {run_root}")
+    return run_root
 
 
 def ledger_path(folder, budget: str) -> Path:
@@ -991,7 +1003,7 @@ def print_report(report: dict) -> None:
 
 def _guard(profile: str, args) -> tuple:
     data_root = _outside_repo(Path(args.data_root), "--data-root")
-    run_root = _outside_repo(Path(args.run_root), "--run-root")
+    run_root = check_run_root(data_root, _outside_repo(Path(args.run_root), "--run-root"))
     fence.install(profile, data_root, fence.load_config(required=True))
     return data_root, run_root
 
@@ -1105,7 +1117,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--run-root", required=True, help="the run's folder, outside the repository")
+    common.add_argument("--run-root", required=True, help="the run's folder, directly under <data-root>/out")
     common.add_argument("--data-root", required=True, help="local data directory the guard covers; the ledgers "
                         "live under its out/ledgers/")
     run = sub.add_parser("run", parents=[common], help="run or resume one stage")
