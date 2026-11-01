@@ -398,6 +398,25 @@ class TestGating(RunnerCase):
         report, _ = self.stage("P2", items(1, "b"), led)
         self.assertEqual((report["complete"], report["settings"]["openai_project"]), (True, RS.FAKE_PROJECT))
 
+    def test_a_second_run_root_under_other_scopes_on_the_same_ledger_is_refused_before_it_starts(self):
+        led = self.ledger()
+        self.stage("P1", items(1, "a"), led)
+        self.reconcile(led)
+        second, made = self.tmp / "run-2", len(led.entries)
+        for scope, flag in (({"workspace": "wrkspc_other"}, "--workspace"),
+                            ({"openai_project": "proj_other"}, "--openai-project")):
+            provider = RS.ScriptedProvider()
+            kw = dict({"workspace": RS.FAKE_WORKSPACE}, **scope)
+            with self.assertRaisesRegex(RS.StageRefused, f"ran under \\[.+\\], not .+; .+ fix {flag}"):
+                RS.run_stage("P1", second, items(1, "b"), mode="fake", transport=provider, ledger=led,
+                             read_images=lambda e: e, counter=provider, **kw)
+            self.assertEqual(provider.sent, [])
+        self.assertFalse((second / "run.json").exists())
+        self.assertEqual(len(led.entries), made)
+        report, _ = self.stage("P1", items(1, "b"), led, root=second)
+        self.assertTrue(report["complete"])
+        self.assertTrue(self.reconcile(led)["ok"])
+
     def test_the_transport_and_the_ledger_must_match_the_mode(self):
         its = items(1, "a")
         provider = RS.ScriptedProvider()

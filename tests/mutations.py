@@ -313,6 +313,8 @@ MUTATIONS = [
      "    if not rubric_check and not isinstance(transport, D.FakeTransport):", "    if False:"),
     ("rebuild a raw error body without its record as no response", "judge/dispatch.py",
      "    error_body = None if status else error_body_outcome(provider, raw)\n", "    error_body = None\n"),
+    ("start a run under scopes other than those its shared ledger names", "scripts/run_stage.py",
+     "    check_ledger_scopes(ledger, scopes)\n", "    pass\n"),
 ]
 
 

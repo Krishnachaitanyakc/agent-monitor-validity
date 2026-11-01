@@ -109,6 +109,7 @@ FROZEN_RUBRIC_STAGES = ("P3", "EVAL")
 USAGE_PROFILES = {"central": (60000, 3000), "high": (60000, 12000), "extreme": (100000, 20000)}
 FAKE_WORKSPACE = "wrkspc_fake"
 FAKE_PROJECT = "proj_fake"
+SCOPE_FLAGS = {"anthropic": "--workspace", "openai": "--openai-project"}
 NO_COUNTER = ("paid mode needs the provider's own pre-send token count for every reservation, and no provider "
               "token-count client exists yet; paid mode is refused until one is reviewed")
 GATES_NOTE = ("Reported for review only. None of these gates selects or changes a judge, and a refusal "
@@ -442,19 +443,34 @@ class StageLog(AttemptLog):
                 and json.loads(path.read_text(encoding="utf-8")).get("attempt") == f"{self.stage}/{attempt_ref}")
 
 
-def run_record(run_root: Path, mode: str, scopes: dict) -> dict:
+def check_ledger_scopes(ledger, scopes: dict) -> None:
+    """Refuse a run whose scope for a provider differs from one that the budget's ledger
+    already names: every run root shares the ledger, and one export covers one scope, so a
+    second scope would leave the ledger unreconcilable."""
+    for provider, named in sorted(ledger.scopes().items()):
+        other = sorted(named - {scopes.get(provider)}) if scopes.get(provider) else []
+        if other:
+            raise StageRefused(f"the {ledger.budget} ledger's {provider} calls ran under {other}, not "
+                               f"{scopes[provider]!r}; one ledger is reconciled under one scope, so fix "
+                               f"{SCOPE_FLAGS[provider]}")
+
+
+def run_record(run_root: Path, mode: str, scopes: dict, ledger) -> dict:
     """run.json: the mode, the study workspace and OpenAI project, fixed at the first
-    stage, and the run's own id, by which the ledger names it wherever the folder is."""
+    stage, and the run's own id, by which the ledger names it wherever the folder is.
+    Scopes that differ from the ledger's are refused before run.json is written."""
     path = run_root / "run.json"
     wanted = {"mode": mode, "workspace": scopes["anthropic"], "openai_project": scopes["openai"]}
+    record = None
     if path.exists():
         record = json.loads(path.read_text(encoding="utf-8"))
         given = {k: record.get(k) for k in wanted}
         if given != wanted:
             raise StageRefused(f"{path} records {given}; every stage of a run uses the same ones, not {wanted}")
-        return record
-    record = dict(wanted, run_id="run-" + secrets.token_hex(6))
-    write_once(path, _record_bytes(record))
+    check_ledger_scopes(ledger, scopes)
+    if record is None:
+        record = dict(wanted, run_id="run-" + secrets.token_hex(6))
+        write_once(path, _record_bytes(record))
     return record
 
 
@@ -734,7 +750,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     panel_record = None
     if spec.name == "EVAL":
         panel_record = verify_panel(panel, config_hash, items, repo)
-    run = run_record(run_root, mode, scopes)
+    run = run_record(run_root, mode, scopes, ledger)
     previous = check_previous(spec, run_root, ledger, mode, run)
     planned = panel_record["n"] if panel_record else spec.planned
     if not items or len(items) > planned:
