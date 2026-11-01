@@ -55,9 +55,10 @@ the attempt log, which keeps the raw response:
   cache read and output tokens), or as the price modifiers above say;
 - a non-2xx error response settles at zero: Anthropic does not bill failed requests;
   OpenAI's behavior is unverified and covered by reconciliation;
-- no response, a stream that did not complete, an Anthropic stream whose
-  ``message_delta`` did not report final usage, or usage not reported in full holds the
-  whole reservation, which then counts as spent for good;
+- no response, an error body whose status was not kept (a rebuilt record), a stream
+  that did not complete, an Anthropic stream whose ``message_delta`` did not report final
+  usage, or usage not reported in full holds the whole reservation, which then counts as
+  spent for good;
 - no attempt record at all also holds it.
 
 After a restart, an open reservation counts as spent until ``recover`` matches it to its
