@@ -813,6 +813,17 @@ class TestReconcile(LedgerCase):
         with self.assertRaisesRegex(ValueError, "partial, stale or of another scope"):
             led.reconcile(zero, sha)
 
+    def test_an_export_that_prices_a_modified_call_at_base_prices_is_refused_naming_the_call(self):
+        led = self.ledger()
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))               # $0.20
+        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0, geo="us"))     # $0.22, 1.1x every token
+        rows, sha = self.export("u.csv", [self.row("anthropic", A, inp=200000)])  # $0.40 at base prices
+        with self.assertRaisesRegex(ValueError, "rows covering such calls must give cost_usd "
+                                                "\\(1 anthropic call\\(s\\) here: r000002\\)"):
+            led.reconcile(rows, sha)
+        rows, sha = self.export("v.csv", [self.row("anthropic", A, inp=200000, cost="0.42")])
+        self.assertTrue(led.reconcile(rows, sha)["ok"])
+
     def test_the_same_export_is_refused_once_calls_were_made_since_it_was_reconciled(self):
         led = self.ledger()
         self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))

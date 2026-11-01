@@ -79,7 +79,9 @@ that cannot show the ledger's whole life:
   workspace or OpenAI project), or other than the run's own when one is given;
 - an export identical (same SHA-256) to one reconciled before calls that were made since;
 - a provider total below the usage the ledger's own responses reported for that provider
-  by more than 1%: such an export is partial, stale or of another scope.
+  by more than 1%: such an export is partial, stale or of another scope, or it prices
+  calls under a documented price modifier at the table's base prices, which a row avoids
+  by giving ``cost_usd``; the refusal names the calls that settled under one.
 
 Otherwise it prices the export with the same table and compares each provider's total
 with the ledger's spend on that provider. Usage above the ledger by more than 1% fails,
@@ -701,10 +703,16 @@ class Ledger:
             ledger_by[e["provider"]] = ledger_by.get(e["provider"], Decimal(0)) + Decimal(e["cost_usd"])
         for p, floor in sorted(reported.items()):
             if by_provider.get(p, Decimal(0)) < floor * (1 - RECONCILE_TOLERANCE):
+                raised = [e["id"] for e in self.entries if e["type"] == "settle" and e.get("response_usd") is not None
+                          and self.reservations[e["id"]]["provider"] == p
+                          and Decimal(e["response_usd"]) > call_cost(self.reservations[e["id"]]["model"], e["tokens"])]
                 raise ValueError(f"the {p} export, ${usd(by_provider.get(p, Decimal(0)).normalize())}, is below the "
                                  f"${usd(floor.normalize())} that the ledger's {p} responses reported by more than "
-                                 f"{RECONCILE_TOLERANCE:.0%}: it is partial, stale or of another scope; export "
-                                 "again once the provider's usage data is complete")
+                                 f"{RECONCILE_TOLERANCE:.0%}: it is partial, stale or of another scope, or it prices "
+                                 "calls under a documented price modifier at the table's base prices, so rows "
+                                 "covering such calls must give cost_usd"
+                                 + (f" ({len(raised)} {p} call(s) here: {', '.join(raised)})" if raised else "")
+                                 + "; export again once the provider's usage data is complete")
         providers, ok = {}, True
         for p in sorted(set(by_provider) | set(ledger_by)):
             exported, ledgered = by_provider.get(p, Decimal(0)), ledger_by.get(p, Decimal(0))
@@ -1029,6 +1037,8 @@ def read_usage_export(path):
 
     Token columns are disjoint counts: ``input_tokens`` excludes cache writes and reads.
     ``cost_usd`` may be empty; when given, the larger of it and the priced tokens counts.
+    Tokens are priced at the table's base prices, so a row covering a call under a
+    documented price modifier must give ``cost_usd``.
     ``period_start`` and ``period_end`` (ISO 8601 with a time zone) and ``scope`` (the
     Anthropic workspace or OpenAI project) state what the export covers.
     """

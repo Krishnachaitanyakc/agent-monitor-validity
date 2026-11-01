@@ -315,6 +315,8 @@ MUTATIONS = [
      "    error_body = None if status else error_body_outcome(provider, raw)\n", "    error_body = None\n"),
     ("start a run under scopes other than those its shared ledger names", "scripts/run_stage.py",
      "    check_ledger_scopes(ledger, scopes)\n", "    pass\n"),
+    ("name no modified call when an export falls below the responses' usage", "judge/spend.py",
+     '+ (f" ({len(raised)} {p} call(s) here: {\', \'.join(raised)})" if raised else "")', '+ ""'),
 ]
 
 
