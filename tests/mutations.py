@@ -311,6 +311,8 @@ MUTATIONS = [
      "    if ledger.mode != mode:", "    if False:"),
     ("waive the frozen-rubric rule with any transport", "scripts/run_stage.py",
      "    if not rubric_check and not isinstance(transport, D.FakeTransport):", "    if False:"),
+    ("rebuild a raw error body without its record as no response", "judge/dispatch.py",
+     "    error_body = None if status else error_body_outcome(provider, raw)\n", "    error_body = None\n"),
 ]
 
 

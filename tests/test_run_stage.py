@@ -29,6 +29,7 @@ from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
 from judge import spend as S  # noqa: E402
+from judge.outcomes import Exchange  # noqa: E402
 from judge.storage import AttemptLog, write_once  # noqa: E402
 from test_pack import FixtureCase  # noqa: E402
 from test_requests import images_for, synthetic_pack  # noqa: E402
@@ -526,6 +527,52 @@ class TestRunRecords(RunnerCase):
         self.assertEqual([(r["outcome"], r["http_status"]) for r in records], [("TRANSPORT", 200), ("VALID", 200)])
         a2 = [e for e in reserves(led) if e["slot"] == "A2"]
         self.assertEqual([led.reservations[e["id"]]["state"] for e in a2], ["held", "settled"])
+
+    def test_a_raw_error_body_without_its_record_halts_as_the_dispatcher_would_and_is_not_resent(self):
+        led = self.ledger()
+        its = items(1, "a")
+        with self.stop_between_writes("A1"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led, events={(its[0].trace_key, "A1", 1): "http_400"})
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        rec = log.attempts(its[0].trace_key, R.config_sha256(), "A", 1)[0]
+        self.assertEqual((rec["outcome"], rec["halt_kind"], rec["http_status"], rec["recovered"]["http_status"]),
+                         ("HALT", "request_error", None, "unknown; an error body, classified as in a stream"))
+        a1 = next(e for e in reserves(led) if e["slot"] == "A1")
+        self.assertEqual(led.reservations[a1["id"]]["state"], "held")              # the status was not kept
+        halts = log.halts()
+        self.assertEqual([(h["slot"], h["attempt"], h["halt_kind"], h["recorded_at_start"]) for h in halts],
+                         [("A1", 1, "request_error", True)])
+        log.record_correction(halts[0]["halt_id"], "Fixed the request.", R.config_sha256(), at="now")
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B"])
+        self.assertEqual([r["outcome"] for r in log.attempts(its[0].trace_key, R.config_sha256(), "A", 1)],
+                         ["HALT", "VALID"])
+
+        class Busy(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                if request.judge == "B":
+                    body = {"error": {"message": "Rate limit reached.", "type": "requests", "param": None,
+                                      "code": "rate_limit_exceeded"}}
+                    return Exchange(429, {}, json.dumps(body).encode(), None, None)
+                return super()._exchange(request, stage, ref, kind)
+
+        # A transient error body is a transport failure, and its slot is retried.
+        self.root, its = self.tmp / "run-2", items(1, "b")
+        led = self.ledger(self.tmp / "ledgers-2" / "ledger-pilot.jsonl")
+        with self.stop_between_writes("B1"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led, provider=Busy("central"))
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["B"])
+        b1 = AttemptLog(self.root / "P1" / "attempt_log").attempts(its[0].trace_key, R.config_sha256(), "B", 1)
+        self.assertEqual([(r["outcome"], r["http_status"]) for r in b1], [("TRANSPORT", None), ("VALID", 200)])
 
     def test_a_halt_attempt_without_its_halt_record_is_an_unresolved_halt(self):
         led = self.ledger()

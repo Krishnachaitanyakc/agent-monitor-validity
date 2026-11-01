@@ -27,10 +27,14 @@ reported fails.
 
 **Recovery.** A stop between the two writes of an attempt leaves its raw response without
 its record. ``recover_attempt`` rebuilds that record from the bytes as the dispatcher
-would have classified them, so the call is never sent again and nothing is chosen by
-reading it. The status and headers were not kept: bytes that start the provider's stream
-are taken as HTTP 200, anything else as no response (TRANSPORT), and the workspace header
-check is listed as not applied.
+would have classified them, and nothing is chosen by reading it. The status and headers
+were not kept. Bytes that start the provider's stream are taken as HTTP 200, so a
+complete response is recorded as it was and a slot it ended is never sent again, while a
+cut stream is TRANSPORT. A JSON error body is classified as the same error in a stream
+(``outcomes.error_body_outcome``): a request, key, billing, permission, not-found or
+spend-limit error halts until a correction note, and a transient one is TRANSPORT.
+Anything else is taken as no response (TRANSPORT), whose slot is retried under the rule
+above. The workspace header check is listed as not applied.
 
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with
@@ -48,7 +52,7 @@ from http.client import HTTPException
 
 from . import requests as R
 from .outcomes import (ABSTAIN, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TERMINAL,
-                       TRANSPORT, VALID, Exchange, canonical_outcome)
+                       TRANSPORT, VALID, Exchange, canonical_outcome, error_body_outcome)
 from .streams import parse_sse
 
 CACHE_LIFETIME_S = 300
@@ -328,7 +332,8 @@ def recover_attempt(log, reservation: dict) -> dict:
     raw = (log.slot_dir(trace_key, config_sha256, judge, repeat) / f"{attempt}.raw").read_bytes()
     status = 200 if _stream_started(provider, raw) else None
     exchange = Exchange(status, {}, raw, None if status else "the response's status was not kept", None)
-    oc = canonical_outcome(provider, exchange)
+    error_body = None if status else error_body_outcome(provider, raw)
+    oc = error_body or canonical_outcome(provider, exchange)
     summary = oc["summary"] or {}
     checks, ref = [], f"{trace_key}/{slot}/{attempt}"
     if oc["outcome"] in TERMINAL and summary.get("complete"):
@@ -353,7 +358,9 @@ def recover_attempt(log, reservation: dict) -> dict:
         "response_model": summary.get("model"), "stop": summary.get("stop_reason") or summary.get("terminal_event"),
         "usage": summary.get("usage") or {}, "parse": oc["parse"],
         "recovered": {"from": f"{attempt}.raw",
-                      "http_status": "inferred from the stream" if status else "unknown; taken as no response",
+                      "http_status": ("inferred from the stream" if status else
+                                      "unknown; an error body, classified as in a stream" if error_body else
+                                      "unknown; taken as no response"),
                       "checks_not_applied": ["anthropic-workspace-id header"] if provider == "anthropic" else []},
     }
     log.complete_attempt(record)

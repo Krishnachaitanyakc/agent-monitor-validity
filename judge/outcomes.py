@@ -192,3 +192,15 @@ def canonical_outcome(provider: str, exchange: Exchange) -> dict:
     if provider == "openai":
         return openai_outcome(exchange)
     raise ValueError(f"unknown provider {provider!r}")
+
+
+def error_body_outcome(provider: str, raw: bytes):
+    """The outcome of ``raw`` as a provider's JSON error body whose HTTP status was not
+    kept, classified as the same error in a stream is; None when it is not an error body."""
+    err = _error_body(raw)
+    if not err:
+        return None
+    classify = {"anthropic": _anthropic_error, "openai": _openai_error}[provider]
+    outcome, kind, label = classify(None, err)
+    return _result(outcome, "error body, status not kept: " + label.removeprefix("stream "), kind,
+                   error=_error_record(err))
