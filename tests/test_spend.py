@@ -279,6 +279,22 @@ class TestLedger(LedgerCase):
         self.assertEqual(len(rows[0]["ledger_id"]), 16)
         self.assertEqual(rows[1]["committed_before_usd"], "0")
 
+    def test_a_rebuilt_record_holds_with_a_reason_that_fits_its_bytes(self):
+        led = self.ledger()
+        reasons = []
+        for record, raw in [({"http_status": None, "recovered": {"from": "1.raw"}, "error": None}, b"<html>bad gateway</html>"),
+                            ({"http_status": None, "recovered": {"from": "1.raw"}, "error": None}, b""),
+                            ({"http_status": None, "recovered": {"from": "1.raw"}, "error": {"type": "invalid_request_error"}},
+                             b'{"type": "error", "error": {"type": "invalid_request_error", "message": "x"}}')]:
+            reasons.append(led.close_reservation(led.reserve(fields(), Decimal("0.5")), (record, raw))["reason"])
+        self.assertEqual(reasons, [
+            "bytes that held no recognized response, whose status was not kept; held, since the provider may "
+            "still bill the request",
+            "no response arrived; the provider may still bill the request",
+            "an error body whose status was not kept; held, since the provider may still bill the request"])
+        self.assertEqual({r["state"] for r in led.reservations.values()}, {"held"})
+        self.assertEqual(led.totals()["held"], Decimal("1.5"))
+
     def test_admission_at_the_cap_boundary(self):
         led = self.ledger()
         r = S.reservation(A, 60000, 32000)

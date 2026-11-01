@@ -313,7 +313,8 @@ MUTATIONS = [
      "    if not rubric_check and not isinstance(transport, D.FakeTransport):", "    if False:"),
     ("rebuild a raw error body without its record as no response", "judge/dispatch.py",
      "    error_body = None if status else error_body_outcome(provider, raw)\n", "    error_body = None\n"),
-    ("rebuild an OpenAI error body that is not a known transient error as a transport failure", "judge/outcomes.py",
+    ("rebuild an OpenAI error body that would otherwise be a transport failure, and is not a known transient error, as one",
+     "judge/outcomes.py",
      "    if outcome == TRANSPORT and code not in B_TRANSIENT_CODES and etype not in B_TRANSIENT_TYPES:\n",
      "    if False:\n"),
     ("take no halt kind from a rebuilt OpenAI error body's code", "judge/outcomes.py",
@@ -334,6 +335,9 @@ MUTATIONS = [
      "run_root.name.casefold() == ledgers.name.casefold()\n"
      "            or (run_root.exists() and ledgers.exists() and run_root.samefile(ledgers))",
      "run_root.name == ledgers.name"),
+    ("hold rebuilt unrecognized bytes as if no response arrived", "judge/spend.py",
+     '            elif record["http_status"] is None and record.get("recovered") and raw:',
+     '            elif False:'),
 ]
 
 

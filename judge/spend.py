@@ -55,10 +55,10 @@ the attempt log, which keeps the raw response:
   cache read and output tokens), or as the price modifiers above say;
 - a non-2xx error response settles at zero: Anthropic does not bill failed requests;
   OpenAI's behavior is unverified and covered by reconciliation;
-- no response, an error body whose status was not kept (a rebuilt record), a stream
-  that did not complete, an Anthropic stream whose ``message_delta`` did not report final
-  usage, or usage not reported in full holds the whole reservation, which then counts as
-  spent for good;
+- no response, an error body or unrecognized bytes whose status was not kept (a rebuilt
+  record), a stream that did not complete, an Anthropic stream whose ``message_delta``
+  did not report final usage, or usage not reported in full holds the whole reservation,
+  which then counts as spent for good;
 - no attempt record at all also holds it.
 
 After a restart, an open reservation counts as spent until ``recover`` matches it to its
@@ -620,6 +620,9 @@ class Ledger:
             if record["http_status"] is None and record.get("recovered") and record.get("error"):
                 detail = ("an error body whose status was not kept; held, since the provider may still bill "
                           "the request")
+            elif record["http_status"] is None and record.get("recovered") and raw:
+                detail = ("bytes that held no recognized response, whose status was not kept; held, since "
+                          "the provider may still bill the request")
             return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock)})
         reported = charge(r["provider"], r["model"], record["http_status"], raw)[1]   # without the reservation floor
         return self._append({"type": "settle", "id": rid, "cost_usd": usd(cost), "tokens": tokens,
