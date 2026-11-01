@@ -1137,6 +1137,11 @@ class TestCommands(CommandCase):
     def test_a_run_root_must_sit_directly_under_the_data_roots_out_folder(self):
         r = self.command(self.stage_args("P1", root=self.tmp / "out" / "run-a"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for name in ("ledgers", "Ledgers", "LEDGERS"):    # the same folder where the file system ignores case
+            r = self.command(self.stage_args("P1", root=self.tmp / "out" / name))
+            self.assertNotEqual(r.returncode, 0, name)
+            self.assertIn("--run-root must be a folder directly under", r.stderr)
+        self.assertFalse((self.ledger_root / "run.json").exists())
         shutil.rmtree(self.ledger_root)                    # every ledger, the register and the marks file
         elsewhere = (self.tmp / "run", self.tmp / "out" / "nested" / "run", self.ledger_root, self.tmp / "out")
         for root in elsewhere:

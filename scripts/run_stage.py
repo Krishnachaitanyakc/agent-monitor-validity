@@ -209,11 +209,14 @@ def ledger_dir(data_root, mode: str) -> Path:
 
 def check_run_root(data_root: Path, run_root: Path) -> Path:
     """The run root, which must be a folder directly under <data-root>/out other than the
-    ledgers' folder, so that every start reads the marks of every run root."""
-    out_dir = (Path(data_root) / "out").resolve()
-    if run_root.parent != out_dir or run_root.name == ledger_root(data_root).name:
+    ledgers' folder, so that every start reads the marks of every run root. The ledgers'
+    folder is matched without regard to letter case and by file identity, since the file
+    system may ignore case."""
+    out_dir, ledgers = (Path(data_root) / "out").resolve(), ledger_root(data_root)
+    if (run_root.parent != out_dir or run_root.name.casefold() == ledgers.name.casefold()
+            or (run_root.exists() and ledgers.exists() and run_root.samefile(ledgers))):
         raise StageRefused(f"--run-root must be a folder directly under {out_dir}, other than "
-                           f"{ledger_root(data_root).name}/, so that every start reads its ledger marks: {run_root}")
+                           f"{ledgers.name}/, so that every start reads its ledger marks: {run_root}")
     return run_root
 
 

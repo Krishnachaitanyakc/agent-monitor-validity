@@ -330,6 +330,10 @@ MUTATIONS = [
     ("accept a run root that is not directly under <data-root>/out", "scripts/run_stage.py",
      '    run_root = check_run_root(data_root, _outside_repo(Path(args.run_root), "--run-root"))',
      '    run_root = _outside_repo(Path(args.run_root), "--run-root")'),
+    ("refuse the ledgers folder as a run root only by its exact name", "scripts/run_stage.py",
+     "run_root.name.casefold() == ledgers.name.casefold()\n"
+     "            or (run_root.exists() and ledgers.exists() and run_root.samefile(ledgers))",
+     "run_root.name == ledgers.name"),
 ]
 
 
