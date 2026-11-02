@@ -74,6 +74,36 @@ MUTATIONS = [
      "kind = url_refusal(args[0])", "kind = None"),
     ("run without the local fence config", "datapath/fence.py",
      "        if required:\n", "        if False:\n"),
+    ("look up acted elements in the next step's tree", "judge/pack.py",
+     'describe_action(action, obs.get("axtree"), event.get("elements"))',
+     'describe_action(action, (events[event["step"] + 1:] or [event])[0]["observation"]["axtree"], '
+     'event.get("elements"))'),
+    ("look up acted elements in the next step's element properties", "judge/pack.py",
+     'describe_action(action, obs.get("axtree"), event.get("elements"))',
+     'describe_action(action, obs.get("axtree"), (events[event["step"] + 1:] or [event])[0]["elements"])'),
+    ("report a nonvisible target as absent", "judge/acted.py",
+     "        status = NONVISIBLE", "        status = ABSENT"),
+    ("report a target listed at another visibility as nonvisible", "judge/acted.py",
+     "        status = NOT_IN_TREE", "        status = NONVISIBLE"),
+    ("accept calls to unknown functions", "judge/acted.py",
+     "        if name not in ELEMENT_PARAMS and name not in NO_TARGET_ACTIONS:", "        if False:"),
+    ("resolve an ambiguous ID to its first tree line", "judge/acted.py",
+     "    if len(lines) == 1:", "    if lines:"),
+    ("drop the canonical key sort from the pack bytes", "judge/pack.py",
+     "json.dumps(obj, sort_keys=True,", "json.dumps(obj, sort_keys=False,"),
+    ("put screenshot paths and hashes into the pack", "judge/pack.py",
+     "    pack = build_pack(view)", '    pack = dict(build_pack(view), images=provenance["screenshot_files"])'),
+    ("cut the final tree without a marker", "judge/pack.py",
+     "text[:FINAL_TREE_HEAD] + marker + text[-FINAL_TREE_TAIL:]",
+     "text[:FINAL_TREE_HEAD] + text[-FINAL_TREE_TAIL:]"),
+    ("remove the guard install from the pack command", "scripts/build_packs.py",
+     '    fence.install("dev_only", data_root, fence_config)', "    pass"),
+    ("pack evaluation-split records", "scripts/build_packs.py",
+     '        if prov.get("split") != "dev":', "        if False:"),
+    ("publish packs into an existing output folder", "scripts/build_packs.py",
+     "    if out.exists():", "    if False:"),
+    ("write packs straight into --out without staging", "scripts/build_packs.py",
+     'staging = Path(tempfile.mkdtemp(prefix=f".{out.name}.staging-", dir=out.parent))', "staging = out"),
 ]
 
 
@@ -81,7 +111,7 @@ def main() -> int:
     missed = 0
     for name, rel, old, new in MUTATIONS:
         with tempfile.TemporaryDirectory() as tmp:
-            for part in ("datapath", "scripts", "tests"):
+            for part in ("datapath", "judge", "scripts", "tests"):
                 shutil.copytree(REPO / part, Path(tmp) / part,
                                 ignore=shutil.ignore_patterns("__pycache__"))
             target = Path(tmp) / rel
