@@ -1,4 +1,4 @@
-"""Tests for the plan v3.2 amendments to sap.py. Synthetic data only.
+"""Tests of the plan's label, outcome and panel rules in sap.py. Synthetic data only.
 
 Covers reference handling (Unsure and missing labels), label coverage, the outcome
 classes (FILTERED, case-insensitive verdicts, HALT), and the panel unit.
@@ -187,8 +187,8 @@ class TestReferenceJoin(unittest.TestCase):
             sap.analyze(labels, [0] * 55, reference=["sure"] * 55)
 
 
-GOLDEN_V31 = {
-    # Results under the plan v3.1 rules, every label usable, on four synthetic panels.
+GOLDEN_ALL_USABLE = {
+    # Results with every label usable, on four synthetic panels.
     "coverage": dict(
         panel=(labels_for(0, 30, 3, 7, 160), E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10)), {}),
         captures={"RAND": Fraction(15, 2), "DIS": Fraction(229, 17), "AUG": Fraction(65, 4),
@@ -221,9 +221,9 @@ GOLDEN_V31 = {
 }
 
 
-class TestNoUnsureEqualsV31(unittest.TestCase):
-    def test_results_equal_v31_exactly(self):
-        for name, g in GOLDEN_V31.items():
+class TestAllLabelsUsable(unittest.TestCase):
+    def test_results_match_golden_values(self):
+        for name, g in GOLDEN_ALL_USABLE.items():
             labels, E, kw = g["panel"]
             for ref in (None, [U] * len(labels)):
                 with self.subTest(panel=name, reference=ref is not None):
@@ -336,7 +336,7 @@ class TestReferenceHandling(unittest.TestCase):
         sec, lf = r["secondary"], r["label_free"]
         L, Delta = lf["L"], r["captures"]["Delta"]
         self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"], sec["n_D0_Y"]), (110, 10, 80, 90))
-        # (a) The plan-literal secondary is the primary rescaled by N/N_Y, with the primary's test.
+        # (a) The first number is the primary rescaled by N/N_Y, with the primary's test.
         pl = sec["plan_literal"]
         self.assertEqual(pl["rescale"], Fraction(190, 110))
         self.assertEqual(pl["G_hat_exact"], 100 * Delta / 110)
@@ -707,7 +707,7 @@ class TestReferenceNotSupplied(unittest.TestCase):
         self.assertIsNone(bare["secondary"])
         self.assertIsNone(bare["coverage"])
         self.assertEqual(sap.REFERENCE_NOT_SUPPLIED_TEXT,
-                         "Reference statuses not supplied: every label treated as usable (plan v3.1 mode); "
+                         "Reference statuses not supplied: every label treated as usable; "
                          "Unsure and missing coverage not assessed")
         txt = sap.report(bare)
         self.assertEqual(txt.count(sap.REFERENCE_NOT_SUPPLIED_TEXT), 1)

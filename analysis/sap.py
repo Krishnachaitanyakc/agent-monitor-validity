@@ -1,41 +1,29 @@
 """Statistical analysis of the instability-first review study: reference implementation.
 
-This module implements the study's statistical analysis plan, draft v3.2,
+This module implements the study's statistical analysis plan, version 3.2,
 except for one piece the plan requires before the freeze. The inference that
 handles the template dependence retained on the one-trajectory-per-task panel,
 and its synthetic validation, are both still to come. Until they exist, the
-primary test and interval are those of plan v3.1, which assume independent
-tasks, and the report says so. The method is frozen only at the study freeze;
-until then "frozen" in this file names the rule the plan fixes, not a completed
-freeze. Comments name the plan's sections by topic: units, budget, policies,
-regimes, the coverage regime, invalid responses, the partial regime and the
-panel. Where the code has to fill a gap in the plan, the comment says
-"Implementation choice".
+primary test and interval assume independent tasks, and the report says so.
+The method is frozen only at the study freeze; until then "frozen" in this file
+names the rule the plan fixes, not a completed freeze. Comments name the plan's
+sections by topic: units, budget, policies, regimes, the coverage regime, invalid
+responses, the partial regime and the panel. Where the code has to fill a gap in
+the plan, the comment says "Implementation choice".
 
 Results depend only on the inputs and seeds: label-free counts, plus the
 reference discordance E and the reference statuses only where the plan marks a
 quantity as needing labels. Nothing here reads or writes files.
 
-Corrections to the earlier code
--------------------------------
-Plan v3.1 already required each of these; the earlier code lacked them or got
-them wrong.
-- FILTERED is a terminal INVALID outcome. The earlier code did not list it and
-  raised on it.
-- Verdicts match case-insensitively, as the plan's parser does. The earlier code
-  matched their letter case exactly.
-- The fragility count is the fewest label flips that reverse the existence
-  decision. In the partial regime the earlier search moved each count only in the
-  direction it takes in the coverage regime, so it missed reversals that need
-  another direction, for example fewer discordant U1 tasks when the weight of U1
-  is negative, and could report more than 15 flips where fewer suffice. Every
-  direction is now searched. In the coverage regime the count is unchanged.
-- When no set of label flips can reverse the decision, the fragility count is
-  reported as not defined. The earlier report said that more than 15 flips would
-  reverse it.
-
-Changes from plan v3.1
-----------------------
+Main rules
+----------
+- Outcomes. FILTERED is a terminal INVALID outcome. Verdicts match
+  case-insensitively, as the plan's parser does.
+- Fragility. The fragility count is the fewest label flips that reverse the
+  existence decision. In the partial regime the search tries every direction,
+  since a reversal can need, for example, fewer discordant U1 tasks when the
+  weight of U1 is negative. When no set of label flips can reverse the decision,
+  the count is reported as not defined.
 - Request and configuration halts. HTTP 400 that is not a spend or usage limit,
   HTTP 413 and the provider's equivalent invalid-request errors halt the run,
   as the other halt causes do. A halt is never INVALID; a slot that ends in HALT
@@ -44,13 +32,14 @@ Changes from plan v3.1
   missing stays in the panel, in the selections and in the review count K. The
   primary result is per 100 panel tasks (N) and counts such a task as not
   reference-contradicted (E = 0); its fragility count flips usable labels only.
-  The secondary result is per 100 tasks with a usable label (N_Y): first the
-  plan-literal 100 Delta / N_Y, then a proposed usable-only comparison. Coverage
+  The secondary result is per 100 tasks with a usable label (N_Y): first
+  100 Delta / N_Y, then a proposed usable-only comparison. Coverage
   of Unsure and missing labels is reported separately; these tasks are unknown,
   never correct. See join_reference(), analyze(), secondary_analysis() and
   reference_coverage().
 - Panel unit. The default panel is one trajectory per task; the
-  one-task-per-template panel is a labeled sensitivity analysis. See
+  one-task-per-template panel is a labeled sensitivity analysis, and the wider
+  template exclusion is the same analysis on a narrower set of eligible runs. See
   select_panel(). The inference for the retained dependence is not yet
   implemented (see above).
 
@@ -139,8 +128,8 @@ NUISANCE_TEXT = {
                     "plus 0.001 (Berger and Boos 1994; the frozen method)"),
 }
 
-# What the interval covers: the plan's bullets, word for word. The plan requires
-# them in every report, so they are never reworded here.
+# What the interval covers. The plan requires this fixed statement in every
+# coverage-regime report.
 COVERS_BULLETS = (
     "- p1 and p0 are the rates of reference-contradicted first verdicts among unstable "
     "and stable agreeing tasks, with a task that has no usable reference label counted "
@@ -164,26 +153,26 @@ COVERS_BULLETS = (
     "- No odds ratio is used for any interval.",
 )
 COVERS_TEXT = "What the interval covers:\n" + "\n".join(COVERS_BULLETS)
-# Explanations kept apart from the plan's wording above.
+# Explanations kept apart from the fixed statement above.
 COVERS_NOTES_TEXT = (
     "Notes on these statements: U pools U2 and U1, the unstable agreeing tasks, and S "
     "holds the stable agreeing tasks; G is defined above, and Ĝ is G_hat. The test and "
-    "the interval used here are those of plan v3.1. The inference that handles the "
+    "the interval used here assume independent tasks. The inference that handles the "
     "template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
-# The plan prints the statements above in its coverage-regime section. The partial regime
-# has no interval for delta or G; it states its own assumption, in the plan's words.
+# The statement above belongs to the coverage regime. The partial regime has no interval
+# for delta or G, so it states its own assumption.
 PARTIAL_ASSUMPTION_TEXT = (
     "Assumptions: the exact permutation p-value and the approximate bootstrap interval "
     "assume independent tasks. On a panel with more than one task per template they hold "
     "only once the synthetic validation under retained template dependence has passed. "
-    "The test and the interval used here are those of plan v3.1. The inference that handles "
+    "The test and the interval used here assume independent tasks. The inference that handles "
     "the template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
-REFERENCE_NOT_SUPPLIED_TEXT = ("Reference statuses not supplied: every label treated as usable "
-                               "(plan v3.1 mode); Unsure and missing coverage not assessed")
+REFERENCE_NOT_SUPPLIED_TEXT = ("Reference statuses not supplied: every label treated as usable; "
+                               "Unsure and missing coverage not assessed")
 G_DEFINITION_TEXT = (
     "G = (100/N)·L·δ is the expected number of additional "
     "reference-discordant first verdicts that instability-first review captures, per "
@@ -1478,7 +1467,9 @@ def select_panel(runs: Sequence[Mapping[str, object]], seed: int, unit: str = PA
     runs: one mapping per eligible agent run, with 'run_id', 'task_id' (the
     normalized task id), 'template_id' and 'passes' (True when the run passes the
     evidence completeness and fit checks). Eligibility (split, benchmark and
-    template exclusions) is settled before this call, and no label is read. When a
+    template exclusions) is settled before this call, and no label is read. The
+    wider-exclusion sensitivity panel is this same call on runs with every template
+    in the development split also removed. When a
     benchmark's template ids cannot be recovered, pass each task id as its own
     template id.
 
@@ -1619,14 +1610,13 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
 
     reference gives each trajectory's reference status ('usable', 'unsure' or
     'missing', as join_reference returns it). None means the statuses were not
-    supplied: every label is treated as usable, which reproduces the plan v3.1
-    primary result exactly, and the secondary result and the label coverage are not
-    assessed (res['secondary'] and res['coverage'] are None, and the report says
+    supplied: every label is treated as usable, and the secondary result and the
+    label coverage are not assessed (res['secondary'] and res['coverage'] are None, and the report says
     so). E must be 0 for every task without a usable label (except invalid A1,
     where E is ignored), since such a task cannot be reference-discordant.
 
-    Primary result, per 100 panel tasks. Every formula is the plan v3.1 formula,
-    with E_i = 0 for a task without a usable label (not reference-contradicted):
+    Primary result, per 100 panel tasks, with E_i = 0 for a task without a usable
+    label (not reference-contradicted):
       m_j = sum of E over stratum j; m1 = m_U2 + m_U1, m0 = m_S; n1, n0, N, L as
       in the label-free design;
       G_hat = 100 Delta / N; in coverage G_hat = (100/N) L (m1/n1 - m0/n0);
@@ -1812,7 +1802,7 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
         out["not_estimable"] = "no panel task has a usable label"
         return out
 
-    # (a) The plan-literal secondary: the primary result rescaled by N/N_Y.
+    # (a) The first number: the primary result rescaled by N/N_Y.
     ratio = Fraction(design.N_per100, den)
     ex, sz = primary["existence"], primary["size"]
     pl = {"rescale": ratio,
@@ -2138,7 +2128,7 @@ def _primary_lines(res: dict) -> List[str]:
 def _secondary_lines(res: dict) -> List[str]:
     """Report lines of the secondary result, per 100 tasks with a usable label.
 
-    (a), the plan-literal result, comes first; (b), the usable-only comparison, is
+    (a), the primary result rescaled, comes first; (b), the usable-only comparison, is
     printed as a proposed analysis, or with the reason it is not reported. Neither
     carries a threshold claim.
     """

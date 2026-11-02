@@ -55,7 +55,7 @@ MUTATIONS = [
     ("make the one-task-per-template panel the default",
      'PANEL_UNIT = "task"     # the default panel',
      'PANEL_UNIT = "template"     # the default panel'),
-    ("leave the plan-literal secondary unscaled by N/N_Y",
+    ("leave the first secondary number unscaled by N/N_Y",
      "    ratio = Fraction(design.N_per100, den)\n",
      "    ratio = Fraction(1)\n"),
     ("print a threshold class for the usable-only secondary",
