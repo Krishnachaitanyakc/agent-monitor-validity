@@ -1,6 +1,6 @@
 # Analysis
 
-`sap.py` is the study's statistical analysis. It compares instability-first review with disagreement-first and random review at equal review budgets, and reports how many additional reference-discordant first verdicts instability-first review captures. The method follows version 3.2 of the study's statistical analysis plan, which is not yet in this repository and is fixed at the study freeze.
+`sap.py` is the study's statistical analysis. It compares instability-first review with disagreement-first and random review at equal review budgets, and reports how many additional reference-contradicted first verdicts instability-first review captures. The method follows version 3.2 of the study's statistical analysis plan, which is not yet in this repository and is fixed at the study freeze.
 
 sap.py reads and writes no files, and its results depend only on its inputs and seeds; the tests use synthetic inputs only.
 
@@ -8,16 +8,16 @@ sap.py reads and writes no files, and its results depend only on its inputs and 
 
 - Slot resolution from the attempt log. REFUSAL, TRUNCATED, FILTERED, MALFORMED and ABSTAIN are INVALID, and verdicts match case-insensitively. A slot with no complete response after three retries is INVALID (TRANSPORT_EXHAUSTED). A slot that ends in HALT, or in a transport failure with retries left, is unfinished and is refused, never counted as INVALID.
 - The label-free design, fixed before the label join, and the exact tie-averaged captures of the three policies. Delta is the difference between instability-first and disagreement-first review.
-- The existence question, by Fisher's exact test or an exact permutation test, and the size question, by the frozen exact score interval or an approximate bootstrap, depending on the regime. The fragility count is the fewest flips of usable reference labels among agreeing tasks that reverse the existence decision; it is reported as not defined when no set of such flips reverses it.
+- The existence question, by Fisher's exact test or an exact permutation test, and the size question, by the exact score interval or an approximate bootstrap, depending on the regime. The fragility count is the fewest flips of usable reference labels among agreeing tasks that reverse the existence decision; it is reported as not defined when no set of such flips reverses it.
 - The labeled sensitivity analyses, the template checks and a text report.
-- `select_panel`, which chooses the default panel of one trajectory per task and the one-task-per-template sensitivity panel without reading labels. The wider-exclusion sensitivity panel is the same call on runs with every template in the development split also removed, analyzed as a separate panel.
+- `select_panel`, which chooses the default panel of one trajectory per task and the one-task-per-template sensitivity panel without reading labels. The wider-exclusion sensitivity panel is the default panel with every task whose template appears in the development split dropped. No new selection is made, so each kept task keeps its judged trajectory, and it is analyzed as a separate panel with its own N, s and K.
 
 ## Primary and secondary results
 
 A released primary label of Successful or Unsuccessful, in any letter case, is usable. Unsure is Unsure, a blank or absent label is missing, and any other value stops the analysis. A task whose label is Unsure or missing stays in the panel, in the selections and in the review count.
 
 - **Primary, per 100 panel tasks N.** Such a task counts as not reference-contradicted, so the threshold of 2 per 100 keeps its meaning. In the coverage regime G_hat = (100/N) L (m1/n1 - m0/n0), with Fisher's test on m1 of n1 and m0 of n0.
-- **Secondary, per 100 tasks with a usable label N_Y.** First 100 Delta / N_Y: the primary gain rescaled by N/N_Y, with the primary's test and its interval rescaled the same way. Then a usable-only comparison, printed as a proposed analysis pending confirmation. In the coverage regime it is G_hat_Y = (100/N_Y) L_Y (m1/n1Y - m0/n0Y) with L_Y = n1Y (n_D0 - s) / n_D0, with Fisher's test on m1 of n1Y and m0 of n0Y and the same interval method for p1Y - p0Y. It is not reported when its implied comparator would review a negative number of stable agreeing tasks with a usable label. As an implementation choice that awaits the same confirmation, it is also not reported when the comparator would need more of them than there are. The threshold of 2 per 100 refers to the primary result only, so neither secondary analysis makes a threshold claim.
+- **Secondary, per 100 tasks with a usable label N_Y.** First the rescaled gain, 100 Delta / N_Y: the primary gain times N/N_Y, with the primary's test and its interval rescaled the same way. Then a usable-only comparison, printed as a proposed analysis pending confirmation. In the coverage regime it is G_hat_Y = (100/N_Y) L_Y (m1/n1Y - m0/n0Y) with L_Y = n1Y (n_D0 - s) / n_D0, with Fisher's test on m1 of n1Y and m0 of n0Y and the same interval method for p1Y - p0Y. It is not reported when its implied comparator would review a negative number of stable agreeing tasks with a usable label, or more of them than there are. The threshold of 2 per 100 refers to the primary result only, so neither secondary analysis makes a threshold claim.
 
 When reference statuses are not supplied, every label is treated as usable. The report then says that Unsure and missing labels were not assessed, and prints no secondary result and no coverage table. The docstrings of `analyze` and `secondary_analysis` give every formula.
 
@@ -41,3 +41,5 @@ python3.12 -m venv ~/venvs/analysis
 ## Not yet covered
 
 The default panel keeps tasks that share a template, while the primary test and interval treat tasks as independent. The inference that handles this retained template dependence and its synthetic validation are both still to come, and the plan requires both before the freeze. Neither is in this folder.
+
+The wider-exclusion panel has no labeled report line yet. Its numbers come from `analyze` on the filtered panel, and that report is headed as a primary analysis.

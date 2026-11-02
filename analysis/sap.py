@@ -24,23 +24,23 @@ Main rules
   since a reversal can need, for example, fewer discordant U1 tasks when the
   weight of U1 is negative. When no set of label flips can reverse the decision,
   the count is reported as not defined.
-- Request and configuration halts. HTTP 400 that is not a spend or usage limit,
-  HTTP 413 and the provider's equivalent invalid-request errors halt the run,
-  as the other halt causes do. A halt is never INVALID; a slot that ends in HALT
+- Request and configuration halts. HTTP 400 that is not a spend or usage limit
+  or a provider content-policy error, HTTP 413 and the provider's equivalent
+  invalid-request errors halt the run, as the other halt causes do. A halt is never INVALID; a slot that ends in HALT
   is unfinished, and the analysis refuses it (UnfinishedSlot).
 - Unsure and missing labels. A task whose released primary label is Unsure or
   missing stays in the panel, in the selections and in the review count K. The
   primary result is per 100 panel tasks (N) and counts such a task as not
   reference-contradicted (E = 0); its fragility count flips usable labels only.
-  The secondary result is per 100 tasks with a usable label (N_Y): first
-  100 Delta / N_Y, then a proposed usable-only comparison. Coverage
+  The secondary result is per 100 tasks with a usable label (N_Y): first the
+  rescaled gain, 100 Delta / N_Y, then a proposed usable-only comparison. Coverage
   of Unsure and missing labels is reported separately; these tasks are unknown,
   never correct. See join_reference(), analyze(), secondary_analysis() and
   reference_coverage().
 - Panel unit. The default panel is one trajectory per task; the
   one-task-per-template panel is a labeled sensitivity analysis, and the wider
-  template exclusion is the same analysis on a narrower set of eligible runs. See
-  select_panel(). The inference for the retained dependence is not yet
+  template exclusion is the default panel with the tasks of every
+  development-split template dropped. See select_panel(). The inference for the retained dependence is not yet
   implemented (see above).
 
 Conventions
@@ -112,7 +112,7 @@ ALPHA = 0.025                      # one-sided level for every test and bound
 SLICE_FRACTION = Fraction(3, 20)   # 0.15 of N
 MATERIAL_M = 2                     # threshold, additional discordances per 100
 D_GRID_DEN = 100                   # d grid: k/100, k = -99..99, plus label-free points
-NUISANCE_POINTS = 1001             # the plan asks for at least 1000
+NUISANCE_POINTS = 1001             # grid size for the maximum over p0
 REFINE_WINDOW = 2e-3               # see module docstring
 TIE_RTOL = 1e-10                   # score values this close are treated as tied
 STRATA = ("I", "G1", "U2", "U1", "S")
@@ -125,7 +125,7 @@ PLAN_VERSION = "v3.2"              # the analysis plan this code implements
 NUISANCE_TEXT = {
     "full": "supremum over the whole admissible range of p0",
     "berger-boos": ("supremum over a 99.9% Clopper-Pearson set for p0 from m0 of n0, "
-                    "plus 0.001 (Berger and Boos 1994; the frozen method)"),
+                    "plus 0.001 (Berger and Boos 1994; the plan's method)"),
 }
 
 # What the interval covers. The plan requires this fixed statement in every
@@ -156,8 +156,8 @@ COVERS_TEXT = "What the interval covers:\n" + "\n".join(COVERS_BULLETS)
 # Explanations kept apart from the fixed statement above.
 COVERS_NOTES_TEXT = (
     "Notes on these statements: U pools U2 and U1, the unstable agreeing tasks, and S "
-    "holds the stable agreeing tasks; G is defined above, and Ĝ is G_hat. The test and "
-    "the interval used here assume independent tasks. The inference that handles the "
+    "holds the stable agreeing tasks; G is defined above, and Ĝ is G_hat. "
+    "The inference that handles the "
     "template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
@@ -167,7 +167,7 @@ PARTIAL_ASSUMPTION_TEXT = (
     "Assumptions: the exact permutation p-value and the approximate bootstrap interval "
     "assume independent tasks. On a panel with more than one task per template they hold "
     "only once the synthetic validation under retained template dependence has passed. "
-    "The test and the interval used here assume independent tasks. The inference that handles "
+    "The inference that handles "
     "the template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
@@ -175,7 +175,7 @@ REFERENCE_NOT_SUPPLIED_TEXT = ("Reference statuses not supplied: every label tre
                                "Unsure and missing coverage not assessed")
 G_DEFINITION_TEXT = (
     "G = (100/N)·L·δ is the expected number of additional "
-    "reference-discordant first verdicts that instability-first review captures, per "
+    "reference-contradicted first verdicts that instability-first review captures, per "
     "100 panel trajectories, for a panel with this panel's label-free design (the same "
     "N, n_D0, n1 and s)."
 )
@@ -1468,8 +1468,10 @@ def select_panel(runs: Sequence[Mapping[str, object]], seed: int, unit: str = PA
     normalized task id), 'template_id' and 'passes' (True when the run passes the
     evidence completeness and fit checks). Eligibility (split, benchmark and
     template exclusions) is settled before this call, and no label is read. The
-    wider-exclusion sensitivity panel is this same call on runs with every template
-    in the development split also removed. When a
+    wider-exclusion sensitivity panel is not a new call: it is the default panel's
+    runs minus every task whose template appears in the development split. Calling
+    this function again on fewer runs would shift the generator and choose other
+    runs. When a
     benchmark's template ids cannot be recovered, pass each task id as its own
     template id.
 
@@ -1734,7 +1736,7 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
       w_j     = pi_j - s/n_D0, the full-panel weights, Delta = sum_j w_j m_j
               (delta_weights).
 
-    (a) Plan-literal secondary, reported first: 100 Delta / N_Y. A task without a
+    (a) First number: 100 Delta / N_Y. A task without a
     usable label has E = 0, so this is the primary realized gain rescaled by N/N_Y,
     and it carries the primary's test. Coverage regime: the interval for G rescaled,
     (100 L / N_Y) (delta_L, delta_U) from the primary interval for delta; existence by
@@ -1773,11 +1775,9 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
     unequal usable shares between U and S.
     (b) is not reported when n1Y = 0 or n0Y = 0, or when the implied comparator would
     review a negative number of stable usable tasks: in coverage when
-    n1Y > s n_D0Y / n_D0, in the partial regime when B_Y > 0. Implementation choice,
-    an addition to the plan's open point on the secondary result that awaits the same
-    confirmation: it is also not reported when that number exceeds n0Y, since the
-    comparator would then need more stable usable tasks than exist. Only the partial
-    regime allows this.
+    n1Y > s n_D0Y / n_D0, in the partial regime when B_Y > 0. It is also not reported
+    when that number exceeds n0Y, since the comparator would then need more stable
+    usable tasks than exist. Only the partial regime allows this.
 
     No threshold claim is made for (a) or (b): the threshold of 2 per 100 refers to
     the primary result only. In the degenerate regimes Delta = 0 identically and
@@ -1998,6 +1998,7 @@ def _primary_lines(res: dict) -> List[str]:
         out.append("  " + REFERENCE_NOT_SUPPLIED_TEXT)
     out.append("")
     out.append("Expected captures (exact, tie-averaged)")
+    out.append("  Rand is Random, DIS is disagreement-first and AUG is instability-first.")
     out.append(f"  E[C_Rand] = {_f(cap['RAND'])}, E[C_DIS] = {_f(cap['DIS'])}, E[C_AUG] = {_f(cap['AUG'])}")
     out.append(f"  Delta = E[C_AUG] - E[C_DIS] = {_f(cap['Delta'])} ({_f(res['Delta_per100'])} per 100)")
     out.append(f"  Delta_DR = E[C_DIS] - E[C_Rand] = {_f(cap['Delta_DR'])} (sanity check)")
@@ -2027,7 +2028,7 @@ def _primary_lines(res: dict) -> List[str]:
     if reg == "COVERAGE":
         out.append("  H0: p1 = p0, equivalently discordance is exchangeable between U and S given "
                    "the margins; H1: p1 > p0.")
-        out.append(f"  Statistic: m1, the number of reference-discordant first verdicts in U. "
+        out.append(f"  Statistic: m1, the number of reference-contradicted first verdicts in U. "
                    f"p = P(M1 >= m1 | n1, n0, m_D0), one-sided Fisher exact test, which equals "
                    f"the exact within-D permutation p-value of Delta.")
         out.append(f"  m1 = {res['m1']} of n1 = {lf['n1']}; m0 = {res['m0']} of n0 = {lf['n0']}; "
@@ -2072,8 +2073,9 @@ def _primary_lines(res: dict) -> List[str]:
                    f"{NUISANCE_TEXT[meth]}.")
         out.append("  'Exceeds' iff the upper-tail test rejects δ_m and every grid point below it; "
                    "'below' iff the lower-tail test rejects δ_m and every grid point above it.")
+        grid_extra = "0 and δ_m" if lf["reachable"] else "0"
         out.append("  Interval: two one-sided 97.5% bounds (Chan-Zhang inversion), grid k/100 plus "
-                   "0 and δ_m, outward-rounded: both ends are rejected grid points, so the "
+                   f"{grid_extra}, outward-rounded: both ends are rejected grid points, so the "
                    "interval is open.")
         out.append(f"  delta_hat = {_f(sz['delta_hat'])}; interval for δ: "
                    f"{_interval_text(sz['delta_L'], sz['delta_U'])}")
@@ -2152,7 +2154,7 @@ def _secondary_lines(res: dict) -> List[str]:
     pl = sec["plan_literal"]
     ex = pl["existence"]
     out.append("")
-    out.append(f"  (a) Plan-literal secondary: 100 Delta / N_Y, the primary realized gain rescaled "
+    out.append(f"  (a) First number: 100 Delta / N_Y, the primary realized gain rescaled "
                f"by N/N_Y = {_f(pl['rescale'])}")
     out.append(f"  Existence: same test as the primary, p = {ex['p']:.6g}; "
                f"{'REJECT H0' if ex['reject'] else 'do not reject H0'}")
@@ -2408,7 +2410,7 @@ def panel_report(panel: dict) -> str:
     lf = prim["label_free"]
     out = []
     prov = panel.get("provenance")
-    out.append("A1 provenance (frozen rule)")
+    out.append("A1 provenance (plan rule)")
     if prov is not None:
         a1 = prov["by_slot"]["A1"]
         cats = ", ".join(f"{k.split(':', 1)[1]} {v}" for k, v in sorted(a1.items()) if k.startswith("invalid:"))
@@ -2427,7 +2429,7 @@ def panel_report(panel: dict) -> str:
                    f"response ids checked on {n_ids} of {n_complete} complete responses, none repeated "
                    f"(a payload-keyed response cache would repeat them).")
     else:
-        out.append("  Not supplied: resolved slots were passed without the attempt log. The frozen rule "
+        out.append("  Not supplied: resolved slots were passed without the attempt log. The plan's rule "
                    "is that A1 is the first complete response of slot (i, A, 1) and is never replaced.")
     out.append("")
     out.append(report(prim))

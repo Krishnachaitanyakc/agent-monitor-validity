@@ -410,7 +410,7 @@ class TestReferenceHandling(unittest.TestCase):
                          {"tasks": 160, "usable": 0, "unsure": 160, "missing": 0})
         txt = sap.report(r)
         self.assertIn("Not reported: no stable agreeing task has a usable label", txt)
-        self.assertIn("(a) Plan-literal secondary", txt)
+        self.assertIn("(a) First number", txt)
         # All unstable agreeing tasks Unsure: m1 is 0 by construction.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U2", rows(0, 0, 4)), block("U1", rows(0, 0, 6)),
                                block("S", rows(16, 160)))
@@ -755,7 +755,7 @@ class TestSecondaryResult(unittest.TestCase):
     def check_layout(self, r):
         txt = sap.report(r)
         sec = self.section(txt)
-        self.assertLess(sec.index("(a) Plan-literal secondary: 100 Delta / N_Y, the primary realized gain "
+        self.assertLess(sec.index("(a) First number: 100 Delta / N_Y, the primary realized gain "
                                   "rescaled by N/N_Y"),
                         sec.index("(b) Usable-only comparison: a proposed analysis, pending confirmation"))
         self.assertIn("Existence: same test as the primary", sec)
@@ -840,7 +840,7 @@ class TestSecondaryResult(unittest.TestCase):
         txt = sap.report(r)
         self.assertIn("Not reported: " + why, txt)
         self.assertNotIn("G_hat_Y =", txt)
-        self.assertIn("(a) Plan-literal secondary", txt)
+        self.assertIn("(a) First number", txt)
         self.assertTrue(any("(b) proposed usable-only comparison: not reported, " + why in x
                             for x in sap._brief("x", r)))
 
