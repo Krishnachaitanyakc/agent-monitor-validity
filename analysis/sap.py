@@ -136,8 +136,8 @@ COVERS_BULLETS = (
     "as not contradicted.",
     "- The interval for δ covers δ with probability at least 95%, at most 2.5% on each "
     "side. δ does not depend on the budget.",
-    "- The interval for G covers G with the same probability, over repeated draws of the "
-    "discordance indicators: independent Bernoulli(p1) in U and Bernoulli(p0) in S, with "
+    "- The interval for G covers G with the same probability, over repeated draws of E: "
+    "independent Bernoulli(p1) in U and Bernoulli(p0) in S, with "
     "the label-free design held fixed.",
     "- These guarantees assume independent tasks. On a panel with more than one task per "
     "template they hold only once the synthetic validation under retained template "
@@ -148,7 +148,7 @@ COVERS_BULLETS = (
     "- Ĝ equals the realized Δ per 100 exactly. The interval is for G, not for the "
     "realized Δ.",
     "- It does not cover the gain at another budget, because L changes. It does not cover "
-    "gains in true errors as opposed to reference discordance, or gains for other judges, "
+    "gains in true errors as opposed to reference contradiction, or gains for other judges, "
     "views or benchmarks.",
     "- No odds ratio is used for any interval.",
 )
@@ -236,12 +236,12 @@ class Attempt:
         429 (rate limit), 5xx, overloaded, any other non-2xx without model output
         that is not a HALT class, and a stream that ends without a final stop
         reason. Partial stream content and any response arriving after the attempt
-        was logged TRANSPORT are discarded unparsed and never logged as an outcome.
+        was logged TRANSPORT are never parsed, used or logged as an outcome.
       - HALT: the run stops. HTTP 401, 403, 404, any billing, quota, credit or
         spend-limit error (whatever its status code), request or configuration
-        errors (HTTP 400 that is not a spend or usage limit, HTTP 413, and the
-        provider's equivalent invalid-request errors), the spending cap, or an
-        operator stop. It is logged, is not a retry and is never INVALID. The cause
+        errors (HTTP 400 that is not a spend or usage limit or a provider
+        content-policy error, HTTP 413, and the provider's equivalent invalid-request
+        errors), a failed per-response check, the spending cap, or an operator stop. It is logged, is not a retry and is never INVALID. The cause
         and the correction are recorded in the run log before the slot resumes
         under the same frozen hash.
       - A correction that changes the config hash: every slot completed under the
@@ -281,9 +281,9 @@ def resolve_outcomes(outcomes: Sequence[str]) -> str:
     """The frozen retry rule on a slot's outcomes in dispatch order.
 
     Only TRANSPORT is retried, at most MAX_RETRIES times, so at most 1 + MAX_RETRIES
-    dispatches can fail in transport. HALT records carry no model output
+    dispatches can fail in transport. HALT records give the analysis no verdict
     and do not count as retries; the slot stays open after them. Any complete
-    response ends the slot and is never retried. A slot whose 1 + MAX_RETRIES
+    response that passes the per-response checks ends the slot and is never retried. A slot whose 1 + MAX_RETRIES
     transport failures are exhausted resolves to TRANSPORT_EXHAUSTED, which is
     INVALID: the plan makes a slot with no complete response after the retries
     INVALID. Nothing may follow exhaustion. Verdicts match case-insensitively
@@ -1643,7 +1643,7 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
     for i, (l, e, r) in enumerate(zip(labels, E, ref)):
         if r != USABLE and l not in ("I", "EXCL") and e != 0:
             raise ValueError(f"trajectory {i} has no usable reference label ({r}) but E = {e}; "
-                             "a task without a reference is never reference-discordant")
+                             "a task without a reference is never reference-contradicted")
     if benchmarks is not None and len(benchmarks) != len(labels):
         raise ValueError("benchmarks must give one entry per trajectory")
     keep = [i for i, l in enumerate(labels) if l != "EXCL"]
@@ -2026,7 +2026,7 @@ def _primary_lines(res: dict) -> List[str]:
     ex = res["existence"]
     out.append("EXISTENCE QUESTION: is there any positive gain?")
     if reg == "COVERAGE":
-        out.append("  H0: p1 = p0, equivalently discordance is exchangeable between U and S given "
+        out.append("  H0: p1 = p0, equivalently E is exchangeable between U and S given "
                    "the margins; H1: p1 > p0.")
         out.append(f"  Statistic: m1, the number of reference-contradicted first verdicts in U. "
                    f"p = P(M1 >= m1 | n1, n0, m_D0), one-sided Fisher exact test, which equals "
@@ -2037,7 +2037,7 @@ def _primary_lines(res: dict) -> List[str]:
     else:
         w = res["weights"]
         out.append("  H0: given E, the instability labels R are exchangeable within D = 0, so "
-                   "p_U2 = p_U1 = p_S; H1: discordance concentrates where instability-first "
+                   "p_U2 = p_U1 = p_S; H1: reference-contradicted verdicts concentrate where instability-first "
                    "review looks first.")
         out.append(f"  Statistic: Delta = w_U2 m_U2 + w_U1 m_U1 + w_S m_S with w_U2 = {_f(w['U2'])}, "
                    f"w_U1 = {_f(w['U1'])}, w_S = {_f(w['S'])}; p = P(Delta* >= Delta) under the "
@@ -2097,7 +2097,7 @@ def _primary_lines(res: dict) -> List[str]:
                 out.append(
                     "  Reconciliation: the existence test rejects, yet the interval for G contains 0. "
                     "The two use different tests on purpose. Fisher's test conditions on the number "
-                    "of discordant agreeing verdicts; the unconditional interval takes the worst case "
+                    "of reference-contradicted agreeing verdicts; the unconditional interval takes the worst case "
                     f"over the unknown stable rate p0, and {why}. Existence is decided by Fisher's p "
                     "alone; the interval only sizes the gain.")
             else:
@@ -2117,7 +2117,7 @@ def _primary_lines(res: dict) -> List[str]:
         out.append(f"  APPROXIMATE Jeffreys-smoothed parametric bootstrap interval for G_partial: "
                    f"[{_f(b['lower'])}, {_f(b['upper'])}] per 100 (B = {b['B']}, seed {b['seed']})")
         out.append("  What it covers, approximately: G_partial = (100/N) Σ_j w_j n_j p_j, the "
-                   "expected Delta per 100 under independent binomial discordance in U2, U1 and S "
+                   "expected Delta per 100 under independent binomial E in U2, U1 and S "
                    "for this design. Its coverage is not guaranteed; the synthetic checks give "
                    "informational Monte Carlo coverage.")
         out.append("  No threshold claim is made in either direction in this regime.")
@@ -2414,7 +2414,7 @@ def panel_report(panel: dict) -> str:
     if prov is not None:
         a1 = prov["by_slot"]["A1"]
         cats = ", ".join(f"{k.split(':', 1)[1]} {v}" for k, v in sorted(a1.items()) if k.startswith("invalid:"))
-        out.append(f"  A1 is the first complete response of slot (i, A, 1) under config hash "
+        out.append(f"  A1 is the first complete response of slot (i, A, 1) that passes the per-response checks, under config hash "
                    f"{prov['config_hash']}; it is never replaced by a repeat or a later call.")
         out.append(f"  A1 slots: {a1.get('slots', 0)}; slots that needed transport retries: "
                    f"{a1.get('slots_with_retries', 0)} ({a1.get('transport_retries', 0)} retries in total); "
@@ -2430,7 +2430,7 @@ def panel_report(panel: dict) -> str:
                    f"(a payload-keyed response cache would repeat them).")
     else:
         out.append("  Not supplied: resolved slots were passed without the attempt log. The plan's rule "
-                   "is that A1 is the first complete response of slot (i, A, 1) and is never replaced.")
+                   "is that A1 is the first complete response of slot (i, A, 1) that passes the per-response checks, and is never replaced.")
     out.append("")
     out.append(report(prim))
     out.append("")

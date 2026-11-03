@@ -641,7 +641,7 @@ class TestReporting(unittest.TestCase):
         panel = sap.analyze_panel(res["slots"], E, ids=ids, benchmarks=bench, templates=tmpl,
                                   provenance=res["provenance"], seed=20260929)
         txt = sap.panel_report(panel)
-        for needle in ("A1 is the first complete response of slot (i, A, 1) under config hash cfg-7f3a",
+        for needle in ("A1 is the first complete response of slot (i, A, 1) that passes the per-response checks, under config hash cfg-7f3a",
                        "H0: p1 = p0", "Statistic: m1", "P(M1 >= m1 | n1, n0, m_D0)",
                        "H0_thr: δ ≤ δ_m (G ≤ m)", "Statistic: Z(d)", "Fragility:",
                        "What the interval covers", "Poisson-binomial",
