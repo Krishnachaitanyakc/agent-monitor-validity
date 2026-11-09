@@ -67,7 +67,8 @@ def build_table(mapping: list, panel) -> list:
     """The table's rows, sorted by task ID (see the module docstring)."""
     by_id = _indexed(mapping, panel)
     held = panel_templates(by_id, panel)
-    pool = [r for r in by_id.values() if r["split"] == "dev" and r["benchmark"] != NOT_IN_THE_POOL and not r["image_goal"]]
+    pool = [r for r in by_id.values()
+            if r["split"] == "dev" and r["benchmark"] != NOT_IN_THE_POOL and not r["image_goal"]]
     return [{"task_id": r["task_id"], "benchmark": r["benchmark"].split("_")[0],
              "template_overlaps_panel": held[r["cluster_key"]] > 0, "family": r["cluster_key"]}
             for r in sorted(pool, key=lambda r: r["task_id"])]

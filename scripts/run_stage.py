@@ -27,17 +27,17 @@ and which fake mode takes when given: each trace's normalized task ID must be in
 stage's list (P1 in p1, P2 in p2, P3 in p3), P2 takes a task of p1 only when the rubric
 differs from the one P1 recorded, no panel task may be one of the allocation's
 development tasks, drawn or not, and stage.json records the allocation's SHA-256. EVAL
-in paid mode loads only records of the test split. EVAL refuses a configuration hash other than
-the one P3 ran under, unless --config-change-note names a non-empty file declaring the
-change, which stage.json keeps. --b-model picks judge B's model, gpt-6-sol or its first
-fallback; it is part of the configuration hash, so a stage resumes only under the model
-it started with. In the evaluation, a trajectory does not start, with a reconcile_due
-halt, once the oldest call that no passing reconciliation follows is more than 23 hours
-old (a single call is refused at 24 hours), and EVAL's report is complete only after a
-passing reconciliation that follows its last call: reconcile, then run the same command
-again to write it. A pilot stage records an ineligible case and goes on. Eligibility is
-settled before the panel is frozen, so in EVAL an ineligible task halts the stage, is not
-counted as ended and does not change N, and a note does not drop it.
+in paid mode loads only records of the test split. EVAL refuses a configuration hash
+other than the one P3 ran under, unless --config-change-note names a non-empty file
+declaring the change, which stage.json keeps. --b-model picks judge B's model, gpt-6-sol
+or its first fallback; it is part of the configuration hash, so a stage resumes only
+under the model it started with. In the evaluation, a trajectory does not start, with a
+reconcile_due halt, once the oldest call that no passing reconciliation follows is more
+than 23 hours old (a single call is refused at 24 hours), and EVAL's report is complete
+only after a passing reconciliation that follows its last call: reconcile, then run the
+same command again to write it. A pilot stage records an ineligible case and goes on.
+Eligibility is settled before the panel is frozen, so in EVAL an ineligible task halts
+the stage, is not counted as ended and does not change N, and a note does not drop it.
 
 **Transport.** With none of --paid, --confirm-paid-calls and --approval-note, only the
 fake transport runs: every socket connection is refused, no API key is read, and

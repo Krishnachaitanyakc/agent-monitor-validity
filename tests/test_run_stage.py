@@ -643,7 +643,8 @@ class TestAllocation(RunnerCase):
         allocation = {"p1": [], "development": []}
         for bad in ("visualwebarena.resized.118", "", " webarena.344", "webarena.344 ", "WEBARENA.344", 7):
             for stage in ("P1", "EVAL"):
-                with self.subTest(bad=bad, stage=stage), self.assertRaisesRegex(RS.StageRefused, "no normalized task ID"):
+                with self.subTest(bad=bad, stage=stage), \
+                        self.assertRaisesRegex(RS.StageRefused, "no normalized task ID"):
                     RS.check_allocation(stage, [self.p1[0]._replace(task_id=bad)], allocation)
 
     def test_a_well_formed_id_passes_the_form_check(self):
@@ -719,8 +720,8 @@ class TestAllocation(RunnerCase):
         https = StandInHttps()
         led = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid")
         try:
-            RS.run_stage("P1", self.root, its or [self.p1[0]._replace(task_id=DRAW_P1[0])], mode="paid", transport=https,
-                         ledger=led, read_images=lambda e: e, workspace="w", openai_project="p",
+            RS.run_stage("P1", self.root, its or [self.p1[0]._replace(task_id=DRAW_P1[0])], mode="paid",
+                         transport=https, ledger=led, read_images=lambda e: e, workspace="w", openai_project="p",
                          counter=D.HttpsTokenCounter(https, "w"), allocation=allocation, allocation_sha256=sha256)
         finally:
             led.close()
@@ -1345,8 +1346,8 @@ class TestEval(RunnerCase):
     def under(self, allocation, **change):
         """A manifest frozen under the given allocation file."""
         sha256 = json.loads(Path(allocation).read_text())["sha256"]
-        return self.write_manifest(allocation_sha256=sha256, template_exclusion=dict(self.EXCLUSION, allocation_sha256=sha256),
-                                   **change)
+        return self.write_manifest(allocation_sha256=sha256,
+                                   template_exclusion=dict(self.EXCLUSION, allocation_sha256=sha256), **change)
 
     def write_manifest(self, **change):
         m = {"kind": "panel-manifest", "frozen": True, "freeze_tag": "freeze-1", "config_sha256": R.config_sha256(),

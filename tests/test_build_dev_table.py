@@ -17,7 +17,8 @@ import draw_allocation as DA  # noqa: E402
 
 
 def row(task_id, split, benchmark, template, image_goal=False):
-    return {"task_id": task_id, "split": split, "benchmark": benchmark, "cluster_key": template, "image_goal": image_goal}
+    return {"task_id": task_id, "split": split, "benchmark": benchmark, "cluster_key": template,
+            "image_goal": image_goal}
 
 
 MAPPING = [
@@ -121,7 +122,8 @@ class TestCommands(unittest.TestCase):
         (self.counts / B.ELIGIBLE_FILE).write_text(json.dumps({"eligible_task_ids_after": panel}))
 
     def run_tool(self, *args):
-        return subprocess.run([sys.executable, str(REPO / "scripts/build_dev_table.py"), *args], capture_output=True, text=True)
+        return subprocess.run([sys.executable, str(REPO / "scripts/build_dev_table.py"), *args],
+                              capture_output=True, text=True)
 
     def run_table(self, out):
         return self.run_tool("table", "--counts", str(self.counts), "--out", str(out))
