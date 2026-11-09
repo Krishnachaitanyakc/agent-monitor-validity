@@ -228,7 +228,7 @@ class TestDesignAndReviewCount(unittest.TestCase):
         slots = [dict(slot("S"), **both), dict(slot("G1"), **both), dict(slot("S"))]
         txt = sap.describe_report(sap.describe_panel(slots, Y=["Successful"] * 3), EXPOSURE)
         lines = txt.split("\n")
-        self.assertEqual(txt.count("R_unobserved"), 1)
+        self.assertEqual(txt.replace("R_unobserved treated as R = 1", "").count("R_unobserved"), 1)
         self.assertIn("  agreeing groups: U2 = 0, U1 = 0, S = 2", lines)
         self.assertIn("  valid first verdicts with both repeats invalid, disagreeing tasks included (R_unobserved): 2", lines)
         self.assertIn("  agreeing items with both repeats INVALID (R set to 0): 1", lines)
@@ -457,6 +457,116 @@ class TestReadingLines(unittest.TestCase):
             self.assertEqual((two["A2"], two["A3"]), (reference, reference))
             one = slot("U1", a1)
             self.assertEqual(sorted((one["A1"], one["A2"], one["A3"])).count(a1), 2)
+
+
+def panel_with_invalid_slots(seed, N, shape):
+    """A random synthetic panel with invalid slots and its E, from a seeded generator."""
+    rng = np.random.default_rng(seed)
+    p_disagree, p_flip, p_invalid = shape
+    slots, E = [], []
+    for _ in range(N):
+        a1 = str(rng.choice(sap.VERDICTS))
+        outcome = lambda agree: ("MALFORMED" if rng.random() < p_invalid else (a1 if agree else OTHER[a1]))
+        s = {"A1": "REFUSAL" if rng.random() < p_invalid else a1, "A2": outcome(rng.random() >= p_flip),
+             "A3": outcome(rng.random() >= p_flip), "B1": outcome(rng.random() >= p_disagree)}
+        slots.append(s)
+        E.append(int(sap.is_valid(s["A1"]) and rng.random() < 0.4))
+    return slots, E
+
+
+class TestInvalidOutcomeVariants(unittest.TestCase):
+    def test_hand_computed_on_the_mixed_panel(self):
+        # s = 2 and N = 10 throughout. See the comments of mixed_panel for each row.
+        slots, Y, _ = mixed_panel()
+        d = sap.describe_panel(slots, Y=Y)
+        F = Fraction
+        self.assertEqual(d["invalid_outcome_variants"], [
+            {"name": "B1 INVALID treated as agreement (D = 0) instead of D = 1",
+             "difference": F(1, 7), "per_100_panel": F(10, 7)},                          # 1 minus 2/7 of 3
+            {"name": "R_unobserved treated as R = 1",
+             "difference": F(1, 3), "per_100_panel": F(10, 3)},                          # 2 minus 1 + 1/3 of 2
+            {"name": "every trajectory with any INVALID slot excluded",
+             "difference": F(1, 3), "per_100_panel": F(10, 3)},                          # 1 minus 2/3 of 1
+            {"name": "one INVALID repeat and no observed flip treated as R = 1",
+             "difference": F(7, 12), "per_100_panel": F(35, 6)}])                        # 9/4 minus 5/3
+
+    def test_the_report_prints_each_variant(self):
+        slots, Y, _ = mixed_panel()
+        lines = sap.describe_report(sap.describe_panel(slots, Y=Y), EXPOSURE).split("\n")
+        start = lines.index("INVALID-OUTCOME VARIANTS: instability-first minus disagreement-first expected capture")
+        self.assertEqual(lines[start + 1:start + 6], [
+            "  s is held at 2, capped at each variant's n_D0, and N = 10 is held as the per-100 denominator.",
+            "  B1 INVALID treated as agreement (D = 0) instead of D = 1: 1/7 (0.1429) verdicts; 10/7 (1.4286) per 100 panel tasks",
+            "  R_unobserved treated as R = 1: 1/3 (0.3333) verdicts; 10/3 (3.3333) per 100 panel tasks",
+            "  every trajectory with any INVALID slot excluded: 1/3 (0.3333) verdicts; 10/3 (3.3333) per 100 panel tasks",
+            "  one INVALID repeat and no observed flip treated as R = 1: 7/12 (0.5833) verdicts; 35/6 (5.8333) per 100 panel tasks"])
+
+    def test_they_match_the_population_paths_own_sensitivity_gain(self):
+        seen = set()
+        for seed, N, shape in ((1, 20, (0.2, 0.2, 0.08)), (2, 26, (0.1, 0.5, 0.12)), (3, 16, (0.3, 0.1, 0.1)),
+                               (4, 30, (0.15, 0.35, 0.05)), (5, 12, (0.4, 0.3, 0.2)), (6, 24, (0.2, 0.6, 0.15))):
+            slots, E = panel_with_invalid_slots(seed, N, shape)
+            d = sap.describe_panel(slots, E)
+            seen.add(d["regime"])
+            runs = sap.analyze_with_sensitivities(slots, E, path=sap.PATH_POPULATION, boot_B=20, fragility=False)
+            self.assertEqual(len(runs), 5)
+            for (name, r), v in zip(runs[1:], d["invalid_outcome_variants"]):
+                self.assertEqual(name, "sensitivity: " + v["name"], seed)
+                self.assertEqual(v["difference"], r["captures"]["Delta"], (seed, name))
+                self.assertAlmostEqual(float(v["per_100_panel"]), r["Delta_per100"], places=12, msg=(seed, name))
+        self.assertTrue(seen & {"COVERAGE", "PARTIAL"})
+
+    def test_each_rule_is_the_same_as_a_design_built_by_hand(self):
+        for seed in range(30):
+            slots, E = panel_with_invalid_slots(100 + seed, 30, (0.2, 0.3, 0.1))
+            d = sap.describe_panel(slots, E)
+            for (name, opts), v in zip(sap.SENSITIVITY_VARIANTS, d["invalid_outcome_variants"]):
+                labels = list(sap.derive_label_free(slots, **opts)["stratum"])
+                kept = [(l, e) for l, e in zip(labels, E) if l != "EXCL"]
+                n_D0 = sum(l in ("U2", "U1", "S") for l, _ in kept)
+                s, n_G1 = min(d["s"], n_D0), sum(l == "G1" for l, _ in kept)
+                m = {j: sum(e for l, e in kept if l == j) for j in ("U2", "U1", "S")}
+                n = {j: sum(l == j for l, _ in kept) for j in ("U2", "U1", "S")}
+                left, gain = s, Fraction(0)
+                for j in ("U2", "U1", "S"):
+                    take = min(n[j], left)
+                    left -= take
+                    gain += m[j] * (Fraction(take, n[j]) if n[j] else 0)
+                gain -= sum(m.values()) * (Fraction(s, n_D0) if n_D0 else 0)
+                self.assertEqual(v["difference"], gain, (seed, name))
+                self.assertEqual(v["per_100_panel"], gain * 100 / 30, (seed, name))
+
+    def test_s_is_capped_at_the_new_agreeing_count_and_N_stays(self):
+        # Primary: N = 20, s = 3, n_D0 = 20. Excluding every task with an invalid slot leaves
+        # two agreeing tasks: the cap makes both policies review them all, so the difference is 0.
+        bad = dict(slot("U1"), A3="MALFORMED")
+        slots = [bad] * 18 + [slot("U1"), slot("S")]
+        E = [0] * 18 + [1, 0]
+        d = sap.describe_panel(slots, E)
+        self.assertEqual((d["s"], d["N"]), (3, 20))
+        by_name = {v["name"]: v for v in d["invalid_outcome_variants"]}
+        self.assertEqual(by_name["every trajectory with any INVALID slot excluded"]["difference"], 0)
+        # Six tasks kept of 20, s = 3 of 6: the per-100 denominator stays 20, not 6.
+        slots = [bad] * 14 + [slot("U1")] * 2 + [slot("S")] * 4
+        E = [0] * 14 + [1, 1] + [0] * 4
+        d = sap.describe_panel(slots, E)
+        v = {x["name"]: x for x in d["invalid_outcome_variants"]}["every trajectory with any INVALID slot excluded"]
+        self.assertEqual(v["difference"], 1)                           # 2 of 2 minus 3/6 of 2
+        self.assertEqual(v["per_100_panel"], 5)
+
+    def test_an_empty_panel_is_not_defined_per_100(self):
+        d = sap.describe_panel([], Y=[])
+        self.assertTrue(all(v["per_100_panel"] is None for v in d["invalid_outcome_variants"]))
+        self.assertIn("  R_unobserved treated as R = 1: 0 (0.0000) verdicts; not defined per 100 panel tasks",
+                      sap.describe_report(d, EXPOSURE).split("\n"))
+
+    def test_the_section_carries_no_test_interval_or_threshold(self):
+        slots, Y, _ = mixed_panel()
+        lines = sap.describe_report(sap.describe_panel(slots, Y=Y), EXPOSURE).split("\n")
+        start = lines.index("INVALID-OUTCOME VARIANTS: instability-first minus disagreement-first expected capture")
+        section = "\n".join(lines[start:lines.index("", start)]).lower()
+        for word in ("reference", "threshold", "test", "interval", "reachable", "p =", "2 per 100"):
+            self.assertNotIn(word, section, word)
 
 
 class TestGainsAndReference(unittest.TestCase):

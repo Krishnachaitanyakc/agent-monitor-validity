@@ -2693,6 +2693,25 @@ def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
             "extra_per_extra_verdict": extra / gain if gain > 0 else None}
 
 
+def invalid_outcome_variants(slots: Sequence[Mapping[str, str]], E: Sequence[int], s: int, N: int) -> List[dict]:
+    """The difference in expected capture under each invalid-outcome rule of plan section 9 [labels].
+
+    Each rule of SENSITIVITY_VARIANTS reclassifies the trajectories with
+    derive_label_free. s is held at its primary value, capped at the variant's n_D0,
+    and N is held as the per-100 denominator. Each variant gives only the difference
+    between instability-first and disagreement-first, in verdicts and per 100 panel
+    tasks.
+    """
+    out = []
+    for name, opts in SENSITIVITY_VARIANTS:
+        labels = list(derive_label_free(slots, **opts)["stratum"])
+        design = Design.from_labels(labels, s_override=s)
+        counts = {j: sum(e for l, e in zip(labels, E) if l == j) for j in ("G1", "U2", "U1", "S")}
+        difference = expected_captures(design, counts)["Delta"]
+        out.append({"name": name.split(": ", 1)[1], "difference": difference, "per_100_panel": _per_100(difference, N)})
+    return out
+
+
 def lock_quantities(design: Design) -> dict:
     """What the gain on this panel can do, without reading a label.
 
@@ -2764,7 +2783,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     is the same gain per 100 tasks with a usable label. A rate with an empty
     denominator is None, not defined and never zero. lock holds the label-free
     quantities committed at the prediction lock (lock_quantities), and result_sentences
-    the plan's sentences for this result (result_sentences). The observed gain over
+    the plan's sentences for this result (result_sentences). invalid_outcome_variants
+    holds the difference in expected capture under each rule of plan section 9. The
+    observed gain over
     disagreement-first review is set against the practical reference of 2 per 100
     panel tasks only as observed at or above it, or below it. contradiction gives how
     often each judge contradicts the references on its own valid tasks with a usable
@@ -2845,6 +2866,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                                                   "per_100_panel": _per_100(dis_over_rand, design.N)}},
             "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y),
                                                    "over_random": _per_100(over_rand, N_Y)},
+            "invalid_outcome_variants": invalid_outcome_variants(slots, E, design.s, design.N),
             "practical_reference": {"per_100": MATERIAL_M, "status": status},
             "contradiction": {"A1": dict(_rate(M, n_a1_usable), invalid_outputs=n_a1_invalid),
                               "B1": validity["all_usable"]["B1"]["contradiction"] if validity is not None else None},
@@ -2919,6 +2941,16 @@ def _contradiction_lines(c: Mapping[str, Optional[dict]], statuses_given: bool) 
     else:
         out.append(f"  B1: {_rate_text(c['B1'], f'tasks with a valid B1 and {where}')}; "
                    f"invalid outputs among {tasks}: {c['B1']['invalid_outputs']}")
+    return out
+
+
+def _variant_lines(d: Mapping[str, object]) -> List[str]:
+    """Report lines of the invalid-outcome variants."""
+    out = ["INVALID-OUTCOME VARIANTS: instability-first minus disagreement-first expected capture",
+           f"  s is held at {d['s']}, capped at each variant's n_D0, and N = {d['N']} is held as the per-100 denominator."]
+    for v in d["invalid_outcome_variants"]:
+        out.append(f"  {v['name']}: {_exact_text(v['difference'])} verdicts; "
+                   f"{_exact_text(v['per_100_panel'])} per 100 panel tasks")
     return out
 
 
@@ -3041,6 +3073,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"{_exact_text(g['over_disagreement']['per_100_panel'])}; "
             f"{pr['status'] if pr['status'] is not None else 'no comparison is defined'}.",
             ""]
+    out += _variant_lines(d) + [""]
     out += _case_lines(d["cases"])
     out.append("")
     out += _validity_lines(d["validity"])
