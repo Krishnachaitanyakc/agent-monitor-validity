@@ -1,10 +1,10 @@
 """Rubric v0: the text both judges receive, as system text (A) or developer text (B).
 
 It is ARB's success question plus the protocol's five rules, and the instruction to
-answer only in schema S. This version is a DRAFT. It is frozen by hash before prompt
-development, and any change after that gets a new version and a new hash. The rubric
-names the output fields but asks for a short explanation, not for step-by-step
-reasoning, since a field that asks a model to reproduce its reasoning can draw a refusal.
+answer only in schema S. This version is a DRAFT. It is frozen by hash before P3, and
+any change after that gets a new version and a new hash. The rubric names the output
+fields but asks for a short explanation, not for step-by-step reasoning, since a field
+that asks a model to reproduce its reasoning can draw a refusal.
 """
 
 import hashlib
