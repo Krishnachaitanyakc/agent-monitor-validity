@@ -2785,11 +2785,26 @@ def lock_quantities(design: Design) -> dict:
             "x_per_100": per_100 * max(weight[j] for j in UNSTABLE_GROUPS if size[j] > 0)}
 
 
+def _gain_text(g: Fraction) -> str:
+    """A positive gain to 4 decimals, or with more digits when 4 would contradict the comparison.
+
+    A gain just under the practical reference must not read as 2.0000 beside the words
+    below the practical reference, nor a very small gain as 0.0000 more verdicts. Exact.
+    """
+    text, digits = _f(g), 4
+    while Fraction(text) <= 0 or g < MATERIAL_M <= Fraction(text):
+        digits += 1
+        scaled = round(g * 10 ** digits)
+        text = f"{scaled // 10 ** digits}.{scaled % 10 ** digits:0{digits}d}"
+    return text
+
+
 def result_sentences(regime: str, g_hat: Optional[Fraction], x: Fraction) -> List[str]:
     """The sentences of plan section 8 for one result, word for word.
 
     g_hat is the gain per 100 panel tasks and x the change in it from one unstable
-    task (lock_quantities). Both are printed as decimals. A degenerate regime has its
+    task (lock_quantities). Both are printed as decimals, the gain with as many digits
+    as keep it from reading as the reference or as zero. A degenerate regime has its
     own sentence; otherwise the sentence follows g_hat, compared exactly with 0 and with
     the practical reference of 2 per 100, and is followed by the sentence on x. Every
     case ends with the closing sentence.
@@ -2799,7 +2814,7 @@ def result_sentences(regime: str, g_hat: Optional[Fraction], x: Fraction) -> Lis
     if g_hat <= 0:
         first = RESULT_NOT_MORE_TEXT
     else:
-        first = RESULT_MORE_TEXT.format(g=_f(g_hat), side="at or above" if g_hat >= MATERIAL_M else "below")
+        first = RESULT_MORE_TEXT.format(g=_gain_text(g_hat), side="at or above" if g_hat >= MATERIAL_M else "below")
     return [first, RESULT_ONE_TASK_TEXT.format(x=_f(x)), RESULT_CLOSING_TEXT]
 
 
@@ -2962,6 +2977,11 @@ def _template_lines(mult: Optional[Mapping[str, object]]) -> List[str]:
 def _exact_text(x: Optional[Fraction]) -> str:
     """An exact fraction with its decimal, or 'not defined'."""
     return NOT_DEFINED_TEXT if x is None else f"{x} ({_f(x)})"
+
+
+def _reference_gain_text(x: Optional[Fraction]) -> str:
+    """The gain set against the practical reference, its decimal agreeing with the comparison."""
+    return _exact_text(x) if x is None or x <= 0 else f"{x} ({_gain_text(x)})"
 
 
 def _rate_text(r: Mapping[str, object], what: str) -> str:
@@ -3152,7 +3172,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     pr = d["practical_reference"]
     out += ["", f"PRACTICAL REFERENCE: {pr['per_100']} per 100 panel tasks, descriptive only",
             f"  gain over disagreement-first per 100 panel tasks: "
-            f"{_exact_text(g['over_disagreement']['per_100_panel'])}; "
+            f"{_reference_gain_text(g['over_disagreement']['per_100_panel'])}; "
             f"{pr['status'] if pr['status'] is not None else 'no comparison is defined'}.",
             ""]
     out += _variant_lines(d) + [""]

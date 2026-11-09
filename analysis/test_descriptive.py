@@ -404,6 +404,16 @@ class TestResultSentences(unittest.TestCase):
               "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
               "per 100.",
               "One unstable task changes this number by 0.4118 per 100.", CLOSING]),
+            ("PARTIAL", F(1, 2), F(1, 3),
+             ["On this panel instability-first selected 0.5000 more reference-contradicted first verdicts per 100 "
+              "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
+              "per 100.",
+              "One unstable task changes this number by 0.3333 per 100.", CLOSING]),
+            ("COVERAGE", F(1), F(1, 3),
+             ["On this panel instability-first selected 1.0000 more reference-contradicted first verdicts per 100 "
+              "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
+              "per 100.",
+              "One unstable task changes this number by 0.3333 per 100.", CLOSING]),
             ("PARTIAL", F(199, 100), F(1, 3),
              ["On this panel instability-first selected 1.9900 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
@@ -422,6 +432,28 @@ class TestResultSentences(unittest.TestCase):
         ]
         for regime, g, x, want in cases:
             self.assertEqual(sap.result_sentences(regime, g, x), want, (regime, g))
+
+    def test_a_gain_next_to_the_reference_or_to_zero_keeps_enough_digits(self):
+        F = Fraction
+        for g, shown, side in ((F(89375, 44688), "1.99998", "below"), (F(19999, 10000), "1.9999", "below"),
+                               (F(1, 100000), "0.00001", "below"), (F(2), "2.0000", "at or above"),
+                               (F(20001, 10000), "2.0001", "at or above")):
+            first = sap.result_sentences("COVERAGE", g, F(1, 2))[0]
+            self.assertIn(f"selected {shown} more", first, g)
+            self.assertIn(f"{side} the practical reference", first, g)
+
+    def test_the_digits_never_reach_the_reference_or_zero(self):
+        for k in range(1, 40):
+            self.assertLess(Fraction(sap._gain_text(2 - Fraction(1, 10 ** k))), 2, k)
+            self.assertGreater(Fraction(sap._gain_text(Fraction(1, 10 ** k))), 0, k)
+
+    def test_the_report_does_not_round_a_gain_up_to_the_reference(self):
+        d, block = self.report_block((0, 0, 32, 0, 304), E_for(U2=(32, 8), S=(304, 1)))
+        self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], Fraction(89375, 44688))
+        self.assertIn("selected 1.99998 more", block[0])
+        self.assertIn("below the practical reference", block[0])
+        self.assertIn("  gain over disagreement-first per 100 panel tasks: 89375/44688 (1.99998); observed below the reference.",
+                      sap.describe_report(d, EXPOSURE).split("\n"))
 
     def test_a_degenerate_panel_uses_its_own_sentence_whatever_the_gain(self):
         self.assertEqual(sap.result_sentences("DEGENERATE-CAP", None, Fraction(0))[0],
