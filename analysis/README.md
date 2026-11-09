@@ -17,7 +17,7 @@ A released primary label of Successful or Unsuccessful, in any letter case, is u
 
 ## The primary path
 
-`analyze_panel` runs this path unless it is given `path="population_inference"`. It calls `describe_panel`, which takes the resolved slots and either the released labels `Y` or `E` with its reference statuses, and, when given, the benchmark names, the costs from the spending ledger, the attempt log's provenance, the task ids and the seed of the cases. `describe_report`, or `panel_report` on its result, prints the report. The report refuses to run without a prior exposure statement passed as an argument, prints the fixed scope sentence, names the panel as a retrospective evaluation panel with documented prior exposure, and opens with a RESULT block: the sentences of plan section 8 for this result, word for word, from `result_sentences`.
+`analyze_panel` runs this path unless it is given `path="population_inference"`. It calls `describe_panel`, which takes the resolved slots and either the released labels `Y` or `E` with its reference statuses, and, when given, the benchmark names, the costs from the spending ledger, the attempt log's provenance and the task ids. `case_seed`, the seed of the cases in the freeze list, is a required keyword, so a forgotten seed stops the analysis. `describe_report`, or `panel_report` on its result, prints the report. The report refuses to run without a prior exposure statement passed as an argument, prints the fixed scope sentence, names the panel as a retrospective evaluation panel with documented prior exposure, and opens with a RESULT block: the sentences of plan section 8 for this result, word for word, from `result_sentences`.
 
 In every regime, degenerate ones included, it gives:
 

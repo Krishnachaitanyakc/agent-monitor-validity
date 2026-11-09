@@ -111,6 +111,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import numbers
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from fractions import Fraction
@@ -2763,7 +2764,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                    benchmarks: Optional[Sequence[str]] = None,
                    costs: Optional[Mapping[str, object]] = None,
                    provenance: Optional[dict] = None,
-                   ids: Optional[Sequence[str]] = None, case_seed: int = 0) -> dict:
+                   ids: Optional[Sequence[str]] = None,
+                   case_seed: int) -> dict:
     """The primary result: a descriptive audit of the frozen panel [labels].
 
     Give the released primary labels Y, or E with its reference statuses as
@@ -2773,6 +2775,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     the label coverage are not assessed, as in analyze(). costs comes from the
     spending ledger (inference_costs) and provenance from resolve_panel. ids names
     the tasks, and it, the benchmarks and case_seed fix the cases (select_cases).
+    case_seed is the seed in the freeze list. It has no default, so a forgotten seed
+    stops the analysis instead of choosing the cases with seed 0.
 
     The conclusions apply to these tasks and these realized judge calls. Every number
     is computed exactly in the regime at hand, degenerate ones included: the expected
@@ -2797,6 +2801,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
         raise ValueError("give either E or the released labels Y, and not both")
     if Y is not None and reference is not None:
         raise ValueError("the released labels Y already give the reference statuses")
+    if isinstance(case_seed, bool) or not isinstance(case_seed, numbers.Integral):
+        raise ValueError("case_seed must be the integer seed in the freeze list")
     slots = list(slots)
     n = len(slots)
     if benchmarks is not None and len(benchmarks) != n:

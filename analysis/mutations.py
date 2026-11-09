@@ -756,6 +756,15 @@ MUTATIONS = [
     ("add a second usable-label number to the secondary result",
      '{"over_disagreement": _per_100(over_dis, N_Y)},',
      '{"over_disagreement": _per_100(over_dis, N_Y), "over_random": _per_100(over_rand, N_Y)},'),
+    ("let a forgotten case seed fall back to 0",
+     "                   case_seed: int) -> dict:\n",
+     "                   case_seed: int = 0) -> dict:\n"),
+    ("accept a case seed that is not an integer",
+     "    if isinstance(case_seed, bool) or not isinstance(case_seed, numbers.Integral):\n",
+     "    if False:\n"),
+    ("accept True as a case seed",
+     "    if isinstance(case_seed, bool) or not isinstance(case_seed, numbers.Integral):\n",
+     "    if not isinstance(case_seed, numbers.Integral):\n"),
 ]
 
 
