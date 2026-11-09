@@ -426,6 +426,39 @@ class TestResultSentences(unittest.TestCase):
         self.assertEqual(d["result_sentences"][0], "No agreeing verdict was unstable on this panel, so instability added no review candidates.")
 
 
+class TestReadingLines(unittest.TestCase):
+    U2 = "  A contradicted U2 verdict has both repeats matching the released reference."
+    U1 = "  A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
+    GAIN = "  Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
+
+    def test_word_for_word_in_their_places_in_every_regime(self):
+        seen = set()
+        for d in report_panels():
+            seen.add(d["regime"])
+            lines = sap.describe_report(d, EXPOSURE).split("\n")
+            start = lines.index("REFERENCE-CONTRADICTED FIRST VERDICTS")
+            self.assertTrue(lines[start + 1].startswith("  M = "))
+            self.assertEqual(lines[start + 2:start + 4], [self.U2, self.U1])
+            self.assertEqual(lines[start + 4], "")
+            check = next(i for i, x in enumerate(lines) if x.startswith("  check, disagreement-first minus random"))
+            self.assertEqual(lines[check + 1:check + 3], [self.GAIN, ""])
+        self.assertEqual(seen, REGIMES)
+
+    def test_each_is_printed_once_and_states_no_number(self):
+        txt = sap.describe_report(next(report_panels()), EXPOSURE)
+        for line in (self.U2, self.U1, self.GAIN):
+            self.assertEqual(txt.count(line), 1, line)
+            self.assertIsNone(re.search(r"\d", re.sub(r"\b(U2|U1|A1)\b", "", line)), line)
+
+    def test_what_they_say_of_a_contradicted_verdict_holds(self):
+        for a1 in ("success", "failure"):
+            reference = OTHER[a1]                                   # contradicted: the released label differs from A1
+            two = slot("U2", a1)
+            self.assertEqual((two["A2"], two["A3"]), (reference, reference))
+            one = slot("U1", a1)
+            self.assertEqual(sorted((one["A1"], one["A2"], one["A3"])).count(a1), 2)
+
+
 class TestGainsAndReference(unittest.TestCase):
     def test_hand_computed_panel(self):
         # K = 60. Random: 60/200 of M = 25. Disagreement-first: 11 + 30/170 of 14.

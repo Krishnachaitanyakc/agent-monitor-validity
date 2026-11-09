@@ -2448,6 +2448,10 @@ RESULT_MORE_TEXT = ("On this panel instability-first selected {g} more reference
 RESULT_ONE_TASK_TEXT = "One unstable task changes this number by {x} per 100."
 RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge calls and carries no population "
                        "confidence or significance claim.")
+# How to read the counts and the gain, plan section 8, word for word.
+READING_U2_TEXT = "A contradicted U2 verdict has both repeats matching the released reference."
+READING_U1_TEXT = "A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
+READING_GAIN_TEXT = "Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
 UNSTABLE_GROUPS = ("U2", "U1")
 # The review cases of plan section 11. The cells in their fixed order, each with the plan's
 # definition, number of cases and what the cell shows; a cell's position names its generator.
@@ -3007,6 +3011,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     out += ["", "REFERENCE-CONTRADICTED FIRST VERDICTS",
             f"  M = {d['M']}: disagreement m_G1 = {mc['G1']}; unstable agreeing m1 = {d['m1']} "
             f"(m_U2 = {mc['U2']}, m_U1 = {mc['U1']}); stable agreeing m0 = {d['m0']}",
+            "  " + READING_U2_TEXT,
+            "  " + READING_U1_TEXT,
             "", "EXPECTED CAPTURE at the same review count, exact over each policy's random choices",
             "  policy | expected capture | share of M"]
     for p in POLICY_ORDER:
@@ -3019,6 +3025,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     check = g["disagreement_over_random"]
     out.append(f"  check, disagreement-first minus random: {_exact_text(check['verdicts'])} verdicts; "
                f"{_exact_text(check['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
+    out.append("  " + READING_GAIN_TEXT)
     out.append("")
     if d["secondary"] is None:
         out += ["SECONDARY RESULT: the same gain per 100 tasks with a usable label",

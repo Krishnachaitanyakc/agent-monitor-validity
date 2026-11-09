@@ -25,6 +25,7 @@ In every regime, degenerate ones included, it gives:
 - N, n_inv, n_D1, n_D0, s, K and that K is equal across the three policies; U2, U1 and S counts; R_unobserved, the valid first verdicts with both repeats invalid, disagreeing tasks included; invalid outputs by slot and category.
 - Usable, Unsure and missing counts overall, by review group and by benchmark.
 - How often each judge contradicts the released references: the count and the rate over its own valid verdicts with a usable reference, with the denominator and the number of its invalid outputs among usable-reference tasks beside it. A1's needs only `E`; B1's needs the released labels and is otherwise reported as not assessed.
+- Two fixed lines on how to read a contradicted U2 and U1 verdict, and one under the gain saying that part of any gain is built in, all in the plan's words and with no numeric benchmark.
 - M, m1 and m0; each policy's exact expected capture over its own random choices, as a fraction and a decimal, and the share of M it captures.
 - The gain of instability-first review over disagreement-first and over random review, in verdicts and per 100 panel tasks, and disagreement-first minus random on the same two scales as a check. The secondary result is the same gain per 100 tasks with a usable label, N_Y. Nothing else is computed on usable labels only.
 - The observed gain against the practical reference of 2 per 100 panel tasks, stated only as observed at or above the reference, or below it.
@@ -58,7 +59,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 216 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 222 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 
