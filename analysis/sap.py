@@ -2465,6 +2465,14 @@ RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge call
 READING_U2_TEXT = "A contradicted U2 verdict has both repeats matching the released reference."
 READING_U1_TEXT = "A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
 READING_GAIN_TEXT = "Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
+READING_INDEPENDENT_TEXT = ("With independent calls and a judge that is right more often than wrong on a task, "
+                            "contradicted verdicts are relatively more common in U2 than in U1.")
+READING_FROZEN_TEXT = "This plan freezes that direction and no numeric benchmark."
+# The limitations stated with the result, plan sections 7 and 8. Prior exposure is the statement at the top.
+LIMITATIONS_TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. "
+                    "Runs are kept as recorded: the way a run ends could influence judge accuracy, and we have "
+                    "not established that it does. Tasks that share a template and WorkArena families stay in "
+                    "the panel.")
 UNSTABLE_GROUPS = ("U2", "U1")
 # The review cases of plan section 11. The cells in their fixed order, each with the plan's
 # definition, number of cases and what the cell shows; a cell's position names its generator.
@@ -3042,7 +3050,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
            "",
            "RESULT"]
     out += ["  " + sentence for sentence in d["result_sentences"]]
-    out.append("")
+    out += ["", LIMITATIONS_TEXT, ""]
     out += _provenance_lines(d["provenance"])
     out += ["", "Label-free design",
             f"  N = {d['N']}, invalid A1 n_inv = {d['n_inv']}, valid N_V = {d['N_V']}",
@@ -3079,6 +3087,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"(m_U2 = {mc['U2']}, m_U1 = {mc['U1']}); stable agreeing m0 = {d['m0']}",
             "  " + READING_U2_TEXT,
             "  " + READING_U1_TEXT,
+            "  " + READING_INDEPENDENT_TEXT,
+            "  " + READING_FROZEN_TEXT,
             "", "EXPECTED CAPTURE at the same review count, exact over each policy's random choices",
             "  policy | expected capture | K | K/N | share of M"]
     for p in POLICY_ORDER:

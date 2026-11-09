@@ -475,6 +475,9 @@ class TestReadingLines(unittest.TestCase):
     U2 = "  A contradicted U2 verdict has both repeats matching the released reference."
     U1 = "  A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
     GAIN = "  Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
+    INDEPENDENT = ("  With independent calls and a judge that is right more often than wrong on a task, contradicted "
+                   "verdicts are relatively more common in U2 than in U1.")
+    FROZEN = "  This plan freezes that direction and no numeric benchmark."
 
     def test_word_for_word_in_their_places_in_every_regime(self):
         seen = set()
@@ -483,15 +486,15 @@ class TestReadingLines(unittest.TestCase):
             lines = sap.describe_report(d, EXPOSURE).split("\n")
             start = lines.index("REFERENCE-CONTRADICTED FIRST VERDICTS")
             self.assertTrue(lines[start + 1].startswith("  M = "))
-            self.assertEqual(lines[start + 2:start + 4], [self.U2, self.U1])
-            self.assertEqual(lines[start + 4], "")
+            self.assertEqual(lines[start + 2:start + 6], [self.U2, self.U1, self.INDEPENDENT, self.FROZEN])
+            self.assertEqual(lines[start + 6], "")
             check = next(i for i, x in enumerate(lines) if x.startswith("  check, disagreement-first minus random"))
             self.assertEqual(lines[check + 1:check + 3], [self.GAIN, ""])
         self.assertEqual(seen, REGIMES)
 
     def test_each_is_printed_once_and_states_no_number(self):
         txt = sap.describe_report(next(report_panels()), EXPOSURE)
-        for line in (self.U2, self.U1, self.GAIN):
+        for line in (self.U2, self.U1, self.GAIN, self.INDEPENDENT, self.FROZEN):
             self.assertEqual(txt.count(line), 1, line)
             self.assertIsNone(re.search(r"\d", re.sub(r"\b(U2|U1|A1)\b", "", line)), line)
 
@@ -502,6 +505,26 @@ class TestReadingLines(unittest.TestCase):
             self.assertEqual((two["A2"], two["A3"]), (reference, reference))
             one = slot("U1", a1)
             self.assertEqual(sorted((one["A1"], one["A2"], one["A3"])).count(a1), 2)
+
+
+class TestLimitations(unittest.TestCase):
+    TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. Runs are "
+            "kept as recorded: the way a run ends could influence judge accuracy, and we have not established that "
+            "it does. Tasks that share a template and WorkArena families stay in the panel.")
+
+    def test_printed_word_for_word_right_after_the_result_in_every_regime(self):
+        seen = set()
+        for d in report_panels():
+            seen.add(d["regime"])
+            lines = sap.describe_report(d, EXPOSURE).split("\n")
+            end = lines.index("", lines.index("RESULT"))
+            self.assertEqual(lines[end + 1:end + 3], [self.TEXT, ""], d["regime"])
+            self.assertEqual("\n".join(lines).count("Limitations."), 1)
+        self.assertEqual(seen, REGIMES)
+
+    def test_the_prior_exposure_statement_comes_with_them(self):
+        lines = sap.describe_report(next(report_panels()), EXPOSURE).split("\n")
+        self.assertLess(lines.index("Prior exposure statement: " + EXPOSURE), lines.index("RESULT"))
 
 
 def panel_with_invalid_slots(seed, N, shape):
