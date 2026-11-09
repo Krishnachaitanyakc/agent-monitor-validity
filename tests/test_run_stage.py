@@ -586,7 +586,7 @@ class TestAllocation(RunnerCase):
 
     def test_each_stage_runs_its_own_list_and_records_the_allocation_s_hash(self):
         led = self.led
-        for stage, its in (("P1", self.p1), ("P2", self.p1 + self.p2), ("P3", self.p3)):
+        for stage, its in (("P1", self.p1), ("P2", self.p2), ("P3", self.p3)):
             report, _ = self.stage(stage, its, led, allocation=self.allocation)
             self.assertTrue(report["complete"], stage)
             self.assertEqual(self.recorded(stage), self.sha256)
@@ -598,13 +598,34 @@ class TestAllocation(RunnerCase):
     def test_a_p2_trace_whose_task_is_not_in_p2_is_refused(self):
         self.refused("P2", self.p2 + self.p3[:1], "allocation's p2")
 
-    def test_p2_takes_p1_s_tasks_but_p3_does_not(self):
+    def test_p2_takes_p1_s_tasks_only_after_a_rubric_change_and_p3_never(self):
         led = self.led
         self.stage("P1", self.p1, led, allocation=self.allocation)
         self.reconcile(led)
-        report, _ = self.stage("P2", self.p1, led, allocation=self.allocation)
+        self.assertEqual(json.loads((self.root / "P1" / "stage.json").read_text())["rubric_sha256"], R.RUBRIC_SHA256)
+        self.refused("P2", self.p1 + self.p2, "only after a rubric change")
+        self.refused("P2", self.p1[:1], "only after a rubric change")
+        with mock.patch.object(R, "RUBRIC_SHA256", "f" * 64):
+            report, _ = self.stage("P2", self.p1 + self.p2, led, allocation=self.allocation)
         self.assertTrue(report["complete"])
+        self.assertEqual(json.loads((self.root / "P2" / "stage.json").read_text())["rubric_sha256"], "f" * 64)
         self.refused("P3", self.p1[:1], "allocation's p3")
+
+    def test_p2_takes_only_the_new_tasks_under_the_same_rubric(self):
+        self.stage("P1", self.p1, self.led, allocation=self.allocation)
+        self.reconcile(self.led)
+        report, _ = self.stage("P2", self.p2, self.led, allocation=self.allocation)
+        self.assertTrue(report["complete"])
+
+    def test_a_p1_that_recorded_no_rubric_shows_no_change(self):
+        self.stage("P1", self.p1, self.led, allocation=self.allocation)
+        self.reconcile(self.led)
+        path = self.root / "P1" / "stage.json"
+        record = json.loads(path.read_text())
+        del record["rubric_sha256"]
+        path.write_text(json.dumps(record))
+        with mock.patch.object(R, "RUBRIC_SHA256", "f" * 64):
+            self.refused("P2", self.p1, "only after a rubric change")
 
     def test_a_p3_trace_whose_task_is_not_in_p3_is_refused(self):
         self.refused("P3", self.p3 + self.p2[:1], "allocation's p3")

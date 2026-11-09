@@ -24,7 +24,8 @@ P3 and EVAL refuse a rubric whose status is not "frozen". --allocation names the
 development allocation from scripts/draw_allocation.py, which paid mode needs at every
 stage, with --allocation-sha256, its SHA-256 as recorded in the plan or the approval note,
 and which fake mode takes when given: each trace's normalized task ID must be in the
-stage's list (P1 in p1, P2 in p2, P3 in p3), no panel task may be one of the allocation's
+stage's list (P1 in p1, P2 in p2, P3 in p3), P2 takes a task of p1 only when the rubric
+differs from the one P1 recorded, no panel task may be one of the allocation's
 development tasks, drawn or not, and stage.json records the allocation's SHA-256. EVAL
 in paid mode loads only records of the test split. EVAL refuses a configuration hash other than
 the one P3 ran under, unless --config-change-note names a non-empty file declaring the
@@ -827,6 +828,18 @@ def check_allocation(stage: str, items: list, allocation: dict) -> None:
                            f"{outside}")
 
 
+def check_prompt_pass(items: list, run_root: Path, allocation: dict, rubric_sha256: str) -> None:
+    """P2 is P1's five plus the 15, and P1's five go out again only after a rubric change,
+    which the rubric hash in P1's stage.json shows. With no hash there, nothing shows one."""
+    again = sorted({i.task_id for i in items} & set(allocation["p1"]))
+    if not again:
+        return
+    recorded = json.loads((run_root / "P1" / "stage.json").read_text(encoding="utf-8")).get("rubric_sha256")
+    if recorded in (None, rubric_sha256):
+        raise StageRefused(f"P2 sends P1's tasks again only after a rubric change, and this is the rubric P1 ran "
+                           f"under: {again}")
+
+
 def check_recorded_allocation(allocation: dict, recorded, mode: str) -> None:
     """``recorded`` is --allocation-sha256, the hash in the plan or the approval note. Paid
     mode needs it, and paid mode also needs the file to be the study's draw, since the
@@ -934,7 +947,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         raise ValueError("fake mode counts no tokens with a provider")
     scopes = {"anthropic": workspace, "openai": openai_project or (FAKE_PROJECT if mode == "fake" else None)}
     config_hash = R.config_sha256(b_model=b_model, caching=spec.caching)
-    rubric_status = R.config_record(b_model=b_model, caching=spec.caching)["rubric"]["status"]
+    rubric = R.config_record(b_model=b_model, caching=spec.caching)["rubric"]
+    rubric_status = rubric["status"]
     if rubric_check and spec.name in FROZEN_RUBRIC_STAGES and rubric_status != "frozen":
         raise StageRefused(f"{stage} needs a frozen rubric; the rubric's status is {rubric_status!r}")
     allocation_record = load_allocation(allocation) if allocation else None
@@ -956,6 +970,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         check_panel_run(panel_record, run)
     if allocation_record is not None:
         check_same_allocation(stage, run_root, mode, allocation_record)
+    if allocation_record is not None and spec.name == "P2":
+        check_prompt_pass(items, run_root, allocation_record, rubric["sha256"])
     change_note = check_eval_config(run_root, config_hash, config_change_note) if spec.name == "EVAL" else None
     planned = panel_record["n"] if panel_record else spec.planned
     if not items or len(items) > planned:
@@ -966,7 +982,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     check_ledger_against_logs(spec, run_root, ledger, run["run_id"], mode)
     stage_dir.mkdir(parents=True, exist_ok=True)
     _fixed_record(stage_dir / "stage.json", {
-        "stage": stage, "mode": mode, "config_sha256": config_hash, "b_model": b_model, "workspace": workspace,
+        "stage": stage, "mode": mode, "config_sha256": config_hash, "rubric_sha256": rubric["sha256"],
+        "b_model": b_model, "workspace": workspace,
         "openai_project": scopes["openai"],
         "ledger": {"budget": ledger.budget, "file": ledger.path.name, "id": ledger.ledger_id},
         "scripted_usage": getattr(transport, "profile", None), "panel": panel_record and panel_record["sha256"],

@@ -32,6 +32,7 @@ One draw sorts its stratum's task IDs, gives each the next `random()` value of `
 
 - a file that fails its own hash, holds an ID that is not normalized, has a P2 that is not P1 plus the 15, has a P3 that overlaps P2, or has a development list that leaves out a task of P2 or P3;
 - a P1 trace whose task is not in `p1`, a P2 trace not in `p2`, or a P3 trace not in `p3`;
+- in P2, a task of `p1` when the rubric's SHA-256 is the one P1 recorded in its `stage.json`, since the first five go out again only after a rubric change;
 - a trace whose normalized task ID is missing or not in the split table's form, a non-empty lower-case string with no space that normalizing leaves unchanged;
 - in P3 and EVAL, more than one trace of a task, since P3 is 20 tasks and the panel unit is one trajectory per task;
 - in EVAL, any panel task in `development`, drawn or not, since every development task stays out of evaluation.
