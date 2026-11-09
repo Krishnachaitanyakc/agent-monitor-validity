@@ -138,7 +138,7 @@ Each element an action names gets one status: `resolved` or `ambiguous` when one
 
 ## Request layer
 
-[REQUESTS.md](REQUESTS.md) describes the request layer in `judge/`: rubric v0 (a draft), schema S and its parser, the exact request body for each judge with its request hash and the config hash, the shared screenshot fallback and fit check, the outcome table, the write-once attempt log and the serial dispatcher. `scripts/dry_run.py` builds both requests for every development pack with the `dev_only` guard installed and dispatches them through a fake transport; it makes no network call. `tests/test_requests.py`, `tests/test_dispatch.py` and `tests/test_dry_run.py` add 77 tests, and `tests/mutations.py` twenty breaks, from a repeat body that differs from A1 and a 400 counted as an invalid verdict to sampling parameters, caching on judge B and a screenshot hash in a request.
+[REQUESTS.md](REQUESTS.md) describes the request layer in `judge/`: rubric v0 (a draft), schema S and its parser, the exact request body for each judge with its request hash and the config hash, the shared screenshot fallback and fit check, the outcome table, the write-once attempt log and the serial dispatcher. `scripts/dry_run.py` builds both requests for every development pack with the `dev_only` guard installed and dispatches them through a fake transport; it makes no network call. `tests/test_requests.py`, `tests/test_dispatch.py` and `tests/test_dry_run.py` add 87 tests, and `tests/mutations.py` thirty breaks, from a repeat body that differs from A1 and a 400 counted as an invalid verdict to sampling parameters, caching on judge B and a screenshot hash in a request.
 
 ## Not done yet
 
