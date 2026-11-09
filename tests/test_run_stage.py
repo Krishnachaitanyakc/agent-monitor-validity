@@ -1323,6 +1323,8 @@ class TestRunRecords(RunnerCase):
 
 
 class TestEval(RunnerCase):
+    EXCLUSION = {"excluded_templates": ["template.prompt"], "n_before": 3, "excluded_tasks": 1, "n_after": 2}
+
     def setUp(self):
         super().setUp()
         self.repo = self.tmp / "repo"
@@ -1342,11 +1344,16 @@ class TestEval(RunnerCase):
 
     def under(self, allocation, **change):
         """A manifest frozen under the given allocation file."""
-        return self.write_manifest(allocation_sha256=json.loads(Path(allocation).read_text())["sha256"], **change)
+        sha256 = json.loads(Path(allocation).read_text())["sha256"]
+        return self.write_manifest(allocation_sha256=sha256, template_exclusion=dict(self.EXCLUSION, allocation_sha256=sha256),
+                                   **change)
 
     def write_manifest(self, **change):
         m = {"kind": "panel-manifest", "frozen": True, "freeze_tag": "freeze-1", "config_sha256": R.config_sha256(),
-             "p3_run_id": self.run_id(), "n": 2, "tasks": [{"trace_key": i.trace_key, "pack_sha256": i.pack_sha256} for i in self.panel_items]}
+             "p3_run_id": self.run_id(), "n": 2,
+             "template_exclusion": self.EXCLUSION,
+             "tasks": [{"trace_key": i.trace_key, "pack_sha256": i.pack_sha256, "template": f"template.{i.trace_key}"}
+                       for i in self.panel_items]}
         m.update(change)
         path = self.tmp / "panel.json"
         path.write_text(json.dumps(m))
@@ -1525,6 +1532,44 @@ class TestEval(RunnerCase):
         (self.repo / "f.txt").write_text("changed\n")
         with self.assertRaisesRegex(RS.StageRefused, "uncommitted"):
             self.eval(self.write_manifest())
+        self.assertFalse((self.root / "EVAL").exists())
+
+    def tasks_with(self, *templates):
+        return [{"trace_key": i.trace_key, "pack_sha256": i.pack_sha256, "template": k}
+                for i, k in zip(self.panel_items, templates)]
+
+    def test_the_manifest_must_record_a_template_exclusion_that_adds_up(self):
+        bad = dict(self.EXCLUSION)
+        cases = [({"template_exclusion": None}, "records no template exclusion"),
+                 ({"template_exclusion": []}, "records no template exclusion"),
+                 ({"template_exclusion": dict(bad, n_after=3)}, "does not add up"),
+                 ({"template_exclusion": dict(bad, excluded_tasks=0)}, "does not add up"),
+                 ({"template_exclusion": dict(bad, n_before=None)}, "does not add up"),
+                 ({"template_exclusion": dict(bad, excluded_templates="template.prompt")}, "does not add up"),
+                 ({"template_exclusion": dict(bad, excluded_templates=[7])}, "does not add up"),
+                 ({"template_exclusion": dict(bad, n_before=2, n_after=1)}, "more than the 1"),
+                 ({"tasks": self.tasks_with("template.a", "template.prompt")}, "tasks of 1 templates"),
+                 ({"tasks": self.tasks_with("template.a", "")}, "name its template"),
+                 ({"tasks": self.tasks_with("template.a", None)}, "name its template")]
+        for change, message in cases:
+            provider = RS.ScriptedProvider()
+            with self.subTest(message), self.assertRaisesRegex(RS.StageRefused, message):
+                self.eval(self.write_manifest(**change), provider=provider)
+            self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / "EVAL").exists())
+
+    def test_a_panel_smaller_than_the_exclusion_leaves_still_runs(self):
+        panel = self.write_manifest(template_exclusion=dict(self.EXCLUSION, n_before=5, n_after=4))
+        report, provider = self.eval(panel)
+        self.assertEqual((report["stopped"], len(provider.sent)), (None, 8))
+
+    def test_a_template_exclusion_made_under_another_allocation_is_refused(self):
+        allocation = allocation_file(self.tmp, ["task.a0"])
+        sha256 = json.loads(allocation.read_text())["sha256"]
+        panel = self.write_manifest(allocation_sha256=sha256,
+                                    template_exclusion=dict(self.EXCLUSION, allocation_sha256="0" * 64))
+        with self.assertRaisesRegex(RS.StageRefused, "under another allocation"):
+            self.eval(panel, allocation=allocation)
         self.assertFalse((self.root / "EVAL").exists())
 
     def test_eval_runs_on_the_frozen_panel_and_completes_only_after_a_reconciliation(self):

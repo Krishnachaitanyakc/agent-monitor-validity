@@ -4,7 +4,8 @@
     python3 scripts/draw_allocation.py --table dev_table.json --seed 169 --out allocation.json \\
         --p1 TASK_1 TASK_2 TASK_3 TASK_4 TASK_5
 
-The table is a JSON list with one row per development task and exactly these fields:
+The table, from scripts/build_dev_table.py, is a JSON list with one row per development
+task and exactly these fields:
 task_id (normalized, as ``datapath.ids.normalize_task_id`` gives it), benchmark (webarena,
 visualwebarena or workarena), template_overlaps_panel (true or false) and family. It holds
 development tasks only, and no label.

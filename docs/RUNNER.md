@@ -19,6 +19,8 @@ The dispatcher takes all four slots or, for prompt development, A1 and B1 only; 
 
 ## Development allocation
 
+`scripts/build_dev_table.py table` writes the table from two label-free counts files, the task mapping and the eligible panel, leaving out AssistantBench and image-goal tasks. A task's template overlaps the panel when it holds a WebArena or VisualWebArena panel task. The command prints counts only, and a refusal names no panel task.
+
 `scripts/draw_allocation.py` fixes which development tasks each pilot stage may use. It takes a JSON table of development tasks with exactly the fields `task_id`, `benchmark`, `template_overlaps_panel` and `family`, P1's five task IDs and a seed, and it reads no label. The rule, in order:
 
 1. P1's five tasks leave the pool.
@@ -40,6 +42,8 @@ One draw sorts its stratum's task IDs, gives each the next `random()` value of `
 EVAL in paid mode also loads only provenance records of the test split, which covers the development tasks outside the table, the image-goal and AssistantBench ones. Fake mode leaves the split open, so a rehearsal can use other records.
 
 Once the previous stage's report is checked, an allocation other than one that any stage in the same mode recorded, in this run root or any run root beside it, is refused too, so a fresh run root cannot use another. The frozen panel manifest names the allocation in `allocation_sha256`, and EVAL refuses any other. Stage sizes stay caps, so a stage may run fewer tasks than its list holds. `stage.json` records the allocation's SHA-256, and a resumed stage must give the same one.
+
+The panel leaves out every task in a template that a prompt task used. `scripts/build_dev_table.py exclusion` derives those templates from `p2` and the task mapping and writes the record that the frozen manifest carries as `template_exclusion`: the templates, N before, the tasks removed, N after and the allocation's hash. EVAL refuses a manifest with no such record, one whose counts do not add up or leave fewer tasks than the panel holds, one made under another allocation, a task that names no `template`, and a task whose template the record removes. The panel builder that writes the manifest is not in this repository yet.
 
 EVAL's configuration hash must be the one P3 ran under, read from P3's `stage.json`, in fake and paid mode alike. A difference is refused unless `--config-change-note` names a non-empty file outside the repository that declares it; `stage.json` keeps the note's text and SHA-256 with P3's hash, and a resumed stage must give the same note. A note given when nothing differs is refused, and only EVAL takes one. The frozen-rubric checks of P3 and EVAL are separate and still apply.
 
@@ -116,3 +120,4 @@ In the evaluation, a trajectory does not start once the oldest settled or held c
 - Adapters from each provider's usage and cost reports to the runner's usage-export format.
 - A record of each ledger outside the data root, which would tell a copy of the data root from the original.
 - EVAL on evaluation data: `pre_join` also guards non-development screenshots, so it needs the data owner's path.
+- The panel builder, which writes the frozen manifest with `allocation_sha256`, `p3_run_id`, `template_exclusion` and each task's `template`.

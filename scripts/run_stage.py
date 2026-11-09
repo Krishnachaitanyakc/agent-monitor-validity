@@ -742,15 +742,40 @@ def freeze_commit(repo, tag: str) -> str:
     return head
 
 
+def check_template_exclusion(m: dict) -> None:
+    """The frozen manifest records the removal of the templates used by the prompt tasks:
+    made under the allocation it names, adding up to no fewer tasks than the panel holds,
+    with every task's template named and none of them removed."""
+    record = m.get("template_exclusion")
+    if not isinstance(record, dict):
+        raise StageRefused("the manifest records no template exclusion")
+    excluded, before, removed, after = (record.get(k) for k in ("excluded_templates", "n_before", "excluded_tasks",
+                                                                "n_after"))
+    if (not isinstance(excluded, list) or not all(isinstance(k, str) for k in excluded)
+            or not all(isinstance(n, int) for n in (before, removed, after)) or before - removed != after):
+        raise StageRefused("the manifest's template exclusion does not add up")
+    if record.get("allocation_sha256") != m.get("allocation_sha256"):
+        raise StageRefused("the manifest's template exclusion was made under another allocation")
+    if m["n"] > after:
+        raise StageRefused(f"the panel holds {m['n']} tasks, more than the {after} the template exclusion leaves")
+    templates = [t.get("template") for t in m["tasks"]]
+    if not all(isinstance(k, str) and k for k in templates):
+        raise StageRefused("every task of the manifest must name its template")
+    inside = set(templates) & set(excluded)
+    if inside:
+        raise StageRefused(f"the panel holds tasks of {len(inside)} templates the exclusion removes")
+
+
 def verify_panel(panel, config_sha256: str, items: list, repo=REPO, allocation=None) -> dict:
     """EVAL's frozen panel manifest, checked against its recorded hash and freeze tag.
 
     The manifest is JSON: {"kind": "panel-manifest", "frozen": true, "freeze_tag",
-    "config_sha256", "allocation_sha256", "p3_run_id", "n", "tasks": [{"trace_key",
-    "pack_sha256"}, ...]}. The packs given must be its tasks, in its order, the code must
-    be at the freeze tag, and ``allocation``, when one is in use, must be the one the
-    manifest names. ``p3_run_id`` is the run_id in the run.json of the run root whose P3
-    the panel was frozen after, which ``check_panel_run`` compares with this run.
+    "config_sha256", "allocation_sha256", "p3_run_id", "template_exclusion", "n", "tasks":
+    [{"trace_key", "pack_sha256", "template"}, ...]}. The packs given must be its tasks, in
+    its order, the code must be at the freeze tag, and ``allocation``, when one is in use,
+    must be the one the manifest names. ``p3_run_id`` is the run_id in the run.json of the
+    run root whose P3 the panel was frozen after, which ``check_panel_run`` compares with
+    this run. ``template_exclusion`` is the record from scripts/build_dev_table.py.
     """
     if not panel or not all(panel.get(k) for k in ("manifest", "sha256", "freeze_tag")):
         raise StageRefused("EVAL needs --panel-manifest, its recorded --panel-sha256 and --freeze-tag")
@@ -775,6 +800,7 @@ def verify_panel(panel, config_sha256: str, items: list, repo=REPO, allocation=N
         raise StageRefused("the manifest's task list and N do not agree")
     if [(t.get("trace_key"), t.get("pack_sha256")) for t in tasks] != [(i.trace_key, i.pack_sha256) for i in items]:
         raise StageRefused("the packs given are not the panel's tasks in the manifest's order")
+    check_template_exclusion(m)
     return {"manifest": str(path.resolve()), "sha256": panel["sha256"], "freeze_tag": panel["freeze_tag"],
             "freeze_commit": freeze_commit(repo, panel["freeze_tag"]), "n": len(tasks),
             "p3_run_id": m.get("p3_run_id")}
