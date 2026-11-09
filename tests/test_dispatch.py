@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -736,6 +737,195 @@ class TestHttpsTransport(unittest.TestCase):
         data, err, _ = D.read_stream(Broken(raw))
         self.assertEqual(data, raw[:150])
         self.assertIn("ConnectionResetError", err)
+
+
+class HttpResponse(io.BytesIO):
+    """What ``urlopen`` returns."""
+
+    def __init__(self, raw, status=200, headers=None):
+        super().__init__(raw)
+        self.status, self.headers = status, headers or {}
+
+
+class CutResponse(HttpResponse):
+    """A response that loses its connection after its bytes."""
+
+    def read1(self, n=-1):
+        data = super().read1(n)
+        if not data:
+            raise ConnectionResetError("reset")
+        return data
+
+
+class FakeHttp:
+    """Stands in for ``urlopen``: each request gets the next scripted answer and is
+    recorded, so nothing leaves. An answer is an exception, a response or (status, headers,
+    raw bytes)."""
+
+    def __init__(self, *script):
+        self.script, self.requests = list(script), []
+
+    def __call__(self, req, timeout):
+        self.requests.append(req)
+        answer = self.script.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, HttpResponse):
+            return answer
+        status, headers, raw = answer
+        if status >= 400:
+            raise urllib.error.HTTPError(req.full_url, status, "error", headers, io.BytesIO(raw))
+        return HttpResponse(raw, status, headers)
+
+
+def error_answer(status, etype, message="x", code=None, headers=None):
+    err = {"type": etype, "message": message, "code": code}
+    return status, headers or {}, json.dumps({"type": "error", "error": err}).encode()
+
+
+class TestHttpsTokenCounter(unittest.TestCase):
+    WORKSPACE, PROJECT = "wrkspc_study", "proj_study"
+    A_REPLY, B_REPLY = b'{"input_tokens":61234}', b'{"object":"response.input_tokens","input_tokens":70123}'
+    A_OK = (200, {"anthropic-workspace-id": "wrkspc_study"}, A_REPLY)
+    B_OK = (200, {"x-request-id": "req_1"}, B_REPLY)
+    RETRIES = (2.0, 4.0, 8.0)
+
+    def setUp(self):
+        pack = synthetic_pack(1)
+        self.reqs = R.prepare(pack, images_for(pack))["requests"]
+        self.sleeps = []
+
+    def counted(self, request, *script, keys=("ANTHROPIC_API_KEY", "OPENAI_API_KEY")):
+        """(the count or the ``TokenCountError`` raised, the requests made)."""
+        http = FakeHttp(*script)
+        env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+        with mock.patch.dict(os.environ, {**env, **dict.fromkeys(keys, "placeholder")}, clear=True):
+            with mock.patch.object(D.urllib.request, "urlopen", http):
+                transport = D.HttpsTransport(confirm_paid_calls=True, openai_project=self.PROJECT)
+                counter = D.HttpsTokenCounter(transport, self.WORKSPACE, sleep=self.sleeps.append)
+                try:
+                    return counter.count(request), http.requests
+                except D.TokenCountError as e:
+                    return e, http.requests
+
+    def assert_raises_once(self, judge, answer):
+        """The ``TokenCountError`` that one answer raises, with nothing tried again."""
+        self.sleeps.clear()
+        error, sent = self.counted(self.reqs[judge], answer, self.A_OK if judge == "A" else self.B_OK)
+        self.assertIsInstance(error, D.TokenCountError, answer)
+        self.assertEqual((len(sent), self.sleeps), (1, []), answer)
+        return error
+
+    def test_refuses_to_exist_without_the_workspace(self):
+        for value in (None, ""):
+            with self.assertRaisesRegex(ValueError, "pass workspace"):
+                D.HttpsTokenCounter(D.HttpsTransport(confirm_paid_calls=True, openai_project="p"), value)
+
+    def test_each_count_is_one_post_to_its_provider_s_documented_endpoint(self):
+        for judge, ok, url, count in (("A", self.A_OK, "https://api.anthropic.com/v1/messages/count_tokens", 61234),
+                                      ("B", self.B_OK, "https://api.openai.com/v1/responses/input_tokens", 70123)):
+            got, sent = self.counted(self.reqs[judge], ok)
+            self.assertEqual(got, count)
+            self.assertEqual([(r.full_url, r.get_method()) for r in sent], [(url, "POST")])
+
+    def test_a_count_is_the_body_that_will_be_sent_less_only_the_fields_its_endpoint_does_not_list(self):
+        unlisted = {"A": {"max_tokens", "stream", "inference_geo", "service_tier"},
+                    "B": {"max_output_tokens", "stream", "prompt_cache_options", "service_tier", "store"}}
+        pack = synthetic_pack(2)
+        for caching in (True, False):
+            reqs = R.prepare(pack, images_for(pack), caching=caching)["requests"]
+            for judge, ok in (("A", self.A_OK), ("B", self.B_OK)):
+                sent_body = json.loads(reqs[judge].body)
+                self.assertLessEqual(unlisted[judge], set(sent_body))
+                wanted = {k: v for k, v in sent_body.items() if k not in unlisted[judge]}
+                _, [asked] = self.counted(reqs[judge], ok)
+                self.assertEqual(json.loads(asked.data), wanted)
+                self.assertEqual(asked.data, R.canonical_bytes(wanted))
+                self.assertEqual(json.loads(reqs[judge].body), sent_body)
+
+    def test_every_field_left_in_a_count_is_one_its_endpoint_lists(self):
+        listed = {"A": {"messages", "model", "cache_control", "output_config", "speed", "system", "thinking",
+                        "tool_choice", "tools"},
+                  "B": {"conversation", "input", "instructions", "model", "parallel_tool_calls", "personality",
+                        "previous_response_id", "reasoning", "text", "tool_choice", "tools", "truncation"}}
+        for judge in "AB":
+            self.assertLessEqual(set(json.loads(D.count_request(self.reqs[judge]).body)), listed[judge])
+        self.assertIn("cache_control", json.loads(D.count_request(self.reqs["A"]).body))
+        self.assertIn("reasoning", json.loads(D.count_request(self.reqs["B"]).body))
+
+    def test_a_count_carries_the_credential_version_and_project_of_the_send(self):
+        _, [a] = self.counted(self.reqs["A"], self.A_OK)
+        self.assertEqual((a.get_header("X-api-key"), a.get_header("Anthropic-version")),
+                         ("placeholder", R.ANTHROPIC_VERSION))
+        self.assertIsNone(a.get_header("Openai-project"))
+        _, [b] = self.counted(self.reqs["B"], self.B_OK)
+        self.assertEqual((b.get_header("Authorization"), b.get_header("Openai-project")),
+                         ("Bearer placeholder", self.PROJECT))
+
+    def test_a_malformed_or_missing_count_raises_and_is_not_asked_again(self):
+        headers = self.A_OK[1]
+        bodies = (b"", b"not json", b"[]", b"null", b"{}", b'{"input_tokens":null}', b'{"input_tokens":"12"}',
+                  b'{"input_tokens":12.0}', b'{"input_tokens":true}', b'{"input_tokens":0}', b'{"input_tokens":-1}',
+                  b'{"input_tokens":' + b"9" * 5000 + b"}", b"[" * 200000)
+        for raw in bodies:
+            self.assert_raises_once("A", (200, headers, raw))
+        for raw in (b'{"input_tokens":5}', b'{"object":"response","input_tokens":5}'):
+            self.assertIn("response.input_tokens", str(self.assert_raises_once("B", (200, {}, raw))))
+
+    def test_a_request_access_or_spend_error_raises_and_is_not_asked_again(self):
+        for status, etype in ((400, "invalid_request_error"), (401, "authentication_error"), (402, "billing_error"),
+                              (403, "permission_error"), (404, "not_found_error"), (413, "request_too_large")):
+            error = self.assert_raises_once("A", error_answer(status, etype, "the reason"))
+            self.assertEqual((error.status, error.error["type"], error.error["message"]), (status, etype, "the reason"))
+        self.assert_raises_once("A", error_answer(429, "rate_limit_error", "You have reached your API usage limits"))
+        self.assert_raises_once("B", error_answer(429, "insufficient_quota", code="insufficient_quota"))
+        self.assert_raises_once("B", error_answer(400, "invalid_request_error", code="content_filter"))
+
+    def test_a_transport_failure_is_asked_again_under_the_dispatcher_s_rule(self):
+        for failure in (urllib.error.URLError("down"), error_answer(429, "rate_limit_error"),
+                        error_answer(408, "timeout_error"), error_answer(500, "api_error"),
+                        error_answer(529, "overloaded_error")):
+            self.sleeps.clear()
+            got, sent = self.counted(self.reqs["A"], failure, failure, failure, self.A_OK)
+            self.assertEqual((got, len(sent), tuple(self.sleeps)), (61234, 4, self.RETRIES), failure)
+            self.sleeps.clear()
+            error, sent = self.counted(self.reqs["A"], *[failure] * 6)
+            self.assertIsInstance(error, D.TokenCountError)
+            self.assertEqual((len(sent), tuple(self.sleeps)), (4, self.RETRIES), failure)
+
+    def test_a_retry_honors_retry_after_up_to_the_dispatcher_s_cap(self):
+        for wait, slept in (("30", 30.0), ("500", 120.0), ("soon", 2.0)):
+            self.sleeps.clear()
+            answer = error_answer(429, "rate_limit_error", headers={"Retry-After": wait})
+            got, _ = self.counted(self.reqs["A"], answer, self.A_OK)
+            self.assertEqual((got, self.sleeps), (61234, [slept]))
+
+    def test_a_count_from_a_response_that_was_cut_is_not_taken(self):
+        got, sent = self.counted(self.reqs["A"], CutResponse(self.A_REPLY, 200, self.A_OK[1]), self.A_OK)
+        self.assertEqual((got, len(sent), self.sleeps), (61234, 2, [2.0]))
+
+    def test_a_count_from_another_scope_raises_and_is_not_asked_again(self):
+        for headers in ({"anthropic-workspace-id": "wrkspc_other"}, {}):
+            self.assertIn("workspace", str(self.assert_raises_once("A", (200, headers, self.A_REPLY))))
+        answer = (200, {"OpenAI-Project": "proj_other"}, self.B_REPLY)
+        self.assertIn("project", str(self.assert_raises_once("B", answer)))
+
+    def test_an_openai_count_may_name_the_study_project_or_none(self):
+        for headers in ({}, {"OpenAI-Project": self.PROJECT}):
+            self.assertEqual(self.counted(self.reqs["B"], (200, headers, self.B_REPLY))[0], 70123)
+
+    def test_a_missing_credential_raises_before_anything_leaves(self):
+        error, sent = self.counted(self.reqs["A"], self.A_OK, keys=("OPENAI_API_KEY",))
+        self.assertIsInstance(error, D.TokenCountError)
+        self.assertIn("set ANTHROPIC_API_KEY", str(error))
+        self.assertEqual(sent, [])
+
+    def test_an_exception_while_sending_raises_with_only_its_type(self):
+        error, sent = self.counted(self.reqs["A"], ValueError("Invalid header value b'the-key'"))
+        self.assertIsInstance(error, D.TokenCountError)
+        self.assertIn("ValueError", str(error))
+        self.assertNotIn("the-key", str(error))
+        self.assertEqual(len(sent), 1)
 
 
 if __name__ == "__main__":

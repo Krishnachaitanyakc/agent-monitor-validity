@@ -52,8 +52,9 @@ applied.
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with
 ``urllib`` and reads the event stream; it refuses to exist unless paid calls are
-confirmed and the OpenAI project is named. No dry run constructs it, and the one test
-that does replaces ``urlopen``, so nothing is sent.
+confirmed and the OpenAI project is named. ``HttpsTokenCounter`` asks a provider, through
+that transport, for its own input count of a request before the request is reserved. No
+dry run constructs either, and the tests that do replace ``urlopen``, so nothing is sent.
 """
 
 import json
@@ -80,10 +81,29 @@ RETRY_AFTER_CAP_S = 120.0
 OPENAI_PROJECT_HEADER = "openai-project"
 KEPT_HEADERS = ("request-id", "anthropic-workspace-id", "x-request-id", OPENAI_PROJECT_HEADER,
                 "retry-after", "content-type")
+# Each provider's token-count endpoint, and the fields of the sent body that its reference
+# does not list, the only ones left out of a count. Read 2026-11-09:
+# https://platform.claude.com/docs/en/api/messages/count_tokens (body fields, response) and
+# https://platform.claude.com/docs/en/build-with-claude/token-counting (free to use);
+# https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count
+# (body fields, response) and https://developers.openai.com/api/docs/guides/token-counting
+# (the same input format as a create; no statement of a price there or on the pricing page).
+COUNT_ENDPOINTS = {"anthropic": R.A_ENDPOINT + "/count_tokens", "openai": R.B_ENDPOINT + "/input_tokens"}
+COUNT_OMITTED = {"anthropic": frozenset({"max_tokens", "stream", "inference_geo", "service_tier"}),
+                 "openai": frozenset({"max_output_tokens", "stream", "prompt_cache_options", "service_tier", "store"})}
+COUNT_OBJECT = {"openai": "response.input_tokens"}
 
 
 class HaltPending(RuntimeError):
     """A halt has no correction note yet, so the run may not resume."""
+
+
+class TokenCountError(RuntimeError):
+    """A provider's pre-send token count failed, was malformed or is missing; nothing is sent."""
+
+    def __init__(self, message: str, status=None, error=None):
+        super().__init__(message)
+        self.status, self.error = status, error
 
 
 def _iso(t: float) -> str:
@@ -167,6 +187,79 @@ class HttpsTransport:
         with resp:
             raw, err, first = read_stream(resp, self.clock)
             return Exchange(resp.status, {k.lower(): v for k, v in resp.headers.items()}, raw, err, first)
+
+
+def count_request(request: R.PreparedRequest) -> R.PreparedRequest:
+    """``request`` as its provider's token-count endpoint takes it: the same model, headers
+    and body, in the same serialization, with only ``COUNT_OMITTED`` left out."""
+    body = {k: v for k, v in json.loads(request.body).items() if k not in COUNT_OMITTED[request.provider]}
+    data = R.canonical_bytes(body)
+    return request._replace(url=COUNT_ENDPOINTS[request.provider], body=data, sha256=R.sha256_bytes(data))
+
+
+class HttpsTokenCounter:
+    """The provider's own input count of a prepared request, made before it is reserved.
+
+    A count goes out through the ``HttpsTransport`` that will send the request, so it has
+    the same credential, API version and OpenAI project, and it never retries behind the
+    runner. The response must come from the study's scope, by the same headers the send's
+    checks read, and hold a whole positive count. Anything else raises ``TokenCountError``:
+    no estimate stands in and the caller sends nothing. Only a transport failure is tried
+    again, under the dispatcher's rule for one.
+    """
+
+    def __init__(self, transport: HttpsTransport, workspace, sleep=time.sleep):
+        if not workspace:
+            raise ValueError("HttpsTokenCounter checks every count against the study's workspace; pass workspace")
+        self.transport, self.workspace, self.sleep = transport, workspace, sleep
+
+    def _other_scope(self, provider: str, headers: dict):
+        """Why a response is not from the study's scope, or None."""
+        if provider == "anthropic" and headers.get("anthropic-workspace-id") != self.workspace:
+            return "the anthropic-workspace-id header is not the study workspace"
+        study = self.transport.openai_project
+        if provider == "openai" and headers.get(OPENAI_PROJECT_HEADER, study) != study:
+            return "the openai-project header is not the study project"
+        return None
+
+    def _read(self, provider: str, exchange: Exchange, headers: dict) -> tuple:
+        """(count or None, why there is none, error record, whether to try again)."""
+        if exchange.status is None or not 200 <= exchange.status < 300:
+            oc = canonical_outcome(provider, exchange)
+            return None, oc["detail"], oc["error"], oc["retryable"]
+        if exchange.transport_error:
+            return None, f"the response was cut: {exchange.transport_error}", None, True
+        other_scope = self._other_scope(provider, headers)
+        if other_scope:
+            return None, other_scope, None, False
+        reply = json.loads(exchange.raw)
+        count = reply.get("input_tokens") if isinstance(reply, dict) else None
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return None, "the response holds no whole, positive input_tokens", None, False
+        if provider in COUNT_OBJECT and reply.get("object") != COUNT_OBJECT[provider]:
+            return None, f"the response's object is not {COUNT_OBJECT[provider]}", None, False
+        return count, None, None, False
+
+    def count(self, request: R.PreparedRequest) -> int:
+        """The provider's input count for ``request``, or ``TokenCountError`` (see the class)."""
+        provider, ask, retries = request.provider, count_request(request), 0
+        while True:
+            try:
+                exchange = self.transport.send(ask)
+            except Exception as e:              # only a missing credential's message: another could quote the key
+                why = str(e) if type(e) is RuntimeError else type(e).__name__
+                raise TokenCountError(f"the {provider} token count was not sent: {why}") from None
+            headers = {k.lower(): v for k, v in (exchange.headers or {}).items()}
+            try:
+                count, why, error, retryable = self._read(provider, exchange, headers)
+            except Exception as e:              # only its type, since its message can quote the response
+                count, why, error, retryable = None, f"reading the response raised {type(e).__name__}", None, False
+            if count is not None:
+                return count
+            retries += retryable
+            if not retryable or retries > R.MAX_RETRIES:
+                raise TokenCountError(f"the {provider} token count failed: {why}", exchange.status, error)
+            self.sleep(_backoff(retries, headers))
 
 
 # ---------------------------------------------------------------- checks

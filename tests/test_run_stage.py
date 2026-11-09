@@ -3,10 +3,11 @@
 The runner's core runs on synthetic packs through the fake transport, with a frozen
 rubric stand-in where P3 or EVAL runs. The commands run in fresh processes on the data
 path's fixture, since an installed guard cannot be removed; there the rubric is the real
-draft. No test builds the HTTPS transport: where paid mode is checked, the class is
-replaced by a stand-in that records how it was called.
+draft. Where paid mode is checked, the HTTPS transport is a stand-in that cannot send, or
+the real one with ``urlopen`` replaced by a fake HTTP layer, so nothing leaves.
 """
 
+import io
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -398,10 +400,11 @@ class TestGating(RunnerCase):
         log.record_correction(report["stopped"]["halt_id"], "Noted.", R.config_sha256(), at="now")
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             self.stage("P1", its[:1], led)
-        paid = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid")
+        paid, https = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid"), StandInHttps()
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
-            RS.run_stage("P1", self.root, its, mode="paid", transport=StandInHttps(), ledger=paid,
-                         read_images=lambda e: e, workspace="w", openai_project="p", counter=RS.ScriptedProvider())
+            RS.run_stage("P1", self.root, its, mode="paid", transport=https, ledger=paid,
+                         read_images=lambda e: e, workspace="w", openai_project="p",
+                         counter=D.HttpsTokenCounter(https, "w"))
         provider = RS.ScriptedProvider()
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="fake", transport=provider, ledger=led, read_images=lambda e: e,
@@ -1141,7 +1144,6 @@ class TestPaidMode(unittest.TestCase):
         empty, blank = self.tmp / "empty.txt", self.tmp / "blank.txt"
         empty.write_text("")
         blank.write_text("  \n")
-        counter = RS.ScriptedProvider()                    # a stand-in for a provider token counter
         with mock.patch.object(D, "HttpsTransport") as https:
             self.assertEqual(RS.select_transport(False, False, None), ("fake", None))
             for paid in (False, True):
@@ -1150,24 +1152,20 @@ class TestPaidMode(unittest.TestCase):
                         if (paid, confirm, note) in ((False, False, None), (True, True, str(self.note))):
                             continue
                         with self.assertRaisesRegex(RS.StageRefused, "missing"):
-                            RS.select_transport(paid, confirm, note, workspace="wrkspc_study", counter=counter,
+                            RS.select_transport(paid, confirm, note, workspace="wrkspc_study",
                                                 openai_project="proj_study")
             https.assert_not_called()
             with self.assertRaisesRegex(RS.StageRefused, "--workspace"):
-                RS.select_transport(True, True, str(self.note), counter=counter, openai_project="proj_study")
+                RS.select_transport(True, True, str(self.note), openai_project="proj_study")
             with self.assertRaisesRegex(RS.StageRefused, "--openai-project"):
-                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter)
+                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study")
             https.assert_not_called()
-            mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter,
+            mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study",
                                           openai_project="proj_study")
         self.assertEqual(mode, "paid")
         https.assert_called_once_with(confirm_paid_calls=True, openai_project="proj_study")
 
-    def test_paid_mode_without_a_provider_token_count_is_refused_before_any_transport_exists(self):
-        with mock.patch.object(D, "HttpsTransport") as https:
-            with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
-                RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", openai_project="proj_study")
-            https.assert_not_called()
+    def test_a_paid_stage_without_a_provider_token_counter_is_refused(self):
         led = S.Ledger(self.tmp / "ledger-pilot.jsonl", "pilot", mode="paid")
         self.addCleanup(led.close)
         with self.assertRaisesRegex(RS.StageRefused, "token-count client"):
@@ -1193,6 +1191,193 @@ class TestPaidMode(unittest.TestCase):
     def test_the_https_transport_itself_still_refuses_without_confirmation(self):
         with self.assertRaises(ValueError):
             D.HttpsTransport(confirm_paid_calls=False)
+
+
+class ProviderHttp:
+    """Stands in for ``urlopen`` and answers both providers, so the paid path runs and
+    nothing leaves: a token count per judge, or (status, raw bytes) in its place, and each
+    send from the fake provider's stream."""
+
+    def __init__(self, workspace, project, a=61234, b=70123):
+        self.provider, self.urls = RS.ScriptedProvider(workspace=workspace, project=project), []
+        self.workspace, self.counts = workspace, {D.COUNT_ENDPOINTS["anthropic"]: a, D.COUNT_ENDPOINTS["openai"]: b}
+
+    def _count(self, req):
+        answer = self.counts[req.full_url]
+        is_a = req.full_url == D.COUNT_ENDPOINTS["anthropic"]
+        reply = {"input_tokens": answer} if is_a else {"object": "response.input_tokens", "input_tokens": answer}
+        return 200, {"anthropic-workspace-id": self.workspace} if is_a else {}, json.dumps(reply).encode()
+
+    def __call__(self, req, timeout):
+        self.urls.append(req.full_url)
+        if req.full_url in self.counts:
+            given = self.counts[req.full_url]
+            status, headers, raw = self._count(req) if isinstance(given, int) else (given[0], {}, given[1])
+        else:
+            judge, provider = ("A", "anthropic") if req.full_url == R.A_ENDPOINT else ("B", "openai")
+            sent = R.PreparedRequest(judge, provider, json.loads(req.data)["model"], req.full_url, (), req.data,
+                                     R.sha256_bytes(req.data))
+            ex = self.provider._exchange(sent, RS.STAGES["P1"], f"ref{len(self.urls)}", "valid")
+            status, headers, raw = ex.status, ex.headers, ex.raw
+        if status >= 400:
+            raise urllib.error.HTTPError(req.full_url, status, "error", headers, io.BytesIO(raw))
+        response = io.BytesIO(raw)
+        response.status, response.headers = status, headers
+        return response
+
+
+class TestPaidTokenCounts(unittest.TestCase):
+    WORKSPACE, PROJECT = "wrkspc_study", "proj_study"
+    COUNTS = [D.COUNT_ENDPOINTS["anthropic"], D.COUNT_ENDPOINTS["openai"]]
+    SENDS = (R.A_ENDPOINT, R.B_ENDPOINT)
+    BAD_REQUEST = (400, json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": "m"}}).encode())
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.fresh("first")
+        self.its = items(1, "a")
+
+    def fresh(self, name):
+        """A new run folder, a new paid ledger, and a transport and counter bound to the study."""
+        self.root = self.tmp / name / "run"
+        self.led = S.Ledger(self.tmp / name / "ledger-pilot.jsonl", "pilot", mode="paid")
+        self.addCleanup(self.led.close)
+        self.transport = D.HttpsTransport(confirm_paid_calls=True, openai_project=self.PROJECT)
+        self.counter = D.HttpsTokenCounter(self.transport, self.WORKSPACE, sleep=lambda s: None)
+
+    def http(self, **counts):
+        return ProviderHttp(self.WORKSPACE, self.PROJECT, **counts)
+
+    def paid(self, http, counter=None):
+        keys = dict.fromkeys(KEY_ENVS, "placeholder")
+        with mock.patch.dict(os.environ, keys), mock.patch.object(D.urllib.request, "urlopen", http):
+            return RS.run_stage("P1", self.root, self.its, mode="paid", transport=self.transport, ledger=self.led,
+                                read_images=lambda e: e, workspace=self.WORKSPACE, openai_project=self.PROJECT,
+                                counter=counter or self.counter)
+
+    def test_a_paid_trajectory_is_counted_before_its_first_send_and_reserved_at_the_provider_s_count(self):
+        http = self.http()
+        report = self.paid(http)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual(http.urls, self.COUNTS + [R.A_ENDPOINT] * 3 + [R.B_ENDPOINT])
+        rows = reserves(self.led)
+        self.assertEqual([(r["slot"], r["input_tokens"], r["input_source"]) for r in rows],
+                         [("A1", 61234, "provider_count"), ("A2", 61234, "provider_count"),
+                          ("A3", 61234, "provider_count"), ("B1", 70123, "provider_count")])
+        for r in rows:
+            self.assertEqual(Decimal(r["amount_usd"]), S.reservation(r["model"], r["input_tokens"], R.OUTPUT_CAP))
+        self.assertEqual(report["trajectories"][0]["inputs"]["B"]["input_tokens"], 70123)
+
+    def test_a_failed_malformed_or_missing_count_halts_before_any_send(self):
+        answers = {"status": self.BAD_REQUEST, "malformed": (200, b"not json"), "missing": (200, b"{}"),
+                   "error_without_status": (200, b'{"error":{"type":"api_error"}}')}
+        for judge in "ab":
+            for name, answer in answers.items():
+                self.fresh(f"{judge}-{name}")
+                http = self.http(**{judge: answer})
+                report = self.paid(http)
+                halts = report["gates"]["halts"]
+                self.assertEqual((report["complete"], report["stopped"]["kind"], len(halts)),
+                                 (False, "token_count", 1), name)
+                self.assertEqual((halts[0]["kind"], halts[0]["slot"]), ("token_count", None))
+                self.assertFalse(set(http.urls) & set(self.SENDS), name)
+                self.assertEqual(reserves(self.led), [], name)
+                self.assertEqual((report["cases"]["ended"], report["cases"]["ineligible"]), (0, []))
+                self.assertEqual(report["trajectories"], [{"trace_key": self.its[0].trace_key, "eligible": True}])
+
+    def test_a_halt_on_a_count_records_the_provider_s_error_and_how_to_resume(self):
+        report = self.paid(self.http(b=self.BAD_REQUEST))
+        halt = AttemptLog(self.root / "P1" / "attempt_log").halts()[0]
+        self.assertEqual((halt["halt_id"], halt["http_status"], halt["error"]["type"]),
+                         (report["stopped"]["halt_id"], 400, "invalid_request_error"))
+        self.assertIn("openai token count failed", halt["detail"])
+        self.assertEqual(halt["resume_rule"], RS.RESUME_RULES["token_count"])
+
+    def test_a_count_halt_needs_a_note_and_the_resumed_stage_counts_again(self):
+        report = self.paid(self.http(a=self.BAD_REQUEST))
+        http = self.http()
+        with self.assertRaisesRegex(RS.StageRefused, "without a correction note"):
+            self.paid(http)
+        self.assertEqual(http.urls, [])
+        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "The count endpoint was restored.", R.config_sha256(), at="now")
+        report = self.paid(http)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual(http.urls[:2], self.COUNTS)
+
+    def test_the_count_feeds_the_272_000_token_halt_before_any_send(self):
+        http = self.http(b=S.B_INPUT_LIMIT + 1)
+        report = self.paid(http)
+        self.assertEqual(report["stopped"]["kind"], "long_context")
+        self.assertEqual(http.urls, self.COUNTS)
+        self.fresh("at-limit")
+        http = self.http(b=S.B_INPUT_LIMIT)
+        self.assertTrue(self.paid(http)["complete"])
+        self.assertEqual(http.urls.count(R.B_ENDPOINT), 1)
+
+    def test_the_count_feeds_the_reservation_and_the_cap(self):
+        http = self.http(a=40_000_000)
+        report = self.paid(http)
+        self.assertEqual(report["stopped"]["kind"], "spend_cap")
+        self.assertEqual(http.urls, self.COUNTS)
+        self.assertEqual(reserves(self.led), [])
+
+    def test_a_counter_that_gives_no_count_halts_and_no_estimate_stands_in(self):
+        class Silent(D.HttpsTokenCounter):
+            def count(self, request):
+                return None
+        http = self.http()
+        report = self.paid(http, Silent(self.transport, self.WORKSPACE))
+        self.assertEqual(report["stopped"]["kind"], "token_count")
+        self.assertEqual((http.urls, reserves(self.led)), ([], []))
+
+    def test_paid_mode_counts_only_with_the_providers_endpoints_on_its_own_transport_and_workspace(self):
+        other = D.HttpsTransport(confirm_paid_calls=True, openai_project=self.PROJECT)
+        for counter, message in ((RS.ScriptedProvider(), "providers' own endpoints"),
+                                 (D.HttpsTokenCounter(other, self.WORKSPACE), "another transport"),
+                                 (D.HttpsTokenCounter(self.transport, "wrkspc_other"), "another transport or workspace")):
+            http = self.http()
+            with self.assertRaisesRegex(ValueError, message):
+                self.paid(http, counter)
+            self.assertEqual(http.urls, [])
+        self.assertFalse(self.root.exists())
+
+    def test_fake_mode_refuses_the_provider_counter(self):
+        led = S.Ledger(self.tmp / "fake-ledger-pilot.jsonl", "pilot", mode="fake")
+        self.addCleanup(led.close)
+        with self.assertRaisesRegex(ValueError, "fake mode counts no tokens"):
+            RS.run_stage("P1", self.root, self.its, mode="fake", transport=RS.ScriptedProvider(), ledger=led,
+                         read_images=lambda e: e, workspace=RS.FAKE_WORKSPACE, counter=self.counter)
+
+    def command(self, *flags):
+        """The arguments the stage command gives ``run_stage``, with the guard, the socket
+        refusal and the packs replaced, since an installed guard cannot be removed."""
+        data_root, run_root = self.tmp / "data", self.tmp / "data" / "out" / "run"
+        argv = ["run", "--stage", "P1", "--run-root", str(run_root), "--data-root", str(data_root), "--packs", "p",
+                "--provenance", "q", *flags]
+        with mock.patch.object(RS, "_guard", return_value=(data_root, run_root)), \
+                mock.patch.object(RS, "_forbid_network"), mock.patch.object(RS, "load_items", return_value=[]), \
+                mock.patch.object(RS, "print_report"), \
+                mock.patch.object(RS, "run_stage", return_value={"complete": True}) as run_stage:
+            self.assertEqual(RS.main(argv), 0)
+        return run_stage.call_args.kwargs
+
+    def test_the_paid_stage_command_counts_with_the_provider_on_its_transport_and_workspace(self):
+        note = self.tmp / "approval.txt"
+        note.write_text("Written go-ahead received on the study channel.\n")
+        kw = self.command("--paid", "--confirm-paid-calls", "--approval-note", str(note),
+                          "--workspace", self.WORKSPACE, "--openai-project", self.PROJECT)
+        self.assertEqual(kw["mode"], "paid")
+        self.assertIsInstance(kw["counter"], D.HttpsTokenCounter)
+        self.assertIs(kw["counter"].transport, kw["transport"])
+        self.assertEqual((kw["counter"].workspace, kw["transport"].openai_project), (self.WORKSPACE, self.PROJECT))
+
+    def test_the_fake_stage_command_keeps_the_fake_counter(self):
+        kw = self.command()
+        self.assertEqual(kw["mode"], "fake")
+        self.assertIsInstance(kw["transport"], RS.ScriptedProvider)
+        self.assertIs(kw["counter"], kw["transport"])
 
 
 class CommandCase(FixtureCase):

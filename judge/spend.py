@@ -18,8 +18,8 @@ B tier not listed, or a value that is not reported) holds its whole reservation.
 call whose input count is above 272,000 tokens is refused before it is reserved.
 
 **Reservation.** Before each call, r = (I x 1.02 + 256) x p_in x 1.25 + max_output x p_out.
-I is the provider's own pre-send token count; the stage runner refuses paid mode until a
-provider token-count client exists. In fake mode only, where no provider exists, I may be
+I is the provider's own pre-send token count, which paid mode takes from
+``dispatch.HttpsTokenCounter``. In fake mode only, where no provider exists, I may be
 ``ESTIMATE_FACTOR`` (2) times the request layer's estimate. The 1.25 prices every input
 token as a cache write, so a repeat that misses the cache stays inside its reservation.
 max_output is the request's own output cap, 32,000 tokens. The ledger header keeps the

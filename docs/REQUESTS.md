@@ -10,7 +10,7 @@ The request layer turns one pack and its screenshots into the exact bytes each j
 - [requests.py](../judge/requests.py): bodies from the setup note's field table, fit check, hashes, leak checks, examples.
 - [streams.py](../judge/streams.py), [outcomes.py](../judge/outcomes.py): stream parsing for both providers and the outcome table.
 - [storage.py](../judge/storage.py): the write-once attempt log, halts and correction notes.
-- [dispatch.py](../judge/dispatch.py): the dispatcher, response checks, B's capability check and both transports; `HttpsTransport` needs `confirm_paid_calls=True`.
+- [dispatch.py](../judge/dispatch.py): the dispatcher, response checks, B's capability check, both transports and the provider token counter; `HttpsTransport` needs `confirm_paid_calls=True`. Spending controls, the stage runner and the token counts are in [RUNNER.md](RUNNER.md).
 - [dry_run.py](../scripts/dry_run.py): the development dry run; its docstring shows the command.
 
 ## Evidence and settings
@@ -62,5 +62,4 @@ On Oct 30, at commit `53569bf`, the dry run over 19 development packs built ever
 
 ## Not done yet
 
-- A provider token-count client; paid mode is refused until it exists. Spending controls and the stage runner are in [RUNNER.md](RUNNER.md).
 - The study workspace and OpenAI project IDs themselves. The stage runner takes them as `--workspace` and `--openai-project` and records them in `run.json` and `stage.json`; the dry runs use stand-ins.

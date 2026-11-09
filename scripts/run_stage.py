@@ -38,9 +38,11 @@ needs all three together, --paid, --confirm-paid-calls (passed to the HTTPS tran
 Every OpenAI request carries the project in its OpenAI-Project header, added at send time
 so the request bytes and the configuration hash do not depend on it, and a response that
 reports another project halts the stage. A partial set of paid flags, or paid mode
-without both, is refused before any transport exists. Paid mode is also refused until a
-provider token-count client exists, since every reservation needs the provider's own
-pre-send count. Every call reserves on the budget's ledger first (``judge.spend``), and
+without both, is refused before any transport exists. Every reservation in paid mode
+needs the provider's own pre-send count (``dispatch.HttpsTokenCounter``), made under the
+same credential and scope as the send: a count that fails, is malformed or is missing
+writes a token_count halt before anything of the trajectory is sent, and no estimate
+stands in for it. Every call reserves on the budget's ledger first (``judge.spend``), and
 the existing dispatcher sends A1, A2 and A3 serially, then B1. A call that settles above
 its reservation halts the stage once its trajectory finishes; the cap still counts actual
 settled spend.
@@ -126,7 +128,7 @@ FAKE_WORKSPACE = "wrkspc_fake"
 FAKE_PROJECT = "proj_fake"
 SCOPE_FLAGS = {"anthropic": "--workspace", "openai": "--openai-project"}
 NO_COUNTER = ("paid mode needs the provider's own pre-send token count for every reservation, and no provider "
-              "token-count client exists yet; paid mode is refused until one is reviewed")
+              "token-count client was given")
 GATES_NOTE = ("Reported for review only. None of these gates selects or changes a judge, and a refusal "
               "is a recorded outcome, never a reason for a fallback.")
 RESUME_RULES = {
@@ -139,6 +141,8 @@ RESUME_RULES = {
     "orphan_attempt": "nothing was sent; leave the raw response where it is, since the next start rebuilds its "
                       "attempt record from it, then note this halt and resume",
     "over_reservation": "check the token count behind the reservation before resuming",
+    "token_count": "nothing of the trajectory was sent and nothing was reserved; find why the provider gave no "
+                   "count, note this halt, and run the stage again, which asks for the count again",
     "ineligible_frozen_task": "nothing of the trajectory was sent; eligibility was settled before the panel was "
                               "frozen, so a note does not drop the task or change N, and the gate is applied again "
                               "on resume",
@@ -299,10 +303,10 @@ def paid_conditions(paid, confirm_paid_calls, approval_note) -> list:
     return missing
 
 
-def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, counter=None, openai_project=None):
+def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, openai_project=None):
     """("fake", None) when no paid condition is given; ("paid", HttpsTransport) when all
-    three hold, the study workspace and OpenAI project are named and a provider token
-    counter exists; any other combination is refused before a transport exists."""
+    three hold and the study workspace and OpenAI project are named; any other combination
+    is refused before a transport exists."""
     if not (paid or confirm_paid_calls or approval_note):
         return "fake", None
     missing = paid_conditions(paid, confirm_paid_calls, approval_note)
@@ -313,8 +317,6 @@ def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, co
         raise StageRefused("paid mode also needs --workspace, the study's Anthropic workspace ID")
     if not openai_project:
         raise StageRefused("paid mode also needs --openai-project, the study's OpenAI project ID")
-    if counter is None:
-        raise StageRefused(NO_COUNTER)
     return "paid", D.HttpsTransport(confirm_paid_calls=confirm_paid_calls, openai_project=openai_project)
 
 
@@ -754,11 +756,11 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
 
     ``workspace`` and ``openai_project`` are the study's scopes; fake mode's project
     defaults to the fake provider's.
-    ``counter`` gives each request's input count before it is reserved; paid mode needs
-    it. ``rubric_check=False`` waives the frozen-rubric rule of P3 and EVAL, which only
-    the fake-mode stage dry run does, and the report says so. A call that settles above
-    its reservation halts the stage once its trajectory finishes; the cap still counts
-    actual settled spend.
+    ``counter`` gives each request's input count before it is reserved; paid mode needs an
+    ``HttpsTokenCounter`` on its transport and workspace. ``rubric_check=False`` waives the
+    frozen-rubric rule of P3 and EVAL, which only the fake-mode stage dry run does, and the
+    report says so. A call that settles above its reservation halts the stage once its
+    trajectory finishes; the cap still counts actual settled spend.
     """
     spec = STAGES[stage]
     run_root = Path(run_root)
@@ -780,6 +782,12 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         raise StageRefused("paid mode needs the study's workspace and OpenAI project")
     if mode == "paid" and transport.openai_project != openai_project:
         raise ValueError("the HTTPS transport is bound to another OpenAI project than this stage's")
+    if mode == "paid" and not isinstance(counter, D.HttpsTokenCounter):
+        raise ValueError("paid mode counts tokens only with the providers' own endpoints")
+    if mode == "paid" and (counter.transport is not transport or counter.workspace != workspace):
+        raise ValueError("the token counter is bound to another transport or workspace than this stage's")
+    if mode == "fake" and isinstance(counter, D.HttpsTokenCounter):
+        raise ValueError("fake mode counts no tokens with a provider")
     scopes = {"anthropic": workspace, "openai": openai_project or (FAKE_PROJECT if mode == "fake" else None)}
     config_hash = R.config_sha256(b_model=b_model, caching=spec.caching)
     rubric_status = R.config_record(b_model=b_model, caching=spec.caching)["rubric"]["status"]
@@ -852,14 +860,25 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
                 raise SystemExit(f"{item.trace_key}: the {j} request fails its checks, so nothing is sent: "
                                  f"{problems or leak}")
             estimate = R.token_estimate(j, reqs[j], prep["image_sizes"])["input_tokens"]
-            count = counter.count(reqs[j]) if counter is not None else None
-            if count is None and mode != "fake":
-                raise StageRefused(NO_COUNTER)
+            try:
+                count = counter.count(reqs[j]) if counter is not None else None
+                if count is None and mode != "fake":
+                    raise D.TokenCountError(f"the {reqs[j].provider} token counter gave no count")
+            except D.TokenCountError as e:      # nothing was sent or reserved, and no estimate stands in
+                halt_id = log.write_halt({
+                    "trace_key": item.trace_key, "config_sha256": config_hash, "slot": None, "attempt": None,
+                    "halt_kind": "token_count", "failed_checks": [], "error": e.error, "http_status": e.status,
+                    "detail": str(e), "at": _now(clock), "resume_rule": RESUME_RULES["token_count"]})
+                stopped = {"halt_id": halt_id, "kind": "token_count", "trace_key": item.trace_key, "slot": None}
+                break
             inputs[j] = {"request_sha256": reqs[j].sha256, "request_estimate": estimate,
                          "input_tokens": count if count is not None else S.estimated_input_tokens(estimate),
                          "input_source": "provider_count" if count is not None else "estimate",
                          "max_output_tokens": S.max_output_tokens(j, body)}
             del body
+        if len(inputs) < 2:                     # a count failed and its halt is written
+            rows.append({"trace_key": item.trace_key, "eligible": True})
+            break
         rows.append({"trace_key": item.trace_key, "eligible": True, "fallback_applied": prep["fallback"]["applied"],
                      "inputs": {j: {k: v for k, v in inputs[j].items() if k != "request_sha256"} for j in "AB"}})
         del prep
@@ -1058,8 +1077,7 @@ def cmd_run(args) -> int:
         raise StageRefused("only EVAL takes a panel manifest")
     if args.scripted_usage and (args.paid or args.confirm_paid_calls or args.approval_note):
         raise StageRefused("--scripted-usage is for fake mode only")
-    counter = None                          # no provider token-count client exists yet
-    mode, paid = select_transport(args.paid, args.confirm_paid_calls, args.approval_note, args.workspace, counter,
+    mode, paid = select_transport(args.paid, args.confirm_paid_calls, args.approval_note, args.workspace,
                                   args.openai_project)
     if mode == "fake":
         _forbid_network()
@@ -1068,6 +1086,7 @@ def cmd_run(args) -> int:
         sleep = None
     else:
         transport, workspace, project, sleep = paid, args.workspace, args.openai_project, time.sleep
+        counter = D.HttpsTokenCounter(transport, workspace, sleep=sleep)
     items = load_items(args.packs, args.provenance, split="dev" if spec.budget == "pilot" else None)
     panel = ({"manifest": args.panel_manifest, "sha256": args.panel_sha256, "freeze_tag": args.freeze_tag}
              if spec.name == "EVAL" else None)
