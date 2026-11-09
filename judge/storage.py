@@ -45,7 +45,9 @@ def write_once(path: Path, data: bytes) -> None:
 
 
 def _json(obj) -> bytes:
-    return (json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    # A lone surrogate, which an answer's JSON can hold, is written as its JSON escape.
+    return (json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            + "\n").encode("utf-8", "backslashreplace")
 
 
 def _name(value: str, what: str) -> str:

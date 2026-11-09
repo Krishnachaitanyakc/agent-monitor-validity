@@ -170,6 +170,8 @@ MUTATIONS = [
     ("accept a nineteen-digit integer", "judge/schema.py", "INTEGER_MAX_DIGITS = 18", "INTEGER_MAX_DIGITS = 19"),
     ("count the minus sign as a digit", "judge/schema.py", 'len(digits.lstrip("-"))', "len(digits)"),
     ("keep the old parser version", "judge/schema.py", 'PARSER_VERSION = "parser-v1"', 'PARSER_VERSION = "parser-v0"'),
+    ("refuse to store a lone surrogate from an answer", "judge/storage.py",
+     '.encode("utf-8", "backslashreplace")', '.encode("utf-8")'),
     ("remove the guard install from the dry run", "scripts/dry_run.py",
      '    fence.install("dev_only", data_root, fence_config)', "    pass"),
 ]

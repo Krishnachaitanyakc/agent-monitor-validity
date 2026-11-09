@@ -256,6 +256,12 @@ class TestStorage(LogCase):
         self.assertEqual(path.read_bytes(), b"one")
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["f.json"])
 
+    def test_a_record_holding_a_lone_surrogate_is_written_and_reads_back(self):
+        self.log.write_attempt(dict(self.record(1), detail="caf\u00e9 \ud83d end"), b"raw")
+        self.assertEqual(self.log.attempts(KEY, self.config, "A", 1)[0]["detail"], "caf\u00e9 \ud83d end")
+        data = (self.log.slot_dir(KEY, self.config, "A", 1) / "1.json").read_bytes()
+        self.assertIn("caf\u00e9".encode("utf-8"), data)                    # other text stays as it was
+
     def test_attempts_are_write_once_and_contiguous(self):
         self.log.write_attempt(self.record(1), b"raw one")
         with self.assertRaises(ValueError):
