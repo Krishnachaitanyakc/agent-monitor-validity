@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import draw_allocation as DA  # noqa: E402
 import run_stage as RS  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
@@ -47,14 +48,29 @@ def items(n, tag):
     out = []
     for i in range(n):
         pack = synthetic_pack(2, goal=f"Find the cheapest mug, case {tag}{i}.")
-        out.append(RS.Item(f"t{tag}{i:015d}"[:17], pack, P.sha256_text(P.serialize(pack)), images_for(pack), []))
+        out.append(RS.Item(f"t{tag}{i:015d}"[:17], pack, P.sha256_text(P.serialize(pack)), images_for(pack), [],
+                           f"task.{tag}{i}"))
     return out
 
 
 def ineligible_item(tag):
     """An item whose 601 images are above judge A's limit, even after the shared fallback."""
     pack = synthetic_pack(600, goal=f"Find the cheapest mug, case {tag}.")
-    return RS.Item(f"t{tag}{0:015d}"[:17], pack, P.sha256_text(P.serialize(pack)), images_for(pack), [])
+    return RS.Item(f"t{tag}{0:015d}"[:17], pack, P.sha256_text(P.serialize(pack)), images_for(pack), [], f"task.{tag}")
+
+
+def task_ids(its):
+    return [i.task_id for i in its]
+
+
+def allocation_file(folder, p1=(), p2_new=(), p3=(), name="allocation.json"):
+    """An allocation over the given task IDs, with its own hash, as the draw writes one."""
+    record = {"p1": sorted(p1), "p2": sorted({*p1, *p2_new}), "p2_new": sorted(p2_new), "p3": sorted(p3),
+              "seed": 169, "rule": "synthetic", "counts_by_benchmark": {}}
+    record["sha256"] = DA.content_sha256(record)
+    path = Path(folder) / name
+    path.write_text(json.dumps(record))
+    return path
 
 
 def reserves(led):
@@ -427,7 +443,8 @@ class TestGating(RunnerCase):
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="paid", transport=https, ledger=paid,
                          read_images=lambda e: e, workspace="w", openai_project="p",
-                         counter=D.HttpsTokenCounter(https, "w"))
+                         counter=D.HttpsTokenCounter(https, "w"),
+                         allocation=allocation_file(self.tmp, p1=task_ids(its)))
         provider = RS.ScriptedProvider()
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="fake", transport=provider, ledger=led, read_images=lambda e: e,
@@ -534,6 +551,121 @@ class TestGating(RunnerCase):
             self.assertTrue(report["complete"])
             self.assertEqual((report["settings"]["rubric_status"], report["settings"]["rubric_check"]),
                              ("draft", "waived in a fake-mode dry run"))
+
+
+class TestAllocation(RunnerCase):
+    def setUp(self):
+        super().setUp()
+        self.p1, self.p2, self.p3 = items(2, "a"), items(3, "b"), items(2, "c")
+        self.allocation = allocation_file(self.tmp, task_ids(self.p1), task_ids(self.p2), task_ids(self.p3))
+        self.sha256 = json.loads(self.allocation.read_text())["sha256"]
+        self.led = self.ledger()
+
+    def refused(self, stage, its, message, allocation=None):
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, message):
+            self.stage(stage, its, self.led, provider=provider, allocation=allocation or self.allocation)
+        self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / stage).exists())
+
+    def recorded(self, stage):
+        return json.loads((self.root / stage / "stage.json").read_text())["allocation"]
+
+    def test_each_stage_runs_its_own_list_and_records_the_allocation_s_hash(self):
+        led = self.led
+        for stage, its in (("P1", self.p1), ("P2", self.p1 + self.p2), ("P3", self.p3)):
+            report, _ = self.stage(stage, its, led, allocation=self.allocation)
+            self.assertTrue(report["complete"], stage)
+            self.assertEqual(self.recorded(stage), self.sha256)
+            self.reconcile(led)
+
+    def test_a_p1_trace_whose_task_is_not_in_p1_is_refused(self):
+        self.refused("P1", self.p1 + self.p2[:1], "allocation's p1")
+
+    def test_a_p2_trace_whose_task_is_not_in_p2_is_refused(self):
+        self.refused("P2", self.p2 + self.p3[:1], "allocation's p2")
+
+    def test_p2_takes_p1_s_tasks_but_p3_does_not(self):
+        led = self.led
+        self.stage("P1", self.p1, led, allocation=self.allocation)
+        self.reconcile(led)
+        report, _ = self.stage("P2", self.p1, led, allocation=self.allocation)
+        self.assertTrue(report["complete"])
+        self.refused("P3", self.p1[:1], "allocation's p3")
+
+    def test_a_p3_trace_whose_task_is_not_in_p3_is_refused(self):
+        self.refused("P3", self.p3 + self.p2[:1], "allocation's p3")
+
+    def test_stage_sizes_stay_caps_and_a_stage_may_run_fewer(self):
+        six = items(6, "s")
+        self.refused("P1", six, "runs 1 to 5", allocation_file(self.tmp, task_ids(six), name="six.json"))
+        report, _ = self.stage("P1", self.p1[:1], self.led, allocation=self.allocation)
+        self.assertTrue(report["complete"])
+
+    def test_a_trace_with_no_task_id_is_refused(self):
+        self.refused("P1", [self.p1[0]._replace(task_id=None)], "no normalized task ID")
+
+    def test_an_allocation_file_that_cannot_be_used_is_refused(self):
+        self.refused("P1", self.p1, "no allocation file", self.tmp / "absent.json")
+        broken = self.tmp / "broken.json"
+        broken.write_text("{not json")
+        self.refused("P1", self.p1, "the allocation is refused", broken)
+        edited = json.loads(self.allocation.read_text())
+        edited["p1"].append("task.z")
+        edited["p2"].append("task.z")
+        broken.write_text(json.dumps(edited))
+        self.refused("P1", self.p1, "own SHA-256", broken)
+
+    def test_an_overlap_of_p3_with_p2_in_the_file_is_refused_at_any_stage(self):
+        overlap = allocation_file(self.tmp, task_ids(self.p1), task_ids(self.p2), task_ids(self.p3 + self.p2[:1]),
+                                  name="overlap.json")
+        self.refused("P1", self.p1, "p3 overlaps p2", overlap)
+        self.refused("P3", self.p3, "p3 overlaps p2", overlap)
+
+    def test_a_resumed_stage_must_give_the_same_allocation(self):
+        led = self.led
+        report, _ = self.stage("P1", self.p1, led, allocation=self.allocation,
+                               events={(self.p1[1].trace_key, "A1", 1): "http_400"})
+        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Noted.", R.config_sha256(), at="now")
+        other = allocation_file(self.tmp, task_ids(self.p1), task_ids(self.p2), name="other.json")
+        for allocation in (other, None):
+            provider = RS.ScriptedProvider()
+            with self.assertRaisesRegex(RS.StageRefused, "same ones"):
+                self.stage("P1", self.p1, led, provider=provider, allocation=allocation)
+            self.assertEqual(provider.sent, [])
+        report, _ = self.stage("P1", self.p1, led, allocation=self.allocation)
+        self.assertTrue(report["complete"])
+
+    def test_a_later_stage_must_use_the_allocation_of_the_stage_before_it(self):
+        led = self.led
+        self.stage("P1", self.p1, led, allocation=self.allocation)
+        self.reconcile(led)
+        other = allocation_file(self.tmp, task_ids(self.p1), task_ids(self.p2), name="other.json")
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "every stage of a run uses the same one"):
+            self.stage("P2", self.p2, led, provider=provider, allocation=other)
+        self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / "P2").exists())
+        report, _ = self.stage("P2", self.p2, led, allocation=self.allocation)
+        self.assertTrue(report["complete"])
+
+    def test_paid_mode_needs_an_allocation_at_every_stage(self):
+        for stage in RS.STAGES:
+            budget = RS.STAGES[stage].budget
+            https = StandInHttps()
+            led = self.ledger(self.tmp / f"paid-{stage}" / f"ledger-{budget}.jsonl", budget=budget, mode="paid")
+            with self.assertRaisesRegex(RS.StageRefused, "paid mode needs --allocation"):
+                RS.run_stage(stage, self.root, self.p1, mode="paid", transport=https, ledger=led,
+                             read_images=lambda e: e, workspace="w", openai_project="p",
+                             counter=D.HttpsTokenCounter(https, "w"))
+            self.assertEqual(https.sent, [])
+        self.assertFalse(self.root.exists())
+
+    def test_fake_mode_takes_no_allocation_and_records_none(self):
+        report, _ = self.stage("P1", self.p1, self.led)
+        self.assertTrue(report["complete"])
+        self.assertIsNone(self.recorded("P1"))
 
 
 class TestRunRecords(RunnerCase):
@@ -1071,10 +1203,38 @@ class TestEval(RunnerCase):
     def eval_ledger(self, clock=time.time):
         return S.Ledger(RS.ledger_path(self.ledgers, "evaluation"), "evaluation", clock, mode="fake")
 
-    def eval(self, panel, its=None, clock=time.time, provider=None):
+    def eval(self, panel, its=None, clock=time.time, provider=None, **kw):
         with self.eval_ledger(clock) as led:
             return self.stage("EVAL", its or self.panel_items, led, panel=panel, repo=self.repo, provider=provider,
-                              clock=clock)
+                              clock=clock, **kw)
+
+    def test_eval_refuses_a_panel_task_in_p2_or_p3(self):
+        panel, ids = self.write_manifest(), task_ids(self.panel_items)
+        for name, kw in (("p1.json", {"p1": ids[:1]}), ("p2.json", {"p2_new": ids[1:]}), ("p3.json", {"p3": ids[:1]})):
+            provider = RS.ScriptedProvider()
+            with self.assertRaisesRegex(RS.StageRefused, "tasks of the development allocation"):
+                self.eval(panel, provider=provider, allocation=allocation_file(self.tmp, name=name, **kw))
+            self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / "EVAL").exists())
+
+    def test_eval_with_an_allocation_that_names_no_panel_task_runs_and_records_it(self):
+        allocation = allocation_file(self.tmp, ["task.a0"], ["task.b0"], ["task.c0"])
+        report, provider = self.eval(self.write_manifest(), allocation=allocation)
+        self.assertEqual((report["stopped"], len(provider.sent)), (None, 8))
+        self.assertEqual(json.loads((self.root / "EVAL" / "stage.json").read_text())["allocation"],
+                         json.loads(allocation.read_text())["sha256"])
+
+    def test_eval_without_a_task_id_is_refused_when_an_allocation_is_given(self):
+        its = [i._replace(task_id=None) for i in self.panel_items]
+        with self.assertRaisesRegex(RS.StageRefused, "no normalized task ID"):
+            self.eval(self.write_manifest(), its=its, allocation=allocation_file(self.tmp, ["task.a0"]))
+
+    def test_eval_must_use_p3_s_allocation_when_p3_recorded_one(self):
+        record = json.loads((self.root / "P3" / "stage.json").read_text())
+        (self.root / "P3" / "stage.json").write_text(json.dumps(dict(record, allocation="0" * 64)))
+        with self.assertRaisesRegex(RS.StageRefused, "every stage of a run uses the same one"):
+            self.eval(self.write_manifest(), allocation=allocation_file(self.tmp, ["task.a0"]))
+        self.assertFalse((self.root / "EVAL").exists())
 
     def test_eval_refuses_without_a_verified_frozen_panel(self):
         good = self.write_manifest()
@@ -1324,6 +1484,7 @@ class TestPaidTokenCounts(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.fresh("first")
         self.its = items(1, "a")
+        self.allocation = allocation_file(self.tmp, task_ids(self.its))
 
     def fresh(self, name):
         """A new run folder, a new paid ledger, and a transport and counter bound to the study."""
@@ -1341,7 +1502,7 @@ class TestPaidTokenCounts(unittest.TestCase):
         with mock.patch.dict(os.environ, keys), mock.patch.object(D.urllib.request, "urlopen", http):
             return RS.run_stage("P1", self.root, self.its, mode="paid", transport=self.transport, ledger=self.led,
                                 read_images=lambda e: e, workspace=self.WORKSPACE, openai_project=self.PROJECT,
-                                counter=counter or self.counter)
+                                counter=counter or self.counter, allocation=self.allocation)
 
     def test_a_paid_trajectory_is_counted_before_its_first_send_and_reserved_at_the_provider_s_count(self):
         http = self.http()
@@ -1437,11 +1598,11 @@ class TestPaidTokenCounts(unittest.TestCase):
             RS.run_stage("P1", self.root, self.its, mode="fake", transport=RS.ScriptedProvider(), ledger=led,
                          read_images=lambda e: e, workspace=RS.FAKE_WORKSPACE, counter=self.counter)
 
-    def command(self, *flags):
+    def command(self, *flags, stage="P1"):
         """The arguments the stage command gives ``run_stage``, with the guard, the socket
         refusal and the packs replaced, since an installed guard cannot be removed."""
         data_root, run_root = self.tmp / "data", self.tmp / "data" / "out" / "run"
-        argv = ["run", "--stage", "P1", "--run-root", str(run_root), "--data-root", str(data_root), "--packs", "p",
+        argv = ["run", "--stage", stage, "--run-root", str(run_root), "--data-root", str(data_root), "--packs", "p",
                 "--provenance", "q", *flags]
         with mock.patch.object(RS, "_guard", return_value=(data_root, run_root)), \
                 mock.patch.object(RS, "_forbid_network"), mock.patch.object(RS, "load_items", return_value=[]), \
@@ -1679,8 +1840,24 @@ class TestCommands(CommandCase):
             self.assertIn("frozen rubric", r.stderr)
         self.assertFalse(self.root.exists())
 
+    def test_the_stage_command_applies_the_allocation_by_normalized_task_id(self):
+        self.assertEqual({i.task_id for i in RS.load_items([self.tmp / "packs"], [self.inputs / "provenance.jsonl"])},
+                         {"webarena.1", "visualwebarena.3"})
+        wrong = allocation_file(self.tmp, ["webarena.1"], [], ["visualwebarena.3"], name="wrong.json")
+        r = self.command(self.stage_args("P1", "--allocation", str(wrong)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("allocation's p1", r.stderr)
+        self.assertFalse(self.root.exists())
+        good = allocation_file(self.tmp, ["webarena.1", "visualwebarena.3"], name="good.json")
+        r = self.command(self.stage_args("P1", "--allocation", str(good)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads((self.root / "P1" / "stage.json").read_text())["allocation"],
+                         json.loads(good.read_text())["sha256"])
+
     def test_paths_inside_the_repository_are_refused(self):
         inside = REPO / "not-a-file-in-the-repo.txt"
+        r = self.command(self.stage_args("EVAL", "--allocation", str(inside)))
+        self.assertIn("--allocation must be outside the repository", r.stderr)
         r = self.command(self.stage_args("P1", "--approval-note", str(inside)))
         self.assertIn("--approval-note must be outside the repository", r.stderr)
         r = self.command(self.stage_args("EVAL", "--panel-manifest", str(inside)))

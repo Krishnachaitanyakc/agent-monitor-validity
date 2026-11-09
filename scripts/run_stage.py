@@ -19,15 +19,19 @@ last call:
   EVAL  the frozen panel; needs --panel-manifest, its recorded --panel-sha256 and --freeze-tag
 P1 to P3 install the dev_only guard and share the pilot budget ($95); EVAL installs
 pre_join and has its own budget ($285). The guard is installed before anything is read.
-P3 and EVAL refuse a rubric whose status is not "frozen". --b-model picks judge B's model,
-gpt-6-sol or its first fallback; it is part of the configuration hash, so a stage resumes
-only under the model it started with. In the evaluation, a trajectory does not start,
-with a reconcile_due halt, once the oldest call that no passing reconciliation follows
-is more than 23 hours old (a single call is refused at 24 hours), and EVAL's report is
-complete only after a passing reconciliation that follows its last call: reconcile, then
-run the same command again to write it. A pilot stage records an ineligible case and goes
-on. Eligibility is settled before the panel is frozen, so in EVAL an ineligible task halts
-the stage, is not counted as ended and does not change N, and a note does not drop it.
+P3 and EVAL refuse a rubric whose status is not "frozen". --allocation names the
+development allocation from scripts/draw_allocation.py, which paid mode needs at every
+stage and fake mode takes when given: each trace's normalized task ID must be in the
+stage's list (P1 in p1, P2 in p2, P3 in p3), no panel task may be in p2 or p3, and
+stage.json records the allocation's SHA-256. --b-model picks judge B's model, gpt-6-sol or its first
+fallback; it is part of the configuration hash, so a stage resumes only under the model
+it started with. In the evaluation, a trajectory does not start, with a reconcile_due
+halt, once the oldest call that no passing reconciliation follows is more than 23 hours
+old (a single call is refused at 24 hours), and EVAL's report is complete only after a
+passing reconciliation that follows its last call: reconcile, then run the same command
+again to write it. A pilot stage records an ineligible case and goes on. Eligibility is
+settled before the panel is frozen, so in EVAL an ineligible task halts the stage, is not
+counted as ended and does not change N, and a note does not drop it.
 
 **Transport.** With none of --paid, --confirm-paid-calls and --approval-note, only the
 fake transport runs: every socket connection is refused, no API key is read, and
@@ -102,7 +106,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts"))
 
+import draw_allocation as DA  # noqa: E402
 from datapath import fence, fetch  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
@@ -123,6 +129,7 @@ STAGES = {
     "EVAL": Stage("EVAL", "the frozen panel", "evaluation", "pre_join", "P3", R.SLOTS, True, None),
 }
 FROZEN_RUBRIC_STAGES = ("P3", "EVAL")
+ALLOCATION_LIST = {"P1": "p1", "P2": "p2", "P3": "p3"}
 USAGE_PROFILES = {"central": (60000, 3000), "high": (60000, 12000), "extreme": (100000, 20000)}
 FAKE_WORKSPACE = "wrkspc_fake"
 FAKE_PROJECT = "proj_fake"
@@ -149,7 +156,7 @@ RESUME_RULES = {
 }
 FAKE_TRANSPORT = "fake transport with scripted provider-shaped streams"
 
-Item = namedtuple("Item", "trace_key pack pack_sha256 entries private")
+Item = namedtuple("Item", "trace_key pack pack_sha256 entries private task_id", defaults=(None,))
 
 _network_refused = False
 
@@ -275,7 +282,7 @@ def load_items(packs, provenance, split="dev") -> list:
                 raise ValueError(f"{key}: the image manifest belongs to another pack")
             private = sorted(set(P.private_strings(prov)) | set(R.manifest_strings(entries))
                              | {key, line["pack_sha256"]})
-            items.append(Item(key, pack, line["pack_sha256"], entries, private))
+            items.append(Item(key, pack, line["pack_sha256"], entries, private, prov.get("task_id_normalized")))
     keys = [i.trace_key for i in items]
     if len(set(keys)) != len(keys):
         raise ValueError("a trace key appears twice across the --packs folders")
@@ -737,6 +744,47 @@ def verify_panel(panel, config_sha256: str, items: list, repo=REPO) -> dict:
             "freeze_commit": freeze_commit(repo, panel["freeze_tag"]), "n": len(tasks)}
 
 
+def load_allocation(path) -> dict:
+    """The allocation file from scripts/draw_allocation.py, once it passes that script's checks."""
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise StageRefused(f"no allocation file at {path}")
+    try:
+        return DA.verify_allocation(json.loads(path.read_bytes()))
+    except ValueError as e:                     # a refusal, or a file that is not JSON
+        raise StageRefused(f"the allocation is refused: {e}") from None
+
+
+def check_allocation(stage: str, items: list, allocation: dict) -> None:
+    """Refuse a trace whose task is outside its stage's list, and any panel task the
+    development allocation names. A trace maps to its task through its provenance record's
+    ``task_id_normalized``, the ID the split table uses."""
+    unmapped = [i.trace_key for i in items if i.task_id is None]
+    if unmapped:
+        raise StageRefused(f"{unmapped[0]} has no normalized task ID in its provenance, so the allocation cannot "
+                           "be applied")
+    tasks = {i.task_id for i in items}
+    if stage == "EVAL":
+        used = sorted(tasks & (set(allocation["p2"]) | set(allocation["p3"])))
+        if used:
+            raise StageRefused(f"EVAL's panel holds tasks of the development allocation: {used}")
+        return
+    outside = sorted(tasks - set(allocation[ALLOCATION_LIST[stage]]))
+    if outside:
+        raise StageRefused(f"{stage} runs only tasks in the allocation's {ALLOCATION_LIST[stage]}; these are not: "
+                           f"{outside}")
+
+
+def check_same_allocation(spec: Stage, run_root: Path, allocation: dict) -> None:
+    """A stage uses the allocation that the stage before it recorded, if it recorded one."""
+    if spec.previous is None:
+        return
+    record = json.loads((run_root / spec.previous / "stage.json").read_text(encoding="utf-8"))
+    if record.get("allocation") not in (None, allocation["sha256"]):
+        raise StageRefused(f"{spec.previous} ran under allocation {record['allocation']}, not "
+                           f"{allocation['sha256']}; every stage of a run uses the same one")
+
+
 def _fixed_record(path: Path, record: dict, what: str) -> None:
     """Write ``record`` once; later starts must present the same one."""
     if path.exists():
@@ -754,7 +802,7 @@ def _slots_ended(log, key, config_sha256, slots) -> bool:
 
 def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger, read_images, workspace,
               openai_project=None, counter=None, panel=None, repo=REPO, sleep=None, clock=time.time, settings=None,
-              b_model=R.B_MODEL, rubric_check=True) -> dict:
+              b_model=R.B_MODEL, rubric_check=True, allocation=None) -> dict:
     """Run one stage, or resume it, and return its report (see the module docstring).
 
     ``workspace`` and ``openai_project`` are the study's scopes; fake mode's project
@@ -763,7 +811,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     ``HttpsTokenCounter`` on its transport and workspace. ``rubric_check=False`` waives the
     frozen-rubric rule of P3 and EVAL, which only the fake-mode stage dry run does, and the
     report says so. A call that settles above its reservation halts the stage once its
-    trajectory finishes; the cap still counts actual settled spend.
+    trajectory finishes; the cap still counts actual settled spend. ``allocation`` is the
+    path of the development allocation, which paid mode needs.
     """
     spec = STAGES[stage]
     run_root = Path(run_root)
@@ -796,12 +845,20 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     rubric_status = R.config_record(b_model=b_model, caching=spec.caching)["rubric"]["status"]
     if rubric_check and spec.name in FROZEN_RUBRIC_STAGES and rubric_status != "frozen":
         raise StageRefused(f"{stage} needs a frozen rubric; the rubric's status is {rubric_status!r}")
+    allocation_record = load_allocation(allocation) if allocation else None
+    if mode == "paid" and allocation_record is None:
+        raise StageRefused("paid mode needs --allocation, the development allocation from "
+                           "scripts/draw_allocation.py")
+    if allocation_record is not None:
+        check_allocation(stage, items, allocation_record)
     run_root.mkdir(parents=True, exist_ok=True)
     panel_record = None
     if spec.name == "EVAL":
         panel_record = verify_panel(panel, config_hash, items, repo)
     run = run_record(run_root, mode, scopes, ledger)
     previous = check_previous(spec, run_root, ledger, mode, run)
+    if allocation_record is not None:
+        check_same_allocation(spec, run_root, allocation_record)
     planned = panel_record["n"] if panel_record else spec.planned
     if not items or len(items) > planned:
         raise StageRefused(f"{stage} runs 1 to {planned} cases; {len(items)} were given")
@@ -815,6 +872,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         "openai_project": scopes["openai"],
         "ledger": {"budget": ledger.budget, "file": ledger.path.name, "id": ledger.ledger_id},
         "scripted_usage": getattr(transport, "profile", None), "panel": panel_record and panel_record["sha256"],
+        "allocation": allocation_record and allocation_record["sha256"],
         "cases": [[i.trace_key, i.pack_sha256] for i in items]}, "inputs")
     log_root = (stage_dir / "attempt_log").resolve()
     log = StageLog(log_root, run_root, stage, {"A": R.A_MODEL, "B": b_model})
@@ -1073,7 +1131,8 @@ def _budget_profile(budget: str) -> str:
 def cmd_run(args) -> int:
     spec = STAGES[args.stage]
     data_root, run_root = _guard(spec.profile, args)
-    for flag, value in (("--approval-note", args.approval_note), ("--panel-manifest", args.panel_manifest)):
+    for flag, value in (("--approval-note", args.approval_note), ("--panel-manifest", args.panel_manifest),
+                        ("--allocation", args.allocation)):
         if value:
             _outside_repo(Path(value), flag)
     if spec.name != "EVAL" and (args.panel_manifest or args.panel_sha256 or args.freeze_tag):
@@ -1113,7 +1172,7 @@ def cmd_run(args) -> int:
             report = run_stage(spec.name, run_root, items, mode=mode, transport=transport, ledger=ledger,
                                read_images=lambda entries: R.read_images(entries, data_root), workspace=workspace,
                                openai_project=project, counter=counter, panel=panel, sleep=sleep, settings=settings,
-                               b_model=args.b_model)
+                               b_model=args.b_model, allocation=args.allocation)
         finally:
             if mode == "fake":
                 transport.write_export()
@@ -1196,6 +1255,8 @@ def main(argv=None) -> int:
     run.add_argument("--panel-manifest", help="EVAL: the frozen panel manifest")
     run.add_argument("--panel-sha256", help="EVAL: the manifest's recorded SHA-256")
     run.add_argument("--freeze-tag", help="EVAL: the git tag of the frozen code")
+    run.add_argument("--allocation", help="the development allocation from scripts/draw_allocation.py; paid mode "
+                     "needs it at every stage")
     rec = sub.add_parser("reconcile", parents=[common], help="compare a usage export with a budget's ledger")
     rec.add_argument("--budget", required=True, choices=sorted(S.CAPS))
     rec.add_argument("--export", required=True, help="the usage export, .csv or .json, outside the repository")
