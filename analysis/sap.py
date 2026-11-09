@@ -2506,6 +2506,7 @@ CASE_GENERATOR_TEXT = ("Generator of a cell: SeedSequence({seed}, spawn_key=(6, 
                        "at index 0 to 5. A cell A with only U2 or only U1 takes up to 2 from that group. With no "
                        "D case, cell E takes the first of its order. The control in cell F is distinct from the "
                        "first control, and there is none without a second D case.")
+CASE_NOT_SUPPLIED = "not supplied"
 CASE_NO_IDS_TEXT = ("Task IDs were not supplied, so the tasks are sorted by their stored position here. The real "
                     "run must supply them.")
 CASE_READING_TEXT = ("E is 1 when the released reference contradicts the first verdict. Each probability "
@@ -2670,6 +2671,30 @@ def select_cases(slots: Sequence[Mapping[str, str]], E: Sequence[int], reference
     return chosen
 
 
+def _one_line(x) -> str:
+    """A free-text value on one report line; a blank or absent one is 'none'."""
+    if x is None or (isinstance(x, float) and math.isnan(x)) or not str(x).strip():
+        return "none"
+    return " ".join(str(x).split())
+
+
+def _released_label_text(Y: Optional[Sequence[Optional[str]]], i: int) -> str:
+    """Task i's released label as the case view prints it [labels]."""
+    if Y is None:
+        return CASE_NOT_SUPPLIED
+    return MISSING if reference_status(Y[i])[0] == MISSING else str(Y[i])
+
+
+def _case_value(values: Optional[Sequence[Optional[str]]], i: int) -> str:
+    """Task i's entry of an optional input of the case view."""
+    return CASE_NOT_SUPPLIED if values is None else _one_line(values[i])
+
+
+def _case_rationales(rationales: Optional[Sequence[Mapping[str, Optional[str]]]], i: int) -> Optional[Dict[str, str]]:
+    """Task i's rationales by slot, or None when none were given."""
+    return None if rationales is None else {k: _one_line(rationales[i].get(k)) for k in SLOT_NAMES.values()}
+
+
 def _case_shows(cell: str, matched_on: Optional[str]) -> str:
     """What a case's cell shows, in the plan's words, with how a control was matched."""
     shows = {row[0]: row[3] for row in CASE_CELL_ROWS}[cell]
@@ -2786,6 +2811,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                    provenance: Optional[dict] = None,
                    ids: Optional[Sequence[str]] = None,
                    templates: Optional[Sequence[str]] = None,
+                   rationales: Optional[Sequence[Mapping[str, Optional[str]]]] = None,
+                   second_annotator: Optional[Sequence[Optional[str]]] = None,
                    case_seed: int) -> dict:
     """The primary result: a descriptive audit of the frozen panel [labels].
 
@@ -2799,7 +2826,10 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     case_seed is the seed in the freeze list. It has no default, so a forgotten seed
     stops the analysis instead of choosing the cases with seed 0. templates gives each
     panel task's template id, label-free, and the report gives N with its template
-    multiplicities (template_multiplicities).
+    multiplicities (template_multiplicities). rationales gives, for each trajectory,
+    the judge rationale of each slot, by slot name, and second_annotator its second
+    annotator's label, if any. Each case shows them with its released label, and an
+    input that was not given is printed as not supplied.
 
     The conclusions apply to these tasks and these realized judge calls. Every number
     is computed exactly in the regime at hand, degenerate ones included: the expected
@@ -2830,8 +2860,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     n = len(slots)
     if benchmarks is not None and len(benchmarks) != n:
         raise ValueError("benchmarks must give one entry per trajectory")
-    if templates is not None and len(templates) != n:
-        raise ValueError("templates must give one template id per trajectory")
+    for name, given in (("templates", templates), ("rationales", rationales), ("second_annotator", second_annotator)):
+        if given is not None and len(given) != n:
+            raise ValueError(f"{name} must give one entry per trajectory")
     lf = derive_label_free(slots)
     labels = list(lf["stratum"])
     if Y is not None:
@@ -2874,6 +2905,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
               "group": labels[c["index"]],
               "slots": {k: canonical_outcome(slots[c["index"]][k]) for k in SLOT_NAMES.values()},
               "E": E[c["index"]], "reference": ref[c["index"]] if statuses_given else None,
+              "released_label": _released_label_text(Y, c["index"]),
+              "second_annotator": _case_value(second_annotator, c["index"]),
+              "rationales": _case_rationales(rationales, c["index"]),
               "review_probability": {pol: probs[pol][c["index"]] for pol in POLICY_ORDER},
               "shows": _case_shows(c["cell"], c["matched_on"]), "matched_on": c["matched_on"]}
              for c in select_cases(slots, E, ref, benchmarks=benchmarks, ids=ids, seed=case_seed)]
@@ -3003,13 +3037,17 @@ def _case_lines(c: dict) -> List[str]:
         out.append("  None: no task falls in a cell.")
         return out
     name = "task" if c["sort_key"] == "ids" else "position from 0"
-    out.append(f"  cell | {name} | group | A1, A2, A3, B1 | reference | E | "
+    out.append(f"  cell | {name} | group | A1, A2, A3, B1 | reference | released label | second annotator | E | "
                + " | ".join(POLICY_NAMES[p] for p in POLICY_ORDER) + " | what the cell shows")
     for t in c["tasks"]:
         outcomes = ", ".join(t["slots"][k] for k in SLOT_NAMES.values())
         reference = "not assessed" if t["reference"] is None else t["reference"]
         probs = " | ".join(_exact_text(t["review_probability"][p]) for p in POLICY_ORDER)
-        out.append(f"  {t['cell']} | {t['task']} | {t['group']} | {outcomes} | {reference} | {t['E']} | {probs} | {t['shows']}")
+        out.append(f"  {t['cell']} | {t['task']} | {t['group']} | {outcomes} | {reference} | {t['released_label']} | "
+                   f"{t['second_annotator']} | {t['E']} | {probs} | {t['shows']}")
+        rationale_text = (CASE_NOT_SUPPLIED if t["rationales"] is None
+                          else "; ".join(f"{k}: {v}" for k, v in t["rationales"].items()))
+        out.append(f"    rationales: {rationale_text}")
     return out
 
 

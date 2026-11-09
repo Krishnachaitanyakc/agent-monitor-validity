@@ -1337,7 +1337,7 @@ class TestCases(unittest.TestCase):
                          "that policy's exact chance of reviewing the task, over its own random choices. A "
                          "contradicted task is caught with that probability and missed with the rest.")
         self.assertEqual(lines[start + 2 + len(self.RULE)],
-                         "  cell | task | group | A1, A2, A3, B1 | reference | E | "
+                         "  cell | task | group | A1, A2, A3, B1 | reference | released label | second annotator | E | "
                          "Instability-first | Disagreement-first | Random | what the cell shows")
 
     def test_no_claim_of_blindness_is_left(self):
@@ -1351,9 +1351,9 @@ class TestCases(unittest.TestCase):
         lines = sap.describe_report(d, EXPOSURE).split("\n")
         rows = [t for t in d["cases"]["tasks"]]
         self.assertEqual([t["cell"] for t in rows], ["A", "B", "D", "E", "F"])   # no valid B1 with E = 1 in G1
-        for row in ("A | t4 | U2 | success, failure, failure, success | usable | 1 | 1 (1.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["A"],
-                    "B | t8 | U1 | success, ABSTAIN, failure, success | usable | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["B"],
-                    "D | t7 | S | success, ABSTAIN, success, success | usable | 1 | 0 (0.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["D"]):
+        for row in ("A | t4 | U2 | success, failure, failure, success | usable | Unsuccessful | not supplied | 1 | 1 (1.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["A"],
+                    "B | t8 | U1 | success, ABSTAIN, failure, success | usable | Successful | not supplied | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["B"],
+                    "D | t7 | S | success, ABSTAIN, success, success | usable | Unsuccessful | not supplied | 1 | 0 (0.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["D"]):
             self.assertIn("  " + row, lines, row)
         ending = {"E": "Control matched to the first D case on benchmark and A1 verdict, falling back to A1 verdict alone (matched here: A1 verdict alone)",
                   "F": "The unknown tasks"}
@@ -1362,6 +1362,42 @@ class TestCases(unittest.TestCase):
             self.assertEqual((t["E"], t["reference"]), (j["E"][i], j["reference"][i]), t["task"])
             if t["cell"] in ending:
                 self.assertTrue(any(x.startswith(f"  {t['cell']} | {t['task']} | ") and x.endswith(ending[t["cell"]]) for x in lines), t)
+
+    def test_a_case_shows_its_released_label_rationales_and_second_annotator(self):
+        slots, Y, _ = mixed_panel()
+        rationales = [{k: f"{k} of task {i}" for k in ("A1", "A2", "A3", "B1")} for i in range(10)]
+        rationales[4]["A2"] = "split over\n  two lines"
+        del rationales[4]["B1"]
+        rationales[4]["A3"] = "   "
+        second = [f"annotator {i}" for i in range(10)]
+        second[8] = None
+        d = self.mixed(rationales=rationales, second_annotator=second)
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        row = ("  A | t4 | U2 | success, failure, failure, success | usable | Unsuccessful | annotator 4 | 1 | "
+               "1 (1.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["A"])
+        self.assertEqual(lines[lines.index(row) + 1], "    rationales: A1: A1 of task 4; A2: split over two lines; A3: none; B1: none")
+        row = ("  B | t8 | U1 | success, ABSTAIN, failure, success | usable | Successful | none | 0 | "
+               "1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["B"])
+        self.assertEqual(lines[lines.index(row) + 1], "    rationales: A1: A1 of task 8; A2: A2 of task 8; A3: A3 of task 8; B1: B1 of task 8")
+
+    def test_the_released_label_of_each_status(self):
+        for y, shown in (("Unsuccessful", "Unsuccessful"), ("Unsure", "Unsure"), ("unsure", "unsure"), (None, "missing"),
+                         ("  ", "missing"), (float("nan"), "missing")):
+            d = describe_panel([slot("S")], Y=[y], ids=["a"])
+            self.assertEqual(d["cases"]["tasks"][0]["released_label"], shown, y)
+
+    def test_inputs_that_were_not_given_are_stated(self):
+        d = describe_panel([slot("S")] * 4, [0, 1, 0, 0])
+        for t in d["cases"]["tasks"]:
+            self.assertEqual((t["released_label"], t["second_annotator"], t["rationales"]), ("not supplied", "not supplied", None))
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertEqual(lines.count("    rationales: not supplied"), len(d["cases"]["tasks"]))
+
+    def test_the_case_inputs_need_one_entry_per_task(self):
+        slots, Y, _ = mixed_panel()
+        for kw in ({"rationales": [{}] * 9}, {"second_annotator": [None] * 11}):
+            with self.assertRaises(ValueError, msg=repr(kw)):
+                self.mixed(**kw)
 
     def test_a_row_says_how_a_control_was_matched(self):
         rows = [("S", 1, USABLE, "wa", "success"), ("S", 0, USABLE, "wa", "success"), ("S", 1, USABLE, "work", "failure"),
@@ -1441,14 +1477,14 @@ class TestCases(unittest.TestCase):
 
     def test_the_slots_print_in_canonical_spelling(self):
         slots = [{"A1": "SUCCESS", "A2": "Failure", "A3": "success", "B1": "sUcCeSs"}]
-        self.assertIn("  B | 0 | U1 | success, failure, success, success | usable | 0 ",
+        self.assertIn("  B | 0 | U1 | success, failure, success, success | usable | Successful | not supplied | 0 ",
                       sap.describe_report(describe_panel(slots, Y=["Successful"]), EXPOSURE))
 
     def test_without_ids_the_tasks_are_named_by_position(self):
         d = describe_panel([slot("S")] * 4, [0, 1, 0, 0])
         self.assertEqual(d["cases"]["sort_key"], "stored order")
         lines = sap.describe_report(d, EXPOSURE).split("\n")
-        self.assertIn("  cell | position from 0 | group | A1, A2, A3, B1 | reference | E | "
+        self.assertIn("  cell | position from 0 | group | A1, A2, A3, B1 | reference | released label | second annotator | E | "
                       "Instability-first | Disagreement-first | Random | what the cell shows", lines)
         self.assertIn("  Task IDs were not supplied, so the tasks are sorted by their stored position here. "
                       "The real run must supply them.", lines)
