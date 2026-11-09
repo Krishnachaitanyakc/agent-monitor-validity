@@ -1187,7 +1187,8 @@ def main(argv=None) -> int:
     run.add_argument("--paid", action="store_true", help="paid mode, with the two conditions below")
     run.add_argument("--confirm-paid-calls", action="store_true", help="passed to the HTTPS transport")
     run.add_argument("--approval-note", help="the file written after the mentor's written go-ahead")
-    run.add_argument("--workspace", help="paid mode: the study's Anthropic workspace ID")
+    run.add_argument("--workspace", help="paid mode: the study's Anthropic workspace ID; ANTHROPIC_API_KEY must "
+                     "be scoped to it")
     run.add_argument("--openai-project", help="paid mode: the study's OpenAI project ID, sent on every OpenAI request")
     run.add_argument("--new-budget-note", help="why a second ledger for this budget is started, after the first "
                      "was moved aside")

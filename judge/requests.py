@@ -1,7 +1,8 @@
 """Exact request bodies for judge A (Anthropic Messages) and judge B (OpenAI Responses).
 
 One pack and its screenshots give one body per judge. The bodies are the exact bytes a
-transport sends; nothing is added to them later except the credential header.
+transport sends; nothing is added at send time except the credential header and, on an
+OpenAI request, the project header.
 
 **Evidence.** Both judges receive the same evidence parts in the same order: a text part
 with the pack's version, field notes and goal; for each step, a text part with that
