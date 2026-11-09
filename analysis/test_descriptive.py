@@ -894,12 +894,17 @@ class TestDescriptiveReport(unittest.TestCase):
         d = describe(labels_for(0, 2, 0, 2, 16), [0] * 20)
         txt = sap.describe_report(d, EXPOSURE)
         lines = txt.split("\n")
-        self.assertIn("descriptive", lines[0])
-        self.assertIn("the primary path is descriptive", sap.PLAN_VERSION)
-        self.assertIn(sap.PLAN_VERSION, lines[0])
+        self.assertEqual(lines[0], "Primary result: descriptive audit of the frozen panel, "
+                                   "analysis plan version 4.0, Nov 8, 2026")
         self.assertEqual(lines[1], sap.SCOPE_TEXT)
         self.assertEqual(lines[2], "Panel: a retrospective evaluation panel with documented prior exposure.")
         self.assertEqual(lines[3], "Prior exposure statement: " + EXPOSURE)
+
+    def test_only_the_population_path_refers_to_the_old_plan_version(self):
+        self.assertEqual(sap.PLAN_VERSION, "4.0, Nov 8, 2026")
+        self.assertEqual(sap.POPULATION_PLAN_VERSION, "v3.2")
+        for d in report_panels():
+            self.assertNotIn("3.2", sap.describe_report(d, EXPOSURE))
 
     def test_refuses_to_run_without_a_prior_exposure_statement(self):
         d = describe(labels_for(0, 2, 0, 2, 16), [0] * 20)
