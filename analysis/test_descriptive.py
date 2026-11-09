@@ -242,6 +242,43 @@ class TestDesignAndReviewCount(unittest.TestCase):
         self.assertIn("  agreeing items with both repeats INVALID (R set to 0): 1", lines)
 
 
+class TestTemplateMultiplicities(unittest.TestCase):
+    TEMPLATES = ["a"] * 3 + ["b"] * 3 + ["c"] * 2 + [f"solo{i}" for i in range(12)]
+
+    def panel(self):
+        return build(labels_for(0, 2, 0, 2, 16), [0] * 20)
+
+    def test_N_is_reported_with_its_template_multiplicities(self):
+        slots, Y = self.panel()
+        d = sap.analyze_panel(slots, Y=Y, templates=self.TEMPLATES, case_seed=0)
+        self.assertEqual(d["template_multiplicities"], {"n_tasks": 20, "n_templates": 15, "max_multiplicity": 3,
+                                                        "tasks_sharing": 8, "histogram": {1: 12, 2: 1, 3: 2}})
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = lines.index("  N = 20, invalid A1 n_inv = 0, valid N_V = 20")
+        self.assertEqual(lines[start + 1:start + 3],
+                         ["  Panel tasks: 20 in 15 templates; largest template holds 3; 8 tasks share a template.",
+                          "  Templates by number of tasks: 1 task: 12, 2 tasks: 1, 3 tasks: 2"])
+
+    def test_the_report_says_when_they_were_not_supplied(self):
+        slots, Y = self.panel()
+        d = describe_panel(slots, Y=Y)
+        self.assertIsNone(d["template_multiplicities"])
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = lines.index("  N = 20, invalid A1 n_inv = 0, valid N_V = 20")
+        self.assertEqual(lines[start + 1], "  Template multiplicities: not supplied with the panel manifest.")
+
+    def test_they_read_no_label(self):
+        slots, Y = self.panel()
+        unknown = ["Unsure"] * 20
+        self.assertEqual(describe_panel(slots, Y=Y, templates=self.TEMPLATES)["template_multiplicities"],
+                         describe_panel(slots, Y=unknown, templates=self.TEMPLATES)["template_multiplicities"])
+
+    def test_one_template_id_per_task_is_required(self):
+        slots, Y = self.panel()
+        with self.assertRaises(ValueError):
+            describe_panel(slots, Y=Y, templates=self.TEMPLATES[:-1])
+
+
 class TestLockQuantities(unittest.TestCase):
     def brute(self, sizes):
         """The largest gain per 100 and the largest effect of one unstable task, over every E."""

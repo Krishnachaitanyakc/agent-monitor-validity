@@ -2314,6 +2314,12 @@ def _brief(name: str, r: dict) -> List[str]:
     return lines
 
 
+def _template_count_line(mult: Mapping[str, int]) -> str:
+    """The report line on how the panel's tasks fall in templates."""
+    return (f"  Panel tasks: {mult['n_tasks']} in {mult['n_templates']} templates; largest template "
+            f"holds {mult['max_multiplicity']}; {mult['tasks_sharing']} tasks share a template.")
+
+
 def _provenance_lines(prov: Optional[dict]) -> List[str]:
     """Report lines for the A1 rule and the attempt log's counts."""
     out = ["A1 provenance (plan rule)"]
@@ -2404,8 +2410,7 @@ def panel_report(panel: dict, prior_exposure: Optional[str] = None) -> str:
                "required before the freeze.")
     mult = panel.get("template_multiplicities")
     if mult is not None:
-        out.append(f"  Panel tasks: {mult['n_tasks']} in {mult['n_templates']} templates; largest template "
-                   f"holds {mult['max_multiplicity']}; {mult['tasks_sharing']} tasks share a template.")
+        out.append(_template_count_line(mult))
     tp = panel.get("template_panel")
     if tp is None:
         out.append("  One-task-per-template panel: not supplied with the panel manifest.")
@@ -2772,6 +2777,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                    costs: Optional[Mapping[str, object]] = None,
                    provenance: Optional[dict] = None,
                    ids: Optional[Sequence[str]] = None,
+                   templates: Optional[Sequence[str]] = None,
                    case_seed: int) -> dict:
     """The primary result: a descriptive audit of the frozen panel [labels].
 
@@ -2783,7 +2789,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     spending ledger (inference_costs) and provenance from resolve_panel. ids names
     the tasks, and it, the benchmarks and case_seed fix the cases (select_cases).
     case_seed is the seed in the freeze list. It has no default, so a forgotten seed
-    stops the analysis instead of choosing the cases with seed 0.
+    stops the analysis instead of choosing the cases with seed 0. templates gives each
+    panel task's template id, label-free, and the report gives N with its template
+    multiplicities (template_multiplicities).
 
     The conclusions apply to these tasks and these realized judge calls. Every number
     is computed exactly in the regime at hand, degenerate ones included: the expected
@@ -2814,6 +2822,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     n = len(slots)
     if benchmarks is not None and len(benchmarks) != n:
         raise ValueError("benchmarks must give one entry per trajectory")
+    if templates is not None and len(templates) != n:
+        raise ValueError("templates must give one template id per trajectory")
     lf = derive_label_free(slots)
     labels = list(lf["stratum"])
     if Y is not None:
@@ -2862,6 +2872,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
+            "template_multiplicities": template_multiplicities(templates) if templates is not None else None,
             "lock": lock, "result_sentences": result_sentences(design.regime, observed, lock["x_per_100"]),
             "K_by_policy": reviews, "K_over_N": {pol: reviews[pol] / design.N if design.N > 0 else None for pol in POLICY_ORDER},
             "K_equal": all(v == design.K for v in reviews.values()),
@@ -2896,6 +2907,14 @@ def _case_rule_lines(seed: int, ids_given: bool) -> List[str]:
     lines += [" | ".join(row) for row in CASE_CELL_ROWS]
     lines += [CASE_WITHIN_CELL_TEXT, CASE_GENERATOR_TEXT.format(seed=seed)]
     return lines + ([] if ids_given else [CASE_NO_IDS_TEXT])
+
+
+def _template_lines(mult: Optional[Mapping[str, object]]) -> List[str]:
+    """Report lines giving N with its template multiplicities."""
+    if mult is None:
+        return ["  Template multiplicities: not supplied with the panel manifest."]
+    sizes = ", ".join(f"{k} task{'' if k == 1 else 's'}: {v}" for k, v in mult["histogram"].items())
+    return [_template_count_line(mult), f"  Templates by number of tasks: {sizes}"]
 
 
 def _exact_text(x: Optional[Fraction]) -> str:
@@ -3027,6 +3046,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     out += _provenance_lines(d["provenance"])
     out += ["", "Label-free design",
             f"  N = {d['N']}, invalid A1 n_inv = {d['n_inv']}, valid N_V = {d['N_V']}",
+            *_template_lines(d["template_multiplicities"]),
             f"  disagreeing n_D1 = {d['n_D1']}, agreeing n_D0 = {d['n_D0']}",
             f"  agreeing groups: U2 = {d['n_U2']}, U1 = {d['n_U1']}, S = {d['n_S']}",
             f"  valid first verdicts with both repeats invalid, disagreeing tasks included "

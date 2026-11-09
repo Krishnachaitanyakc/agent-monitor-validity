@@ -793,6 +793,21 @@ MUTATIONS = [
      """        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {d['K_by_policy'][p]} | "\n"""
      """                   f"{_exact_text(d['K_over_N'][p])} | {_exact_text(d['share_of_M'][p])}")\n""",
      """        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {_exact_text(d['share_of_M'][p])}")\n"""),
+    ("leave the template multiplicities out of the descriptive report",
+     """            *_template_lines(d["template_multiplicities"]),\n""",
+     ""),
+    ("ignore the templates given to the descriptive path",
+     '''"template_multiplicities": template_multiplicities(templates) if templates is not None else None,''',
+     '''"template_multiplicities": None,'''),
+    ("accept templates of the wrong length on the descriptive path",
+     "    if templates is not None and len(templates) != n:\n",
+     "    if False:\n"),
+    ("leave the number of tasks per template out of the report",
+     """    return [_template_count_line(mult), f"  Templates by number of tasks: {sizes}"]\n""",
+     """    return [_template_count_line(mult)]\n"""),
+    ("print the tasks that share a template as the template count",
+     "holds {mult['max_multiplicity']}; {mult['tasks_sharing']} tasks share a template.",
+     "holds {mult['max_multiplicity']}; {mult['n_templates']} tasks share a template."),
 ]
 
 
