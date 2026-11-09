@@ -23,7 +23,9 @@ P3 and EVAL refuse a rubric whose status is not "frozen". --allocation names the
 development allocation from scripts/draw_allocation.py, which paid mode needs at every
 stage and fake mode takes when given: each trace's normalized task ID must be in the
 stage's list (P1 in p1, P2 in p2, P3 in p3), no panel task may be in p2 or p3, and
-stage.json records the allocation's SHA-256. --b-model picks judge B's model, gpt-6-sol or its first
+stage.json records the allocation's SHA-256. EVAL refuses a configuration hash other than
+the one P3 ran under, unless --config-change-note names a non-empty file declaring the
+change, which stage.json keeps. --b-model picks judge B's model, gpt-6-sol or its first
 fallback; it is part of the configuration hash, so a stage resumes only under the model
 it started with. In the evaluation, a trajectory does not start, with a reconcile_due
 halt, once the oldest call that no passing reconciliation follows is more than 23 hours
@@ -785,6 +787,22 @@ def check_same_allocation(spec: Stage, run_root: Path, allocation: dict) -> None
                            f"{allocation['sha256']}; every stage of a run uses the same one")
 
 
+def check_eval_config(run_root: Path, config_sha256: str, note) -> dict:
+    """EVAL runs under the configuration P3 ran under, or declares the difference in a
+    note. Returns the note's record for stage.json, or None when there is no difference."""
+    p3 = json.loads((run_root / "P3" / "stage.json").read_text(encoding="utf-8")).get("config_sha256")
+    if p3 == config_sha256:
+        if note:
+            raise StageRefused("--config-change-note declares a change, but EVAL's configuration hash is the one P3 "
+                               "ran under")
+        return None
+    if not _note_ok(note):
+        raise StageRefused(f"EVAL's configuration hash {config_sha256} is not the one P3 ran under, {p3}; "
+                           "--config-change-note, a non-empty file, must declare the change")
+    path = Path(note).expanduser()
+    return {"sha256": fetch.sha256_file(path), "text": path.read_text(encoding="utf-8"), "p3_config_sha256": p3}
+
+
 def _fixed_record(path: Path, record: dict, what: str) -> None:
     """Write ``record`` once; later starts must present the same one."""
     if path.exists():
@@ -802,7 +820,7 @@ def _slots_ended(log, key, config_sha256, slots) -> bool:
 
 def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger, read_images, workspace,
               openai_project=None, counter=None, panel=None, repo=REPO, sleep=None, clock=time.time, settings=None,
-              b_model=R.B_MODEL, rubric_check=True, allocation=None) -> dict:
+              b_model=R.B_MODEL, rubric_check=True, allocation=None, config_change_note=None) -> dict:
     """Run one stage, or resume it, and return its report (see the module docstring).
 
     ``workspace`` and ``openai_project`` are the study's scopes; fake mode's project
@@ -812,7 +830,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     frozen-rubric rule of P3 and EVAL, which only the fake-mode stage dry run does, and the
     report says so. A call that settles above its reservation halts the stage once its
     trajectory finishes; the cap still counts actual settled spend. ``allocation`` is the
-    path of the development allocation, which paid mode needs.
+    path of the development allocation, which paid mode needs; ``config_change_note`` is
+    the path of a note declaring that EVAL's configuration differs from P3's.
     """
     spec = STAGES[stage]
     run_root = Path(run_root)
@@ -859,6 +878,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
     previous = check_previous(spec, run_root, ledger, mode, run)
     if allocation_record is not None:
         check_same_allocation(spec, run_root, allocation_record)
+    change_note = check_eval_config(run_root, config_hash, config_change_note) if spec.name == "EVAL" else None
     planned = panel_record["n"] if panel_record else spec.planned
     if not items or len(items) > planned:
         raise StageRefused(f"{stage} runs 1 to {planned} cases; {len(items)} were given")
@@ -872,7 +892,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         "openai_project": scopes["openai"],
         "ledger": {"budget": ledger.budget, "file": ledger.path.name, "id": ledger.ledger_id},
         "scripted_usage": getattr(transport, "profile", None), "panel": panel_record and panel_record["sha256"],
-        "allocation": allocation_record and allocation_record["sha256"],
+        "allocation": allocation_record and allocation_record["sha256"], "config_change_note": change_note,
         "cases": [[i.trace_key, i.pack_sha256] for i in items]}, "inputs")
     log_root = (stage_dir / "attempt_log").resolve()
     log = StageLog(log_root, run_root, stage, {"A": R.A_MODEL, "B": b_model})
@@ -1132,11 +1152,13 @@ def cmd_run(args) -> int:
     spec = STAGES[args.stage]
     data_root, run_root = _guard(spec.profile, args)
     for flag, value in (("--approval-note", args.approval_note), ("--panel-manifest", args.panel_manifest),
-                        ("--allocation", args.allocation)):
+                        ("--allocation", args.allocation), ("--config-change-note", args.config_change_note)):
         if value:
             _outside_repo(Path(value), flag)
     if spec.name != "EVAL" and (args.panel_manifest or args.panel_sha256 or args.freeze_tag):
         raise StageRefused("only EVAL takes a panel manifest")
+    if spec.name != "EVAL" and args.config_change_note:
+        raise StageRefused("only EVAL takes --config-change-note")
     if args.scripted_usage and (args.paid or args.confirm_paid_calls or args.approval_note):
         raise StageRefused("--scripted-usage is for fake mode only")
     mode, paid = select_transport(args.paid, args.confirm_paid_calls, args.approval_note, args.workspace,
@@ -1172,7 +1194,8 @@ def cmd_run(args) -> int:
             report = run_stage(spec.name, run_root, items, mode=mode, transport=transport, ledger=ledger,
                                read_images=lambda entries: R.read_images(entries, data_root), workspace=workspace,
                                openai_project=project, counter=counter, panel=panel, sleep=sleep, settings=settings,
-                               b_model=args.b_model, allocation=args.allocation)
+                               b_model=args.b_model, allocation=args.allocation,
+                               config_change_note=args.config_change_note)
         finally:
             if mode == "fake":
                 transport.write_export()
@@ -1257,6 +1280,7 @@ def main(argv=None) -> int:
     run.add_argument("--freeze-tag", help="EVAL: the git tag of the frozen code")
     run.add_argument("--allocation", help="the development allocation from scripts/draw_allocation.py; paid mode "
                      "needs it at every stage")
+    run.add_argument("--config-change-note", help="EVAL: a file declaring why its configuration differs from P3's")
     rec = sub.add_parser("reconcile", parents=[common], help="compare a usage export with a budget's ledger")
     rec.add_argument("--budget", required=True, choices=sorted(S.CAPS))
     rec.add_argument("--export", required=True, help="the usage export, .csv or .json, outside the repository")

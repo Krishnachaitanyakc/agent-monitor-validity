@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import draw_allocation as DA  # noqa: E402
 import run_stage as RS  # noqa: E402
+from datapath import fetch  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
@@ -1236,6 +1237,60 @@ class TestEval(RunnerCase):
             self.eval(self.write_manifest(), allocation=allocation_file(self.tmp, ["task.a0"]))
         self.assertFalse((self.root / "EVAL").exists())
 
+    def fallback(self):
+        """EVAL under judge B's first fallback, a configuration P3 did not run under."""
+        model = R.B_FALLBACK_MODELS[0]
+        return model, self.write_manifest(config_sha256=R.config_sha256(b_model=model))
+
+    def test_eval_refuses_another_configuration_than_p3_s_without_a_note(self):
+        model, panel = self.fallback()
+        empty = self.tmp / "empty.txt"
+        empty.write_text("  \n")
+        for note in (None, str(empty), str(self.tmp / "absent.txt")):
+            provider = RS.ScriptedProvider()
+            with self.assertRaisesRegex(RS.StageRefused, "not the one P3 ran under"):
+                self.eval(panel, provider=provider, b_model=model, config_change_note=note)
+            self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / "EVAL").exists())
+
+    def test_a_declared_configuration_change_runs_and_stage_json_keeps_the_note(self):
+        model, panel = self.fallback()
+        note = self.tmp / "change.txt"
+        note.write_text("Judge B moved to its first fallback after a capability failure.\n")
+        report, provider = self.eval(panel, b_model=model, config_change_note=str(note))
+        self.assertEqual((report["stopped"], len(provider.sent)), (None, 8))
+        self.assertEqual(json.loads((self.root / "EVAL" / "stage.json").read_text())["config_change_note"], {
+            "sha256": fetch.sha256_file(note), "text": note.read_text(), "p3_config_sha256": R.config_sha256()})
+        again = self.tmp / "change2.txt"
+        again.write_text("Another account of the change.\n")
+        with self.assertRaisesRegex(RS.StageRefused, "same ones"):
+            self.eval(panel, b_model=model, config_change_note=str(again))
+
+    def test_a_note_with_no_configuration_change_is_refused(self):
+        note = self.tmp / "change.txt"
+        note.write_text("Nothing changed.\n")
+        with self.assertRaisesRegex(RS.StageRefused, "declares a change"):
+            self.eval(self.write_manifest(), config_change_note=str(note))
+        self.assertFalse((self.root / "EVAL").exists())
+
+    def test_eval_under_p3_s_configuration_records_no_note(self):
+        self.eval(self.write_manifest())
+        self.assertIsNone(json.loads((self.root / "EVAL" / "stage.json").read_text())["config_change_note"])
+
+    def test_the_configuration_check_also_applies_in_paid_mode(self):
+        https, root = StandInHttps(), self.tmp / "paid-run"
+        (root / "P3").mkdir(parents=True)
+        (root / "P3" / "stage.json").write_text(json.dumps({"config_sha256": "0" * 64}))
+        led = self.ledger(self.tmp / "paid" / "ledger-evaluation.jsonl", budget="evaluation", mode="paid")
+        with mock.patch.object(RS, "check_previous", return_value=None), \
+                mock.patch.object(RS, "verify_panel", return_value={"n": 2, "sha256": "s"}), \
+                self.assertRaisesRegex(RS.StageRefused, "not the one P3 ran under"):
+            RS.run_stage("EVAL", root, self.panel_items, mode="paid", transport=https, ledger=led,
+                         read_images=lambda e: e, workspace="w", openai_project="p",
+                         counter=D.HttpsTokenCounter(https, "w"), allocation=allocation_file(self.tmp, ["task.a0"]))
+        self.assertEqual(https.sent, [])
+        self.assertFalse((root / "EVAL").exists())
+
     def test_eval_refuses_without_a_verified_frozen_panel(self):
         good = self.write_manifest()
         cases = [(None, "needs --panel-manifest"), (dict(good, sha256=None), "needs --panel-manifest"),
@@ -1621,6 +1676,13 @@ class TestPaidTokenCounts(unittest.TestCase):
         self.assertIs(kw["counter"].transport, kw["transport"])
         self.assertEqual((kw["counter"].workspace, kw["transport"].openai_project), (self.WORKSPACE, self.PROJECT))
 
+    def test_the_stage_command_passes_on_the_allocation_and_the_configuration_note(self):
+        note = self.tmp / "change.txt"
+        kw = self.command("--allocation", str(self.allocation), "--config-change-note", str(note), stage="EVAL")
+        self.assertEqual((kw["allocation"], kw["config_change_note"]), (str(self.allocation), str(note)))
+        kw = self.command()
+        self.assertEqual((kw["allocation"], kw["config_change_note"]), (None, None))
+
     def test_the_fake_stage_command_keeps_the_fake_counter(self):
         kw = self.command()
         self.assertEqual(kw["mode"], "fake")
@@ -1854,10 +1916,19 @@ class TestCommands(CommandCase):
         self.assertEqual(json.loads((self.root / "P1" / "stage.json").read_text())["allocation"],
                          json.loads(good.read_text())["sha256"])
 
+    def test_only_eval_takes_a_configuration_note(self):
+        note = self.tmp / "change.txt"
+        note.write_text("A change.\n")
+        r = self.command(self.stage_args("P3", "--config-change-note", str(note)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("only EVAL takes --config-change-note", r.stderr)
+        self.assertFalse(self.root.exists())
+
     def test_paths_inside_the_repository_are_refused(self):
         inside = REPO / "not-a-file-in-the-repo.txt"
-        r = self.command(self.stage_args("EVAL", "--allocation", str(inside)))
-        self.assertIn("--allocation must be outside the repository", r.stderr)
+        for flag in ("--allocation", "--config-change-note"):
+            r = self.command(self.stage_args("EVAL", flag, str(inside)))
+            self.assertIn(f"{flag} must be outside the repository", r.stderr)
         r = self.command(self.stage_args("P1", "--approval-note", str(inside)))
         self.assertIn("--approval-note must be outside the repository", r.stderr)
         r = self.command(self.stage_args("EVAL", "--panel-manifest", str(inside)))
