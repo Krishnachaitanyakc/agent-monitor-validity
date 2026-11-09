@@ -1798,8 +1798,8 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
     return out
 
 
-REVIEW_GROUPS = (("invalid first verdict", ("I",)), ("disagreement", ("G1",)),
-                 ("unstable agreeing", ("U2", "U1")), ("stable agreeing", ("S",)))
+REVIEW_GROUPS = (("invalid first verdict", ("I",)), ("disagreement", ("G1",)), ("U2", ("U2",)), ("U1", ("U1",)),
+                 ("stable agreeing", ("S",)))
 POLICY_NAMES = {"RAND": "Random", "DIS": "Disagreement-first", "AUG": "Instability-first"}
 
 
@@ -1822,13 +1822,15 @@ def selection_probabilities(design: Design, labels: Sequence[str]) -> Dict[str, 
 
 def reference_coverage(labels: Sequence[str], reference: Sequence[str], design: Design,
                        benchmarks: Optional[Sequence[str]] = None,
-                       draw: Optional[dict] = None) -> dict:
+                       draw: Optional[dict] = None,
+                       E: Optional[Sequence[int]] = None) -> dict:
     """Coverage of Unsure and missing reference labels [labels: statuses only].
 
     These tasks are unknown: they are never counted as correct verdicts. Counts are
     given overall and by review group: invalid first verdict (I), disagreement (G1),
-    unstable agreeing (U2 and U1) and stable agreeing (S); and by benchmark when
-    benchmarks are given. For each policy, the expected number of such tasks it
+    U2, U1 and stable agreeing (S); and by benchmark when benchmarks are given. When E
+    is given, each group also has its reference-contradicted first verdicts, and an
+    invalid first verdict has none. For each policy, the expected number of such tasks it
     selects for review is sum_i pi_P(i) 1(status_i = s) over the group, with pi_P the
     exact review probability (selection_probabilities); when a seeded draw is given,
     the draw's own counts are added.
@@ -1843,6 +1845,9 @@ def reference_coverage(labels: Sequence[str], reference: Sequence[str], design: 
 
     members = {name: [i for i, l in enumerate(labels) if l in strata] for name, strata in groups}
     table = {name: tally(idx) for name, idx in members.items()}
+    if E is not None:
+        for name, idx in members.items():
+            table[name]["contradicted"] = sum(E[i] for i in idx if labels[i] != "I")
     probs = selection_probabilities(design, labels)
     selected = {}
     for pol in ("RAND", "DIS", "AUG"):
@@ -2098,10 +2103,12 @@ def _coverage_lines(res: dict) -> List[str]:
     out = ["REFERENCE LABEL COVERAGE: Unsure and missing labels",
            "  These tasks are unknown, not correct verdicts. The result per 100 panel tasks counts "
            "them as not reference-contradicted; the secondary result is per 100 "
-           "tasks with a usable label.",
-           "  group | tasks | usable | Unsure | missing"]
+           "tasks with a usable label."]
+    has_contradicted = "contradicted" in cov["groups"]["all"]
+    out.append("  group | tasks | usable | Unsure | missing" + (" | reference-contradicted" if has_contradicted else ""))
     for name, g in cov["groups"].items():
-        out.append(f"  {name} | {g['tasks']} | {g['usable']} | {g['unsure']} | {g['missing']}")
+        out.append(f"  {name} | {g['tasks']} | {g['usable']} | {g['unsure']} | {g['missing']}"
+                   + (f" | {g['contradicted']}" if has_contradicted else ""))
     names = list(cov["groups"])
     out.append("  Selected for review, expected number (exact, tie-averaged), Unsure / missing, "
                "by group: " + ", ".join(names))
@@ -2839,7 +2846,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     for (slot, cat, _), c in inv.items():
         by_slot_category[(slot, cat)] += c
     statuses_given = Y is not None or reference is not None
-    cov = reference_coverage(labels, ref, design, benchmarks=benchmarks) if statuses_given else None
+    cov = reference_coverage(labels, ref, design, benchmarks=benchmarks, E=E) if statuses_given else None
     N_Y = cov["groups"]["all"]["usable"] if statuses_given else None
     validity = validity_metrics(slots, Y) if Y is not None else None
     n_a1_usable = sum(1 for l, r in zip(labels, ref) if l != "I" and r == USABLE)

@@ -452,7 +452,8 @@ class TestCoverage(unittest.TestCase):
         self.assertEqual(g["all"], {"tasks": 200, "usable": 176, "unsure": 16, "missing": 8})
         self.assertEqual(g["invalid first verdict"], {"tasks": 4, "usable": 2, "unsure": 1, "missing": 1})
         self.assertEqual(g["disagreement"], {"tasks": 20, "usable": 16, "unsure": 3, "missing": 1})
-        self.assertEqual(g["unstable agreeing"], {"tasks": 8, "usable": 5, "unsure": 2, "missing": 1})
+        self.assertEqual(g["U2"], {"tasks": 2, "usable": 1, "unsure": 0, "missing": 1})
+        self.assertEqual(g["U1"], {"tasks": 6, "usable": 4, "unsure": 2, "missing": 0})
         self.assertEqual(g["stable agreeing"], {"tasks": 168, "usable": 153, "unsure": 10, "missing": 5})
         bb = r["coverage"]["by_benchmark"]
         for b in ("webarena", "workarena"):
@@ -467,12 +468,12 @@ class TestCoverage(unittest.TestCase):
         sel = r["coverage"]["selected_expected"]
         f_dis, f_aug_S, f_rand = Fraction(30, 176), Fraction(30 - 8, 168), Fraction(54 - 4, 196)
         want = {
-            "AUG": {"invalid first verdict": (1, 1), "disagreement": (3, 1), "unstable agreeing": (2, 1),
+            "AUG": {"invalid first verdict": (1, 1), "disagreement": (3, 1), "U2": (0, 1), "U1": (2, 0),
                     "stable agreeing": (10 * f_aug_S, 5 * f_aug_S)},
-            "DIS": {"invalid first verdict": (1, 1), "disagreement": (3, 1),
-                    "unstable agreeing": (2 * f_dis, f_dis), "stable agreeing": (10 * f_dis, 5 * f_dis)},
-            "RAND": {"invalid first verdict": (1, 1), "disagreement": (3 * f_rand, f_rand),
-                     "unstable agreeing": (2 * f_rand, f_rand), "stable agreeing": (10 * f_rand, 5 * f_rand)},
+            "DIS": {"invalid first verdict": (1, 1), "disagreement": (3, 1), "U2": (0, f_dis), "U1": (2 * f_dis, 0),
+                    "stable agreeing": (10 * f_dis, 5 * f_dis)},
+            "RAND": {"invalid first verdict": (1, 1), "disagreement": (3 * f_rand, f_rand), "U2": (0, f_rand),
+                     "U1": (2 * f_rand, 0), "stable agreeing": (10 * f_rand, 5 * f_rand)},
         }
         for pol, groups in want.items():
             for name, (u, m) in groups.items():
@@ -489,7 +490,8 @@ class TestCoverage(unittest.TestCase):
             self.assertEqual(dr[pol]["all"][UNS], sum(1 for i in chosen if ref[i] == UNS))
             self.assertEqual(dr[pol]["all"][MIS], sum(1 for i in chosen if ref[i] == MIS))
             self.assertEqual((dr[pol]["invalid first verdict"][UNS], dr[pol]["invalid first verdict"][MIS]), (1, 1))
-        self.assertEqual((dr["AUG"]["unstable agreeing"][UNS], dr["AUG"]["unstable agreeing"][MIS]), (2, 1))
+        self.assertEqual((dr["AUG"]["U2"][UNS], dr["AUG"]["U2"][MIS]), (0, 1))
+        self.assertEqual((dr["AUG"]["U1"][UNS], dr["AUG"]["U1"][MIS]), (2, 0))
 
     def test_coverage_is_reported_as_unknown(self):
         labels, E, ref, bench = self._panel()

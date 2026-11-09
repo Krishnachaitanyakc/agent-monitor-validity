@@ -11,7 +11,7 @@ sap.py reads and writes no files, and its results depend only on its inputs and 
 - Slot resolution from the attempt log. REFUSAL, TRUNCATED, FILTERED, MALFORMED and ABSTAIN are INVALID, and verdicts match case-insensitively. A slot with no complete response after three retries is INVALID (TRANSPORT_EXHAUSTED). A slot that ends in HALT, or in a transport failure with retries left, is unfinished and is refused, never counted as INVALID.
 - The label-free design, fixed before the label join, and the exact tie-averaged captures of the three policies.
 - `select_panel`, which chooses the default panel of one trajectory per task and the one-task-per-template sensitivity panel without reading labels. The wider-exclusion sensitivity panel is the default panel with every task whose template appears in the development split dropped. No new selection is made, so each kept task keeps its judged trajectory, and it is analyzed as a separate panel with its own N, s and K.
-- `reference_coverage`, which counts Unsure and missing labels overall, by benchmark and by review group: invalid first verdict, disagreement, unstable agreeing and stable agreeing. For each policy it gives the exact expected number of these tasks selected for review. The report calls them unknown, never correct.
+- `reference_coverage`, which counts Unsure and missing labels overall, by benchmark and by review group: invalid first verdict, disagreement, U2, U1 and stable agreeing. For each policy it gives the exact expected number of these tasks selected for review. The report calls them unknown, never correct.
 
 A released primary label of Successful or Unsuccessful, in any letter case, is usable. Unsure is Unsure, a blank or absent label is missing, and any other value stops the analysis. A task whose label is Unsure or missing stays in the panel, in the selections and in the review count.
 
@@ -23,7 +23,7 @@ In every regime, degenerate ones included, it gives:
 
 - The label-free quantities committed at the prediction lock, from `lock_quantities`: the largest gain per 100 panel tasks the panel can reach, whether 2 per 100 is reachable, and x, the change in the gain per 100 from one unstable task.
 - N, n_inv, n_D1, n_D0, s, K and that K is equal across the three policies; U2, U1 and S counts; R_unobserved, the valid first verdicts with both repeats invalid, disagreeing tasks included; invalid outputs by slot and category.
-- Usable, Unsure and missing counts overall, by review group and by benchmark.
+- Usable, Unsure and missing counts overall, by benchmark and by review group, one row each for I, G1, U2, U1 and S, with the reference-contradicted first verdicts of each group.
 - How often each judge contradicts the released references: the count and the rate over its own valid verdicts with a usable reference, with the denominator and the number of its invalid outputs among usable-reference tasks beside it. A1's needs only `E`; B1's needs the released labels and is otherwise reported as not assessed.
 - Two fixed lines on how to read a contradicted U2 and U1 verdict, and one under the gain saying that part of any gain is built in, all in the plan's words and with no numeric benchmark.
 - M, m1 and m0; each policy's exact expected capture over its own random choices, as a fraction and a decimal, and the share of M it captures.

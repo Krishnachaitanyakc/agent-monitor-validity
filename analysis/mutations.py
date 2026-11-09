@@ -765,6 +765,18 @@ MUTATIONS = [
     ("accept True as a case seed",
      "    if isinstance(case_seed, bool) or not isinstance(case_seed, numbers.Integral):\n",
      "    if not isinstance(case_seed, numbers.Integral):\n"),
+    ("pool U2 and U1 in the review groups",
+     '("U2", ("U2",)), ("U1", ("U1",)),',
+     '("unstable agreeing", ("U2", "U1")),'),
+    ("leave the contradicted verdicts out of the review groups",
+     "benchmarks=benchmarks, E=E) if statuses_given else None\n",
+     "benchmarks=benchmarks) if statuses_given else None\n"),
+    ("count an invalid first verdict as contradicted in its review group",
+     """sum(E[i] for i in idx if labels[i] != "I")\n""",
+     "sum(E[i] for i in idx)\n"),
+    ("print the usable count in the contradicted column",
+     """(f" | {g['contradicted']}" if has_contradicted else "")""",
+     """(f" | {g['usable']}" if has_contradicted else "")"""),
 ]
 
 

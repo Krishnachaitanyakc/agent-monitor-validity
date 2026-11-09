@@ -1432,24 +1432,55 @@ class TestInvalidAndUnsure(unittest.TestCase):
         slots, Y, bench = mixed_panel()
         d = describe_panel(slots, Y=Y, benchmarks=bench)
         g = d["coverage"]["groups"]
-        self.assertEqual(g["all"], {"tasks": 10, "usable": 7, "unsure": 2, "missing": 1})
-        self.assertEqual(g["invalid first verdict"], {"tasks": 2, "usable": 1, "unsure": 1, "missing": 0})
-        self.assertEqual(g["disagreement"], {"tasks": 2, "usable": 1, "unsure": 1, "missing": 0})
-        self.assertEqual(g["unstable agreeing"], {"tasks": 3, "usable": 2, "unsure": 0, "missing": 1})
-        self.assertEqual(g["stable agreeing"], {"tasks": 3, "usable": 3, "unsure": 0, "missing": 0})
+        self.assertEqual(g["all"], {"tasks": 10, "usable": 7, "unsure": 2, "missing": 1, "contradicted": 3})
+        self.assertEqual(g["invalid first verdict"], {"tasks": 2, "usable": 1, "unsure": 1, "missing": 0, "contradicted": 0})
+        self.assertEqual(g["disagreement"], {"tasks": 2, "usable": 1, "unsure": 1, "missing": 0, "contradicted": 1})
+        self.assertEqual(g["U2"], {"tasks": 1, "usable": 1, "unsure": 0, "missing": 0, "contradicted": 1})
+        self.assertEqual(g["U1"], {"tasks": 2, "usable": 1, "unsure": 0, "missing": 1, "contradicted": 0})
+        self.assertEqual(g["stable agreeing"], {"tasks": 3, "usable": 3, "unsure": 0, "missing": 0, "contradicted": 1})
         self.assertEqual(d["coverage"]["by_benchmark"], {
             "vwa": {"tasks": 2, "usable": 0, "unsure": 1, "missing": 1},
             "wa": {"tasks": 4, "usable": 3, "unsure": 1, "missing": 0},
             "work": {"tasks": 4, "usable": 4, "unsure": 0, "missing": 0}})
         txt = sap.describe_report(d, EXPOSURE)
-        for needle in ("unknown, not correct verdicts", "unstable agreeing | 3 | 2 | 0 | 1", "wa | 4 | 3 | 1 | 0"):
+        for needle in ("unknown, not correct verdicts", "U1 | 2 | 1 | 0 | 1 | 0", "wa | 4 | 3 | 1 | 0"):
             self.assertIn(needle, txt, needle)
-        # Unsure then missing, in the groups all, invalid, disagreement, unstable, stable. K = 6, s = 2.
+        # Unsure then missing, in the groups all, invalid, disagreement, U2, U1, stable. K = 6, s = 2.
         lines = txt.split("\n")
-        for row in ("  Random: 1.50 / 0.50; 1.00 / 0.00; 0.50 / 0.00; 0.00 / 0.50; 0.00 / 0.00",
-                    "  Disagreement-first: 2.00 / 0.33; 1.00 / 0.00; 1.00 / 0.00; 0.00 / 0.33; 0.00 / 0.00",
-                    "  Instability-first: 2.00 / 0.50; 1.00 / 0.00; 1.00 / 0.00; 0.00 / 0.50; 0.00 / 0.00"):
+        for row in ("  Random: 1.50 / 0.50; 1.00 / 0.00; 0.50 / 0.00; 0.00 / 0.00; 0.00 / 0.50; 0.00 / 0.00",
+                    "  Disagreement-first: 2.00 / 0.33; 1.00 / 0.00; 1.00 / 0.00; 0.00 / 0.00; 0.00 / 0.33; 0.00 / 0.00",
+                    "  Instability-first: 2.00 / 0.50; 1.00 / 0.00; 1.00 / 0.00; 0.00 / 0.00; 0.00 / 0.50; 0.00 / 0.00"):
             self.assertIn(row, lines)
+
+    def test_each_review_group_has_its_own_row_with_its_contradicted_verdicts(self):
+        slots, Y, bench = mixed_panel()
+        lines = sap.describe_report(describe_panel(slots, Y=Y, benchmarks=bench), EXPOSURE).split("\n")
+        start = lines.index("  group | tasks | usable | Unsure | missing | reference-contradicted")
+        self.assertEqual(lines[start + 1:start + 7], ["  all | 10 | 7 | 2 | 1 | 3",
+                                                      "  invalid first verdict | 2 | 1 | 1 | 0 | 0",
+                                                      "  disagreement | 2 | 1 | 1 | 0 | 1",
+                                                      "  U2 | 1 | 1 | 0 | 0 | 1",
+                                                      "  U1 | 2 | 1 | 0 | 1 | 0",
+                                                      "  stable agreeing | 3 | 3 | 0 | 0 | 1"])
+
+    def test_the_review_group_rows_print_in_every_regime(self):
+        seen = set()
+        for d in report_panels():
+            seen.add(d["regime"])
+            if not d["reference_supplied"]:
+                continue
+            lines = sap.describe_report(d, EXPOSURE).split("\n")
+            start = lines.index("  group | tasks | usable | Unsure | missing | reference-contradicted")
+            self.assertEqual([x.split(" | ")[0].strip() for x in lines[start + 1:start + 7]],
+                             ["all", "invalid first verdict", "disagreement", "U2", "U1", "stable agreeing"])
+            self.assertEqual(int(lines[start + 1].split(" | ")[5]), d["M"])
+        self.assertEqual(seen, REGIMES)
+
+    def test_an_invalid_first_verdict_is_never_counted_as_contradicted(self):
+        d = describe_panel([slot("I"), slot("S"), slot("S")], [1, 1, 0], reference=[sap.USABLE] * 3)
+        self.assertEqual(d["M"], 1)
+        self.assertEqual(d["coverage"]["groups"]["invalid first verdict"]["contradicted"], 0)
+        self.assertEqual(d["coverage"]["groups"]["all"]["contradicted"], 1)
 
     def test_validity_ignores_unknown_references_and_invalid_slots(self):
         slots, Y, _ = mixed_panel()
