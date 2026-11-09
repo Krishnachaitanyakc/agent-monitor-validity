@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import draw_allocation as DA  # noqa: E402
 import run_stage as RS  # noqa: E402
 from datapath import fetch  # noqa: E402
+from datapath.ids import trace_key as key_of_trace  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
@@ -608,6 +609,25 @@ class TestAllocation(RunnerCase):
     def test_a_trace_with_no_task_id_is_refused(self):
         self.refused("P1", [self.p1[0]._replace(task_id=None)], "no normalized task ID")
 
+    def test_an_id_not_in_the_split_table_s_form_is_refused_at_every_stage(self):
+        allocation = {"p1": [], "development": []}
+        for bad in ("visualwebarena.resized.118", "", " webarena.344", "webarena.344 ", "WEBARENA.344", 7):
+            for stage in ("P1", "EVAL"):
+                with self.subTest(bad=bad, stage=stage), self.assertRaisesRegex(RS.StageRefused, "no normalized task ID"):
+                    RS.check_allocation(stage, [self.p1[0]._replace(task_id=bad)], allocation)
+
+    def test_a_well_formed_id_passes_the_form_check(self):
+        for good in ("webarena.344", "visualwebarena.118", "workarena.servicenow.sort-user-list", "x_1"):
+            RS.check_allocation("EVAL", [self.p1[0]._replace(task_id=good)], {"development": []})
+
+    def test_p3_and_eval_take_one_trace_per_task(self):
+        twice = [i._replace(task_id="task.same") for i in self.p3]
+        for stage in ("P3", "EVAL"):
+            with self.subTest(stage=stage), self.assertRaisesRegex(RS.StageRefused, "one trace per task"):
+                RS.check_allocation(stage, twice, {"p3": ["task.same"], "development": []})
+        RS.check_allocation("P2", twice, {"p2": ["task.same"]})
+        self.refused("P3", twice, "one trace per task", allocation_file(self.tmp, p3=["task.same"], name="same.json"))
+
     def test_an_allocation_file_that_cannot_be_used_is_refused(self):
         self.refused("P1", self.p1, "no allocation file", self.tmp / "absent.json")
         broken = self.tmp / "broken.json"
@@ -669,6 +689,45 @@ class TestAllocation(RunnerCase):
         report, _ = self.stage("P1", self.p1, self.led)
         self.assertTrue(report["complete"])
         self.assertIsNone(self.recorded("P1"))
+
+
+class TestProvenanceTie(unittest.TestCase):
+    TRACE = "arb/webarena/GenericAgent-x/webarena.resized.15"
+    GOOD = {"trace_id": TRACE, "split": "dev", "task_id": "webarena.resized.15", "task_id_normalized": "webarena.15"}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.key = key_of_trace(self.TRACE)
+        self.folder = self.tmp / "packs"
+        self.folder.mkdir()
+        pack = synthetic_pack(2, goal="Find the cheapest mug.")
+        (self.folder / "packs.jsonl").write_text(json.dumps(
+            {"trace_key": self.key, "pack": pack, "pack_sha256": P.sha256_text(P.serialize(pack))}) + "\n")
+        (self.folder / "image_manifest.jsonl").write_text("")
+
+    def load(self, **change):
+        path = self.tmp / "provenance.jsonl"
+        record = {k: v for k, v in dict(self.GOOD, trace_key=self.key, **change).items() if v is not ...}
+        path.write_text(json.dumps(record) + "\n")
+        return RS.load_items([self.folder], [path])
+
+    def test_a_record_tied_to_its_trace_gives_the_normalized_id(self):
+        self.assertEqual([i.task_id for i in self.load()], ["webarena.15"])
+
+    def test_a_record_with_no_normalized_id_loads_and_is_left_to_the_allocation(self):
+        self.assertEqual([i.task_id for i in self.load(task_id_normalized=...)], [None])
+
+    def test_a_record_not_tied_to_its_trace_is_refused(self):
+        cases = {"another normalized ID": {"task_id_normalized": "webarena.344"},
+                 "a blank normalized ID": {"task_id_normalized": ""},
+                 "another agent's trace of the task": {"trace_id": "arb/webarena/GenericAgent-y/webarena.resized.15"},
+                 "a raw ID that is not the trace's": {"task_id": "webarena.344", "task_id_normalized": "webarena.344"},
+                 "no raw ID": {"task_id": ...},
+                 "no trace ID": {"trace_id": ...}}
+        for name, change in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(RS.StageRefused, "not tied to its trace"):
+                self.load(**change)
 
 
 class TestRunRecords(RunnerCase):

@@ -98,6 +98,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import secrets
 import subprocess
 import sys
@@ -113,6 +114,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import draw_allocation as DA  # noqa: E402
 from datapath import fence, fetch  # noqa: E402
+from datapath.ids import normalize_task_id, trace_key as key_of_trace  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
@@ -133,6 +135,8 @@ STAGES = {
 }
 FROZEN_RUBRIC_STAGES = ("P3", "EVAL")
 ALLOCATION_LIST = {"P1": "p1", "P2": "p2", "P3": "p3"}
+ONE_TRACE_PER_TASK = ("P3", "EVAL")
+TASK_ID_FORM = re.compile(r"[a-z0-9._-]+")
 USAGE_PROFILES = {"central": (60000, 3000), "high": (60000, 12000), "extreme": (100000, 20000)}
 FAKE_WORKSPACE = "wrkspc_fake"
 FAKE_PROJECT = "proj_fake"
@@ -258,6 +262,21 @@ def export_path(folder, budget: str, ledger_id: str) -> Path:
 
 # ---------------------------------------------------------------- inputs
 
+def task_of_trace(key: str, prov: dict):
+    """The record's normalized task ID, once it is tied to the trace it describes: the
+    key is the hash of the record's trace ID, the trace ID ends in the raw task ID, and
+    the normalized ID is the raw one's. None for a record with no normalized ID, which an
+    allocation refuses."""
+    normalized = prov.get("task_id_normalized")
+    if normalized is None:
+        return None
+    task, trace = prov.get("task_id"), prov.get("trace_id")
+    if (not isinstance(trace, str) or key_of_trace(trace) != key or trace.rsplit("/", 1)[-1] != task
+            or normalize_task_id(task) != normalized):
+        raise StageRefused(f"{key}: the provenance record's task ID is not tied to its trace")
+    return normalized
+
+
 def load_items(packs, provenance, split="dev") -> list:
     """Items from scripts/build_packs.py folders, each with its provenance file (same order).
 
@@ -285,7 +304,7 @@ def load_items(packs, provenance, split="dev") -> list:
                 raise ValueError(f"{key}: the image manifest belongs to another pack")
             private = sorted(set(P.private_strings(prov)) | set(R.manifest_strings(entries))
                              | {key, line["pack_sha256"]})
-            items.append(Item(key, pack, line["pack_sha256"], entries, private, prov.get("task_id_normalized")))
+            items.append(Item(key, pack, line["pack_sha256"], entries, private, task_of_trace(key, prov)))
     keys = [i.trace_key for i in items]
     if len(set(keys)) != len(keys):
         raise ValueError("a trace key appears twice across the --packs folders")
@@ -758,15 +777,24 @@ def load_allocation(path) -> dict:
         raise StageRefused(f"the allocation is refused: {e}") from None
 
 
+def _is_task_id(task) -> bool:
+    """Whether ``task`` is a non-empty task ID in the split table's form: lower-case, with
+    no space, and normalized."""
+    return isinstance(task, str) and TASK_ID_FORM.fullmatch(task) is not None and normalize_task_id(task) == task
+
+
 def check_allocation(stage: str, items: list, allocation: dict) -> None:
     """Refuse a trace whose task is outside its stage's list, and any panel task among
     the allocation's development tasks, drawn or not. A trace maps to its task through its
-    provenance record's ``task_id_normalized``, the ID the split table uses."""
-    unmapped = [i.trace_key for i in items if i.task_id is None]
+    provenance record's ``task_id_normalized``, the ID the split table uses, so any other
+    form of ID is refused here, and P3 and EVAL take one trace per task."""
+    unmapped = [i.trace_key for i in items if not _is_task_id(i.task_id)]
     if unmapped:
         raise StageRefused(f"{unmapped[0]} has no normalized task ID in its provenance, so the allocation cannot "
                            "be applied")
     tasks = {i.task_id for i in items}
+    if stage in ONE_TRACE_PER_TASK and len(tasks) != len(items):
+        raise StageRefused(f"{stage} runs one trace per task; {len(items)} traces of {len(tasks)} tasks were given")
     if stage == "EVAL":
         used = sorted(tasks & set(allocation[DA.DEVELOPMENT]))
         if used:
