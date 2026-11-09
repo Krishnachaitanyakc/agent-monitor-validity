@@ -135,6 +135,17 @@ class TestParser(unittest.TestCase):
             r = schema.parse(answer(verdict=v))
             self.assertEqual((r["status"], r["verdict"], r["fields"]["verdict"]), ("abstain", None, None), v)
 
+    def test_evidence_sufficient_ignores_ascii_case_only(self):
+        for v, expected in (("yEs", "yes"), ("NO", "no")):
+            r = schema.parse(answer(evidence_sufficient=v))
+            self.assertEqual((r["fields"]["evidence_sufficient"], r["voided"]), (expected, {}), v)
+        # Each of these casefolds to "yes".
+        for v in ("yeſ", "YEſ"):
+            r = schema.parse(answer(verdict="failure", evidence_sufficient=v))
+            self.assertEqual((r["status"], r["verdict"]), ("parsed", "failure"), v)
+            self.assertIsNone(r["fields"]["evidence_sufficient"], v)
+            self.assertEqual(list(r["voided"]), ["evidence_sufficient"], v)
+
     def test_bad_covariates_void_only_that_field(self):
         cases = [("p_failure", 1.5), ("p_failure", -0.01), ("p_failure", True), ("p_failure", "0.3"),
                  ("evidence_sufficient", "maybe"), ("evidence_step_ids", [1, 2.0]),

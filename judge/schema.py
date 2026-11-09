@@ -15,10 +15,11 @@ Parser rules (``parse``), applied to the final answer text of a complete respons
   other change, so a look-alike character never becomes a verdict. Otherwise: ``abstain``
   (it parses, but gives no admissible verdict).
 - A bad covariate voids that field only, never the verdict: ``p_failure`` that is not a
-  finite number in [0, 1], ``evidence_sufficient`` that is not "yes" or "no" ignoring case,
-  ``evidence_step_ids`` that is not a list of integers, and ``rationale`` that is not a
-  string of at most 100 words (whitespace-separated). A voided field is None, and the
-  reason is recorded under ``voided``.
+  finite number in [0, 1], ``evidence_sufficient`` that is not "yes" or "no" ignoring ASCII
+  letter case only, as for the verdict, ``evidence_step_ids`` that is not a list of
+  integers, and ``rationale`` that is not a string of at most 100 words
+  (whitespace-separated). A voided field is None, and the reason is recorded under
+  ``voided``.
 - An integer literal of more than 18 digits is not converted. For these rules it is neither
   an integer nor a number, so in a covariate it voids that field like any other bad value.
 """
@@ -128,8 +129,9 @@ def parse(text) -> dict:
         fields["p_failure"] = None
         voided["p_failure"] = "not a finite number in [0, 1]"
     s = obj["evidence_sufficient"]
-    if isinstance(s, str) and s.casefold() in SUFFICIENT:
-        fields["evidence_sufficient"] = s.casefold()
+    sufficient = s.lower() if isinstance(s, str) and s.isascii() else None
+    if sufficient in SUFFICIENT:
+        fields["evidence_sufficient"] = sufficient
     else:
         fields["evidence_sufficient"] = None
         voided["evidence_sufficient"] = "not yes or no"
