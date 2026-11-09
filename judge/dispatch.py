@@ -29,8 +29,10 @@ A: the model string equals the first one recorded for this configuration;
 cache tokens; the ``anthropic-workspace-id`` header is the study workspace when one is
 given. B: the model string equals the first recorded; ``service_tier`` is ``default``;
 ``cached_tokens`` and ``cache_write_tokens`` are 0; ``input_tokens`` is at most 272,000,
-above which the provider prices the call at its long-context rate. A field that is not
-reported fails.
+above which the provider prices the call at its long-context rate; an ``openai-project``
+header, when a response carries one, is the study project when one is given. A field that
+is not reported fails, apart from that header, which OpenAI's documentation does not list
+among its common response headers.
 
 **Recovery.** A stop after the raw response is written leaves it without its record.
 ``recover_attempt`` rebuilds that record from the bytes as the dispatcher would have
@@ -44,12 +46,14 @@ or spend-limit error halts until a correction note, a policy error on B is FILTE
 ends the slot, and a transient one is TRANSPORT. OpenAI marks some halting errors by the
 status alone, so a B body that would otherwise be TRANSPORT halts unless it is a known
 transient error. Anything else is taken as no response (TRANSPORT), whose slot is
-retried under the rule above. The workspace header check is listed as not applied.
+retried under the rule above. The workspace or project header check is listed as not
+applied.
 
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with
 ``urllib`` and reads the event stream; it refuses to exist unless paid calls are
-confirmed, and no test or dry run constructs it.
+confirmed and the OpenAI project is named. No dry run constructs it, and the one test
+that does replaces ``urlopen``, so nothing is sent.
 """
 
 import json
@@ -70,7 +74,11 @@ B_LONG_CONTEXT_TOKENS = 272000               # judge B input above this is price
 PROMPT_SLOTS = (("A", 1), ("B", 1))          # prompt development: A1 and B1 only
 BACKOFF_BASE_S = 2.0
 RETRY_AFTER_CAP_S = 120.0
-KEPT_HEADERS = ("request-id", "anthropic-workspace-id", "x-request-id", "openai-project",
+# https://developers.openai.com/api/reference/overview (read 2026-11-08) documents the
+# OpenAI-Project request header and lists no project header among its common response
+# headers, so a response may report none.
+OPENAI_PROJECT_HEADER = "openai-project"
+KEPT_HEADERS = ("request-id", "anthropic-workspace-id", "x-request-id", OPENAI_PROJECT_HEADER,
                 "retry-after", "content-type")
 
 
@@ -121,17 +129,22 @@ def read_stream(fileobj, clock=time.time):
 class HttpsTransport:
     """Sends one request over HTTPS with ``urllib`` and reads its event stream.
 
-    The credential comes from the named environment variable at send time and is the only
-    header added to the request. SDKs are not used, so nothing retries behind the runner.
+    The credential comes from the named environment variable at send time. It and, on
+    every OpenAI request, the study's project are the only headers added to the request,
+    so the prepared request and the configuration hash do not depend on the project. SDKs
+    are not used, so nothing retries behind the runner.
     """
 
     KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
-    def __init__(self, confirm_paid_calls: bool = False, timeout_s: float = 900.0, clock=time.time):
+    def __init__(self, confirm_paid_calls: bool = False, timeout_s: float = 900.0, clock=time.time,
+                 openai_project=None):
         if confirm_paid_calls is not True:
             raise ValueError("HttpsTransport sends paid requests; pass confirm_paid_calls=True "
                              "only in an approved paid run")
-        self.timeout_s, self.clock = timeout_s, clock
+        if not openai_project:
+            raise ValueError("HttpsTransport binds every OpenAI request to the study's project; pass openai_project")
+        self.timeout_s, self.clock, self.openai_project = timeout_s, clock, openai_project
 
     def send(self, request: R.PreparedRequest) -> Exchange:
         key = os.environ.get(self.KEY_ENV[request.provider])
@@ -142,6 +155,7 @@ class HttpsTransport:
             headers["x-api-key"] = key
         else:
             headers["authorization"] = f"Bearer {key}"
+            headers[OPENAI_PROJECT_HEADER] = self.openai_project
         req = urllib.request.Request(request.url, data=request.body, headers=headers, method="POST")
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout_s)
@@ -158,7 +172,7 @@ class HttpsTransport:
 # ---------------------------------------------------------------- checks
 
 
-def response_checks(provider: str, summary: dict, headers: dict, first_model, workspace) -> list:
+def response_checks(provider: str, summary: dict, headers: dict, first_model, workspace, project=None) -> list:
     """Failed per-response checks for one complete response (see the module docstring)."""
     fails = []
     if first_model is not None and summary.get("model") != first_model:
@@ -181,15 +195,17 @@ def response_checks(provider: str, summary: dict, headers: dict, first_model, wo
                          f"{u.get('cache_write_tokens')!r}; both must be 0")
         if not isinstance(u.get("input_tokens"), int) or u["input_tokens"] > B_LONG_CONTEXT_TOKENS:
             fails.append(f"input_tokens is {u.get('input_tokens')!r}, not at most {B_LONG_CONTEXT_TOKENS}")
+        if project is not None and headers.get(OPENAI_PROJECT_HEADER, project) != project:
+            fails.append("the openai-project header is not the study project")
     return fails
 
 
 def _identity_checks(log, provider: str, judge: str, config_sha256: str, summary: dict, headers: dict, workspace,
-                     ref: str) -> list:
+                     ref: str, project=None) -> list:
     """The per-response checks of a complete response, with the first model string and the
     response id recorded as the dispatcher records them."""
     first = log.first_model(config_sha256, judge)
-    checks = response_checks(provider, summary, headers, first, workspace)
+    checks = response_checks(provider, summary, headers, first, workspace, project)
     if not checks and first is None:
         log.set_first_model(config_sha256, judge, summary.get("model"), ref)
     if summary.get("id") and not log.claim_response_id(provider, summary["id"], ref):
@@ -247,12 +263,13 @@ def _slot_result(records: list) -> dict:
 
 
 def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, transport, log,
-                        workspace, sleep=time.sleep, clock=time.time, slots=R.SLOTS) -> dict:
+                        workspace, sleep=time.sleep, clock=time.time, slots=R.SLOTS, project=None) -> dict:
     """Run slots A1, A2, A3 and B1 for one trajectory, serially (see the module docstring).
 
     ``requests`` maps "A" and "B" to the ``PreparedRequest`` built for this trajectory.
     ``workspace`` is the study's Anthropic workspace ID, or None where no real workspace
-    exists (the dry run). ``slots`` is either all four, ``R.SLOTS``, or ``PROMPT_SLOTS``,
+    exists (the dry run). ``project`` is the study's OpenAI project ID, or None where no
+    real project exists. ``slots`` is either all four, ``R.SLOTS``, or ``PROMPT_SLOTS``,
     A1 then B1, which prompt development sends; any other set is refused. Returns
     {"halted": bool, "halt_id", "slots": {slot: result}}.
     """
@@ -291,7 +308,7 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
                 oc, checks = canonical_outcome(request.provider, exchange), []
                 if oc["outcome"] in TERMINAL and (oc["summary"] or {}).get("complete"):
                     checks = _identity_checks(log, request.provider, judge, config_sha256, oc["summary"], headers,
-                                              workspace, ref)
+                                              workspace, ref, project)
                 fields = _response_fields(oc, checks)
             except Exception as e:
                 oc = classification_failure(exchange.status, e)
@@ -389,7 +406,8 @@ def recover_attempt(log, reservation: dict) -> dict:
                                       if fields["halt_kind"] == CLASSIFICATION_ERROR else
                                       "unknown; an error body, classified by its error fields" if error_body else
                                       "unknown; taken as no response"),
-                      "checks_not_applied": ["anthropic-workspace-id header"] if provider == "anthropic" else []},
+                      "checks_not_applied": ["anthropic-workspace-id header" if provider == "anthropic"
+                                             else f"{OPENAI_PROJECT_HEADER} header"]},
     }
     log.complete_attempt(record)
     return record

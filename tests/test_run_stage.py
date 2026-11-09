@@ -63,8 +63,8 @@ class StandInHttps(D.HttpsTransport):
     """Of the HTTPS transport's type, so paid mode's checks can be reached, but never set up
     and never able to send."""
 
-    def __init__(self):
-        self.sent = []
+    def __init__(self, openai_project="p"):
+        self.sent, self.openai_project = [], openai_project
 
     def send(self, request):
         raise AssertionError("no test sends a paid request")
@@ -432,6 +432,19 @@ class TestGating(RunnerCase):
         self.assertEqual({e["scope"] for e in reserves(led)}, {RS.FAKE_WORKSPACE, RS.FAKE_PROJECT})
         report, _ = self.stage("P2", items(1, "b"), led)
         self.assertEqual((report["complete"], report["settings"]["openai_project"]), (True, RS.FAKE_PROJECT))
+
+    def test_a_response_from_another_openai_project_halts_the_stage(self):
+        led = self.ledger()
+        its = items(1, "a")
+        report, _ = self.stage("P1", its, led, provider=RS.ScriptedProvider(project="proj_other"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("response_check", "B1"))
+        self.assertFalse(report["complete"])
+        rec = AttemptLog(self.root / "P1" / "attempt_log").attempts(its[0].trace_key, R.config_sha256(), "B", 1)[0]
+        self.assertEqual(rec["response_headers"]["openai-project"], "proj_other")
+        self.assertEqual(rec["failed_checks"], ["the openai-project header is not the study project"])
+        other = self.ledger(self.tmp / "other" / "ledger-pilot.jsonl")
+        report, _ = self.stage("P1", items(1, "b"), other, root=self.tmp / "run-2")
+        self.assertTrue(report["complete"], report["stopped"])       # the same project passes
 
     def test_a_second_run_root_under_other_scopes_on_the_same_ledger_is_refused_before_it_starts(self):
         led = self.ledger()
@@ -1148,7 +1161,7 @@ class TestPaidMode(unittest.TestCase):
             mode, _ = RS.select_transport(True, True, str(self.note), workspace="wrkspc_study", counter=counter,
                                           openai_project="proj_study")
         self.assertEqual(mode, "paid")
-        https.assert_called_once_with(confirm_paid_calls=True)
+        https.assert_called_once_with(confirm_paid_calls=True, openai_project="proj_study")
 
     def test_paid_mode_without_a_provider_token_count_is_refused_before_any_transport_exists(self):
         with mock.patch.object(D, "HttpsTransport") as https:
@@ -1162,6 +1175,20 @@ class TestPaidMode(unittest.TestCase):
                          read_images=lambda e: e, workspace="wrkspc_study", openai_project="proj_study")
         self.assertFalse((self.tmp / "run").exists())
         self.assertEqual(len(led.entries), 1)
+
+    def test_a_paid_stage_needs_the_openai_project_and_a_transport_bound_to_it(self):
+        led = S.Ledger(self.tmp / "ledger-pilot.jsonl", "pilot", mode="paid")
+        self.addCleanup(led.close)
+        counter = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "workspace and OpenAI project"):
+            RS.run_stage("P1", self.tmp / "run", items(1, "a"), mode="paid", transport=StandInHttps(), ledger=led,
+                         read_images=lambda e: e, workspace="wrkspc_study", counter=counter)
+        with self.assertRaisesRegex(ValueError, "bound to another OpenAI project"):
+            RS.run_stage("P1", self.tmp / "run", items(1, "a"), mode="paid", transport=StandInHttps("proj_other"),
+                         ledger=led, read_images=lambda e: e, workspace="wrkspc_study", openai_project="proj_study",
+                         counter=counter)
+        self.assertFalse((self.tmp / "run").exists())
+        self.assertEqual((len(led.entries), counter.sent), (1, []))
 
     def test_the_https_transport_itself_still_refuses_without_confirmation(self):
         with self.assertRaises(ValueError):

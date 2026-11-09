@@ -6,6 +6,7 @@ FakeTransport. No test builds the HTTPS transport's connection or sends anything
 
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -47,10 +48,11 @@ class Fakes:
         return Exchange(200, h, sse(anthropic_events(text, stop_reason=stop, model=model, msg_id=self._id("msg"),
                                                      usage=usage, **kw)), None, None)
 
-    def b(self, text=None, status="completed", **kw):
+    def b(self, text=None, status="completed", headers=None, **kw):
         if text is None and status == "completed" and kw.get("refusal") is None:
             text = answer()
-        return Exchange(200, {}, sse(openai_events(text, status=status, resp_id=self._id("resp"), **kw)), None, None)
+        return Exchange(200, headers or {}, sse(openai_events(text, status=status, resp_id=self._id("resp"), **kw)),
+                        None, None)
 
 
 def a_err(status, etype, message="x", code=None, headers=None):
@@ -241,10 +243,10 @@ class LogCase(unittest.TestCase):
         self.t[0] += 1.5
         return self.t[0]
 
-    def run_slots(self, *exchanges, workspace=WS, reqs=None, key=KEY):
+    def run_slots(self, *exchanges, workspace=WS, reqs=None, key=KEY, project=None):
         transport = D.FakeTransport(exchanges)
         result = D.dispatch_trajectory(key, reqs or self.reqs, self.config, transport, self.log, workspace,
-                                       sleep=self.sleeps.append, clock=self.clock)
+                                       sleep=self.sleeps.append, clock=self.clock, project=project)
         return result, transport
 
     def records(self, slot, key=KEY):
@@ -474,6 +476,36 @@ class TestDispatch(LogCase):
                       D.response_checks("openai", openai_summary(sse(openai_events(
                           answer(), usage={"input_tokens": 272001}))), {}, None, None))
 
+    def test_a_response_that_reports_another_openai_project_halts(self):
+        result, _ = self.run_slots(self.f.a(), self.f.a(), self.f.a(),
+                                   self.f.b(headers={"OpenAI-Project": "proj_other"}), project="proj_study")
+        self.assertTrue(result["halted"])
+        rec = self.records("B1")[0]
+        self.assertEqual((rec["outcome"], rec["halt_kind"], rec["response_outcome"]), (HALT, "response_check", VALID))
+        self.assertEqual(rec["failed_checks"], ["the openai-project header is not the study project"])
+        self.assertEqual(rec["response_headers"]["openai-project"], "proj_other")
+        self.assertEqual(self.log.unresolved_halts()[0]["halt_kind"], "response_check")
+
+    def test_a_response_that_reports_no_other_openai_project_passes(self):
+        cases = [({"openai-project": "proj_study"}, "proj_study"), ({}, "proj_study"),
+                 ({"openai-project": "proj_x"}, None)]
+        for i, (headers, project) in enumerate(cases):
+            self.log = AttemptLog(self.tmp / f"p{i}")
+            result, _ = self.run_slots(self.f.a(), self.f.a(), self.f.a(), self.f.b(headers=headers), project=project)
+            self.assertFalse(result["halted"], i)
+
+    def test_the_project_check_reads_only_openai_responses(self):
+        headers = {"anthropic-workspace-id": WS, "openai-project": "proj_other"}
+        result, _ = self.run_slots(self.f.a(headers=headers), self.f.a(), self.f.a(), self.f.b(), project="proj_study")
+        self.assertFalse(result["halted"])
+
+    def test_a_rebuilt_b_response_lists_the_project_check_as_not_applied(self):
+        self.log.write_raw(KEY, self.config, "B", 1, 1, self.f.b().raw)
+        rec = D.recover_attempt(self.log, {"trace_key": KEY, "config_sha256": self.config, "judge": "B", "repeat": 1,
+                                           "attempt": 1, "provider": "openai", "model": R.B_MODEL,
+                                           "request_sha256": self.reqs["B"].sha256})
+        self.assertEqual(rec["recovered"]["checks_not_applied"], ["openai-project header"])
+
     def test_first_model_string_is_recorded_then_enforced(self):
         self.run_slots(self.f.a(), self.f.a(), self.f.a(), self.f.b())
         self.assertEqual(self.log.first_model(self.config, "A"), R.A_MODEL)
@@ -649,7 +681,47 @@ class TestHttpsTransport(unittest.TestCase):
     def test_refuses_to_exist_without_paid_call_confirmation(self):
         for value in (False, None, 1, "yes"):
             with self.assertRaises(ValueError):
-                D.HttpsTransport(confirm_paid_calls=value)
+                D.HttpsTransport(confirm_paid_calls=value, openai_project="proj_study")
+
+    def test_refuses_to_exist_without_the_openai_project(self):
+        for value in (None, ""):
+            with self.assertRaisesRegex(ValueError, "pass openai_project"):
+                D.HttpsTransport(confirm_paid_calls=True, openai_project=value)
+
+    def sent_by_transport(self, request):
+        """The urllib request a send builds and the exchange it returns. ``urlopen`` is
+        replaced, so nothing leaves, and the credential is a placeholder."""
+        built = []
+
+        class Response(io.BytesIO):
+            status = 200
+            headers = {"OpenAI-Project": "proj_study", "x-request-id": "req_1"}
+
+        def urlopen(req, timeout):
+            built.append(req)
+            return Response(b"data: {}\n\n")
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "placeholder", "OPENAI_API_KEY": "placeholder"}):
+            with mock.patch.object(D.urllib.request, "urlopen", urlopen):
+                exchange = D.HttpsTransport(confirm_paid_calls=True, openai_project="proj_study").send(request)
+        self.assertEqual(len(built), 1)
+        return built[0], exchange
+
+    def test_every_openai_request_names_the_configured_project_at_send_time(self):
+        pack = synthetic_pack(1)
+        reqs = R.prepare(pack, images_for(pack))["requests"]
+        sent, exchange = self.sent_by_transport(reqs["B"])
+        self.assertEqual(sent.get_header("Openai-project"), "proj_study")
+        self.assertEqual((sent.get_header("Authorization"), sent.data), ("Bearer placeholder", reqs["B"].body))
+        self.assertEqual(exchange.headers["openai-project"], "proj_study")
+        self.assertEqual(dict(reqs["B"].headers), {"content-type": "application/json"})
+        sent, _ = self.sent_by_transport(reqs["A"])
+        self.assertIsNone(sent.get_header("Openai-project"))
+
+    def test_the_project_is_not_part_of_the_prepared_request_or_the_configuration(self):
+        self.assertEqual(dict(R.B_HEADERS), {"content-type": "application/json"})
+        self.assertEqual(R.config_record()["judges"]["B"]["headers"], {"content-type": "application/json"})
+        self.assertNotIn("proj_", json.dumps(R.config_record()))
 
     def test_read_stream(self):
         raw = sse(anthropic_events(answer()))

@@ -34,13 +34,16 @@ fake transport runs: every socket connection is refused, no API key is read, and
 responses carry scripted usage (--scripted-usage central, high or extreme). Paid mode
 needs all three together, --paid, --confirm-paid-calls (passed to the HTTPS transport as
 ``confirm_paid_calls``) and --approval-note naming an existing, non-empty file, plus
---workspace and --openai-project, the study's Anthropic workspace and OpenAI project. A
-partial set of paid flags, or paid mode without both, is refused before any transport
-exists. Paid mode is also refused until a provider token-count client exists, since
-every reservation needs the provider's own pre-send count. Every call reserves on the
-budget's ledger first (``judge.spend``), and the existing dispatcher sends A1, A2 and A3
-serially, then B1. A call that settles above its reservation halts the stage once its
-trajectory finishes; the cap still counts actual settled spend.
+--workspace and --openai-project, the study's Anthropic workspace and OpenAI project.
+Every OpenAI request carries the project in its OpenAI-Project header, added at send time
+so the request bytes and the configuration hash do not depend on it, and a response that
+reports another project halts the stage. A partial set of paid flags, or paid mode
+without both, is refused before any transport exists. Paid mode is also refused until a
+provider token-count client exists, since every reservation needs the provider's own
+pre-send count. Every call reserves on the budget's ledger first (``judge.spend``), and
+the existing dispatcher sends A1, A2 and A3 serially, then B1. A call that settles above
+its reservation halts the stage once its trajectory finishes; the cap still counts actual
+settled spend.
 
 **Ledgers**, one per budget and mode, at one fixed place under --data-root, shared by
 every run root, so committed spend adds up across runs:
@@ -312,7 +315,7 @@ def select_transport(paid, confirm_paid_calls, approval_note, workspace=None, co
         raise StageRefused("paid mode also needs --openai-project, the study's OpenAI project ID")
     if counter is None:
         raise StageRefused(NO_COUNTER)
-    return "paid", D.HttpsTransport(confirm_paid_calls=confirm_paid_calls)
+    return "paid", D.HttpsTransport(confirm_paid_calls=confirm_paid_calls, openai_project=openai_project)
 
 
 class ScriptedProvider(D.FakeTransport):
@@ -427,7 +430,8 @@ class ScriptedProvider(D.FakeTransport):
         else:
             events = openai_events(self._answer(ref), model=request.model, resp_id=f"resp_{ref}", usage=usage)
         self._bill(request, {"input": inp, "cache_write": 0, "cache_read": 0, "output": out})
-        return Exchange(200, {"x-request-id": f"req_{ref}"}, sse(events), None, None)
+        return Exchange(200, {"x-request-id": f"req_{ref}", D.OPENAI_PROJECT_HEADER: self.project}, sse(events),
+                        None, None)
 
 
 # ---------------------------------------------------------------- the run's records
@@ -774,6 +778,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         raise StageRefused(NO_COUNTER)
     if mode == "paid" and not (workspace and openai_project):
         raise StageRefused("paid mode needs the study's workspace and OpenAI project")
+    if mode == "paid" and transport.openai_project != openai_project:
+        raise ValueError("the HTTPS transport is bound to another OpenAI project than this stage's")
     scopes = {"anthropic": workspace, "openai": openai_project or (FAKE_PROJECT if mode == "fake" else None)}
     config_hash = R.config_sha256(b_model=b_model, caching=spec.caching)
     rubric_status = R.config_record(b_model=b_model, caching=spec.caching)["rubric"]["status"]
@@ -864,7 +870,7 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
             if hasattr(transport, "begin"):
                 transport.begin(spec, item.trace_key, config_hash, log)
             result = D.dispatch_trajectory(item.trace_key, reqs, config_hash, metered, log, workspace,
-                                           sleep=sleep, clock=clock, slots=spec.slots)
+                                           sleep=sleep, clock=clock, slots=spec.slots, project=scopes["openai"])
         except S.SpendHalt as e:
             halt_id = log.write_halt({
                 "trace_key": item.trace_key, "config_sha256": config_hash, "slot": e.entry.get("slot"),
@@ -1161,7 +1167,7 @@ def main(argv=None) -> int:
     run.add_argument("--confirm-paid-calls", action="store_true", help="passed to the HTTPS transport")
     run.add_argument("--approval-note", help="the file written after the mentor's written go-ahead")
     run.add_argument("--workspace", help="paid mode: the study's Anthropic workspace ID")
-    run.add_argument("--openai-project", help="paid mode: the study's OpenAI project ID")
+    run.add_argument("--openai-project", help="paid mode: the study's OpenAI project ID, sent on every OpenAI request")
     run.add_argument("--new-budget-note", help="why a second ledger for this budget is started, after the first "
                      "was moved aside")
     run.add_argument("--panel-manifest", help="EVAL: the frozen panel manifest")
