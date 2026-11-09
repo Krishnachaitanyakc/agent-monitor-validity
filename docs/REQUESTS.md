@@ -27,7 +27,7 @@ Only a transport failure is retried: same bytes, same slot, at most three retrie
 
 ## Halts
 
-HTTP 400 or 413, any invalid-request error, 401, 402, 403, 404, and credit, spend or usage limits halt the run. So does a failed per-response check (model string, service tier, region, one-hour cache tokens, workspace header on A; model string, tier, cache tokens on B) or a repeated response ID. Nothing more is sent until `AttemptLog.record_correction` stores a note for the halt. A halt uses no retry and is never an invalid verdict.
+An HTTP 400 that is not a spend or usage limit or a provider content-policy error, a 413, any other invalid-request error, 401, 402, 403, 404, and credit, spend or usage limits halt the run. So does a failed per-response check (model string, service tier, region, one-hour cache tokens, workspace header on A; model string, tier, cache tokens on B) or a repeated response ID. Nothing more is sent until `AttemptLog.record_correction` stores a note for the halt. A halt uses no retry and is never an invalid verdict. A provider content-policy error, one of judge B's policy codes, is FILTERED for its slot and does not halt.
 
 ## Outcomes
 
