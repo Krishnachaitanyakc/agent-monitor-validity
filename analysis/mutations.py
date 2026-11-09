@@ -902,6 +902,21 @@ MUTATIONS = [
     ("compare the gain with the reference in the degenerate regimes",
      "    if design.regime in DEGENERATE_REGIMES:             # plan section 7: printed in COVERAGE and in PARTIAL\n",
      "    if observed is None:\n"),
+    ("leave the printed rule silent on a D case with no control",
+     ''' A D case with no control of "\n                       "the same A1 verdict gets no control.")\n''',
+     '''")\n'''),
+    ("leave the note off a cell A task that instability-first cannot reach",
+     '''    if cell == "A" and instability_probability == 0:\n''',
+     "    if False:\n"),
+    ("put the note on every task of cell A",
+     '''    if cell == "A" and instability_probability == 0:\n''',
+     '''    if cell == "A":\n'''),
+    ("put the note on a task of another cell",
+     '''    if cell == "A" and instability_probability == 0:\n''',
+     "    if instability_probability == 0:\n"),
+    ("take the note on cell A from disagreement-first's probability",
+     '''_case_shows(c["cell"], c["matched_on"], probs["AUG"][c["index"]])''',
+     '''_case_shows(c["cell"], c["matched_on"], probs["DIS"][c["index"]])'''),
 ]
 
 

@@ -1380,7 +1380,7 @@ class TestCases(unittest.TestCase):
             "Generator of a cell: SeedSequence(9, spawn_key=(6, cell index)), with cells A to F at index 0 to 5. "
             "A cell A with only U2 or only U1 takes up to 2 from that group. With no D case, cell E takes the first "
             "of its order. The control in cell F is distinct from the first control, and there is none without a "
-            "second D case."]
+            "second D case. A D case with no control of the same A1 verdict gets no control."]
 
     def mixed(self, **kw):
         slots, Y, _ = mixed_panel()
@@ -1477,6 +1477,20 @@ class TestCases(unittest.TestCase):
             d = describe_panel([slot("S"), slot("S")], Y=["Unsuccessful", "Successful"], benchmarks=bench, ids=["d", "e"])
             self.assertEqual(d["cases"]["tasks"][1]["matched_on"], how)
             self.assertEqual(d["cases"]["tasks"][1]["shows"], f"{SHOWS['E']} (matched here: {how})")
+
+    def test_a_row_of_cell_A_with_no_chance_under_instability_first_says_so(self):
+        # PARTIAL, U2 = 7, U1 = 1, s = 3: U2 takes the whole slice, so the one U1 task cannot be reviewed.
+        labels = labels_for(0, 0, 7, 1, 12)
+        slots, Y = build(labels, E_for(U2=(7, 1), U1=(1, 1), S=(12, 0)))
+        d = describe_panel(slots, Y=Y, ids=[f"t{i:02d}" for i in range(20)])
+        self.assertEqual((d["regime"], d["s"]), ("PARTIAL", 3))
+        by_group = {t["group"]: t for t in d["cases"]["tasks"] if t["cell"] == "A"}
+        self.assertEqual(by_group["U2"]["review_probability"]["AUG"], Fraction(3, 7))
+        self.assertEqual(by_group["U2"]["shows"], SHOWS["A"])
+        self.assertEqual(by_group["U1"]["review_probability"]["AUG"], 0)
+        self.assertEqual(by_group["U1"]["shows"],
+                         SHOWS["A"] + " (not at this budget: instability-first has no chance of reviewing this task)")
+        self.assertEqual({t["cell"]: t["shows"] for t in d["cases"]["tasks"]}["B"], SHOWS["B"])
 
     def test_the_case_seed_reaches_the_choice(self):
         labels = labels_for(0, 6, 6, 6, 6)

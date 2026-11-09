@@ -2505,7 +2505,9 @@ CASE_WITHIN_CELL_TEXT = ("Within a cell, tasks are sorted by normalized task ID 
 CASE_GENERATOR_TEXT = ("Generator of a cell: SeedSequence({seed}, spawn_key=(6, cell index)), with cells A to F "
                        "at index 0 to 5. A cell A with only U2 or only U1 takes up to 2 from that group. With no "
                        "D case, cell E takes the first of its order. The control in cell F is distinct from the "
-                       "first control, and there is none without a second D case.")
+                       "first control, and there is none without a second D case. A D case with no control of "
+                       "the same A1 verdict gets no control.")
+CASE_NOT_REACHED_TEXT = " (not at this budget: instability-first has no chance of reviewing this task)"
 CASE_NOT_SUPPLIED = "not supplied"
 CASE_NO_IDS_TEXT = ("Task IDs were not supplied, so the tasks are sorted by their stored position here. The real "
                     "run must supply them.")
@@ -2695,9 +2697,15 @@ def _case_rationales(rationales: Optional[Sequence[Mapping[str, Optional[str]]]]
     return None if rationales is None else {k: _one_line(rationales[i].get(k)) for k in SLOT_NAMES.values()}
 
 
-def _case_shows(cell: str, matched_on: Optional[str]) -> str:
-    """What a case's cell shows, in the plan's words, with how a control was matched."""
+def _case_shows(cell: str, matched_on: Optional[str], instability_probability: Fraction) -> str:
+    """What a case's cell shows, in the plan's words, with how a control was matched.
+
+    The plan's words for cell A say the task is reached by instability. In PARTIAL a
+    U1 task can have no chance of review under instability-first, and the row says so.
+    """
     shows = {row[0]: row[3] for row in CASE_CELL_ROWS}[cell]
+    if cell == "A" and instability_probability == 0:
+        shows += CASE_NOT_REACHED_TEXT
     if cell == "F":
         unknown, second_control = shows.split(". If none exist, ")
         shows = unknown if matched_on is None else second_control
@@ -2925,7 +2933,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
               "second_annotator": _case_value(second_annotator, c["index"]),
               "rationales": _case_rationales(rationales, c["index"]),
               "review_probability": {pol: probs[pol][c["index"]] for pol in POLICY_ORDER},
-              "shows": _case_shows(c["cell"], c["matched_on"]), "matched_on": c["matched_on"]}
+              "shows": _case_shows(c["cell"], c["matched_on"], probs["AUG"][c["index"]]), "matched_on": c["matched_on"]}
              for c in select_cases(slots, E, ref, benchmarks=benchmarks, ids=ids, seed=case_seed)]
     return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
