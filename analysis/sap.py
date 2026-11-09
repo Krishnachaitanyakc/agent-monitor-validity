@@ -2486,26 +2486,38 @@ def _per_100(x: Fraction, den: int) -> Optional[Fraction]:
 def _judge_metrics(pairs: Sequence[Tuple[str, str]], n_usable: int) -> dict:
     """One judge's validity metrics on one set of tasks, with failure as the positive class.
 
-    pairs holds (verdict, reference verdict) for the tasks of the set, and n_usable
-    is the number of panel tasks with a usable reference. A metric with an empty
-    denominator is not defined (value None). Balanced accuracy needs both a failure
-    and a success reference.
+    pairs holds (slot outcome, reference verdict) for every task of the set, an invalid
+    output included, and n_usable is N_Y, the number of panel tasks with a usable
+    reference. The confusion matrix counts valid verdicts, and invalid outputs are
+    counted apart by reference class. Failure recall and success recall keep every
+    reference of their class in the denominator, so an invalid output counts as not
+    correct and a judge cannot gain by refusing hard cases; balanced accuracy is their
+    mean. Failure precision and the contradiction rate are over valid verdicts, valid
+    coverage is the valid verdicts over N_Y and prevalence the failure references over
+    the tasks of the set. A metric with an empty denominator is not defined (value
+    None); balanced accuracy needs both a failure and a success reference.
     """
-    c = Counter(pairs)
+    c = Counter((canonical_outcome(o), r) for o, r in pairs if is_valid(o))
     tp, fp = c[("failure", "failure")], c[("failure", "success")]
     fn, tn = c[("success", "failure")], c[("success", "success")]
-    n = tp + fp + fn + tn
-    recall, success_recall = _rate(tp, tp + fn), _rate(tn, tn + fp)
+    invalid = Counter(r for o, r in pairs if not is_valid(o))
+    inv_f, inv_s = invalid["failure"], invalid["success"]
+    n_valid = tp + fp + fn + tn
+    failure_refs, success_refs = tp + fn + inv_f, tn + fp + inv_s
+    recall, success_recall = _rate(tp, failure_refs), _rate(tn, success_refs)
     balanced = None
     if recall["value"] is not None and success_recall["value"] is not None:
         balanced = (recall["value"] + success_recall["value"]) / 2
     return {"confusion": {"TP": tp, "FP": fp, "FN": fn, "TN": tn},
-            "balanced_accuracy": {"value": balanced, "failure_references": tp + fn, "success_references": tn + fp},
-            "failure_precision": _rate(tp, tp + fp),
+            "invalid": {"failure_references": inv_f, "success_references": inv_s},
+            "balanced_accuracy": {"value": balanced, "failure_references": failure_refs,
+                                  "success_references": success_refs},
             "failure_recall": recall,
-            "contradiction": _rate(fp + fn, n),
-            "valid_prediction_coverage": _rate(n, n_usable),
-            "prevalence": _rate(tp + fn, n)}
+            "success_recall": success_recall,
+            "failure_precision": _rate(tp, tp + fp),
+            "contradiction": dict(_rate(fp + fn, n_valid), invalid_outputs=inv_f + inv_s),
+            "valid_coverage": _rate(n_valid, n_usable),
+            "prevalence": _rate(failure_refs, len(pairs))}
 
 
 def validity_metrics(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[str]]) -> dict:
@@ -2513,24 +2525,23 @@ def validity_metrics(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[st
 
     Failure is the positive class. Only tasks whose released primary label is usable
     count, so an Unsure or missing label is in neither the numerator nor any
-    denominator. Each judge is measured on its own valid set, the usable tasks where
-    its slot is a verdict, and on the shared subset, where both A1 and B1 are verdicts.
-    Valid-prediction coverage is the size of the set over the tasks with a usable
-    reference, n_usable; prevalence is the share of failure references within the set;
-    the contradiction rate is the share of the set where the judge differs from its
-    reference.
+    denominator. Each judge has one row on all_usable, every task with a usable
+    reference (N_Y), where an invalid output stays in the recall denominators, and one
+    on shared, the tasks where A1 and B1 are both verdicts; n_excluded_from_shared is
+    the number of usable tasks left out of it. See _judge_metrics for each measure. The
+    contradiction rate of a row is over that judge's valid verdicts in the row's set.
     """
     usable = []
     for sl, y in zip(slots, Y):
         status, verdict = reference_status(y)
         if status == USABLE:
             usable.append((sl, verdict))
-    pairs = lambda rows, k: [(canonical_outcome(sl[k]), v) for sl, v in rows if is_valid(sl[k])]
+    outcomes = lambda rows, k: [(sl[k], v) for sl, v in rows]
     shared = [(sl, v) for sl, v in usable if is_valid(sl["A1"]) and is_valid(sl["B1"])]
     n = len(usable)
-    return {"n_usable": n, "n_shared": len(shared),
-            "own": {k: _judge_metrics(pairs(usable, k), n) for k in ("A1", "B1")},
-            "shared": {k: _judge_metrics(pairs(shared, k), n) for k in ("A1", "B1")}}
+    return {"n_usable": n, "n_shared": len(shared), "n_excluded_from_shared": n - len(shared),
+            "all_usable": {k: _judge_metrics(outcomes(usable, k), n) for k in ("A1", "B1")},
+            "shared": {k: _judge_metrics(outcomes(shared, k), n) for k in ("A1", "B1")}}
 
 
 def select_cases(slots: Sequence[Mapping[str, str]], E: Sequence[int], reference: Sequence[str], *,
@@ -2690,7 +2701,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     disagreement-first review is set against the practical reference of 2 per 100
     panel tasks only as observed at or above it, or below it. contradiction gives how
     often each judge contradicts the references on its own valid tasks with a usable
-    reference; B1's is None without Y. review_probability holds each task's exact
+    reference, with the number of its invalid outputs among usable-reference tasks;
+    B1's is None without Y. review_probability holds each task's exact
     probability of review under each policy, and cases the tasks of the recorded rule.
     """
     if (E is None) == (Y is None):
@@ -2735,6 +2747,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     N_Y = cov["groups"]["all"]["usable"] if statuses_given else None
     validity = validity_metrics(slots, Y) if Y is not None else None
     n_a1_usable = sum(1 for l, r in zip(labels, ref) if l != "I" and r == USABLE)
+    n_a1_invalid = sum(1 for l, r in zip(labels, ref) if l == "I" and r == USABLE)
     probs = selection_probabilities(design, labels)
     cases = [{"cell": c["cell"], "task": c["index"] if ids is None else ids[c["index"]],
               "group": labels[c["index"]],
@@ -2761,8 +2774,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
             "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y),
                                                    "over_random": _per_100(over_rand, N_Y)},
             "practical_reference": {"per_100": MATERIAL_M, "status": status},
-            "contradiction": {"A1": _rate(M, n_a1_usable),
-                              "B1": validity["own"]["B1"]["contradiction"] if validity is not None else None},
+            "contradiction": {"A1": dict(_rate(M, n_a1_usable), invalid_outputs=n_a1_invalid),
+                              "B1": validity["all_usable"]["B1"]["contradiction"] if validity is not None else None},
             "review_probability": {pol: probs[pol] for pol in POLICY_ORDER},
             "cases": {"seed": case_seed, "rule": _case_rule_lines(case_seed, ids is not None),
                       "sort_key": "ids" if ids is not None else "stored order", "tasks": cases},
@@ -2788,16 +2801,20 @@ def _rate_text(r: Mapping[str, object], what: str) -> str:
 
 
 def _metric_lines(name: str, mt: dict, n_set: int) -> List[str]:
-    c, ba = mt["confusion"], mt["balanced_accuracy"]
+    c, ba, inv = mt["confusion"], mt["balanced_accuracy"], mt["invalid"]
     return [f"  {name} (n = {n_set})",
-            f"    confusion matrix: TP = {c['TP']}, FP = {c['FP']}, FN = {c['FN']}, TN = {c['TN']}",
+            f"    confusion matrix of valid verdicts: TP = {c['TP']}, FP = {c['FP']}, FN = {c['FN']}, TN = {c['TN']}",
+            f"    invalid outputs: {inv['failure_references']} on failure references, "
+            f"{inv['success_references']} on success references",
             f"    balanced accuracy: {_exact_text(ba['value'])}, denominators "
-            f"{ba['failure_references']} failure references and {ba['success_references']} success references",
-            f"    failure precision: {_rate_text(mt['failure_precision'], 'failure predictions')}",
-            f"    failure recall: {_rate_text(mt['failure_recall'], 'failure references')}",
-            f"    contradiction rate: {_rate_text(mt['contradiction'], 'tasks in this set')}",
-            f"    valid-prediction coverage: "
-            f"{_rate_text(mt['valid_prediction_coverage'], 'tasks with a usable reference')}",
+            f"{ba['failure_references']} failure references and {ba['success_references']} success references, "
+            f"an invalid output counted as not correct",
+            f"    failure recall: {_rate_text(mt['failure_recall'], 'failure references, invalid outputs included')}",
+            f"    success recall: {_rate_text(mt['success_recall'], 'success references, invalid outputs included')}",
+            f"    failure precision: {_rate_text(mt['failure_precision'], 'valid failure verdicts')}",
+            f"    contradiction rate: {_rate_text(mt['contradiction'], 'valid verdicts in this set')}; "
+            f"invalid outputs in this set: {mt['contradiction']['invalid_outputs']}",
+            f"    valid coverage: {_rate_text(mt['valid_coverage'], 'tasks with a usable reference')}",
             f"    prevalence of failure references: {_rate_text(mt['prevalence'], 'tasks in this set')}"]
 
 
@@ -2807,11 +2824,11 @@ def _validity_lines(v: Optional[dict]) -> List[str]:
     if v is None:
         out.append("  Not assessed: the released labels were not supplied.")
         return out
-    out.append(f"  Tasks with a usable reference: {v['n_usable']}; shared subset, where A1 and B1 are "
-               f"both valid: {v['n_shared']}. An Unsure or missing reference counts in neither.")
+    out.append(f"  Tasks with a usable reference: N_Y = {v['n_usable']}; shared subset, where A1 and B1 are "
+               f"both valid: {v['n_shared']}; usable tasks excluded from the shared subset: "
+               f"{v['n_excluded_from_shared']}. An Unsure or missing reference counts in neither.")
     for k in ("A1", "B1"):
-        m = v["own"][k]
-        out += _metric_lines(f"{k} on its own valid set", m, m["valid_prediction_coverage"]["numerator"])
+        out += _metric_lines(f"{k} on all tasks with a usable reference", v["all_usable"][k], v["n_usable"])
     for k in ("A1", "B1"):
         out += _metric_lines(f"{k} on the shared subset", v["shared"][k], v["n_shared"])
     return out
@@ -2820,13 +2837,16 @@ def _validity_lines(v: Optional[dict]) -> List[str]:
 def _contradiction_lines(c: Mapping[str, Optional[dict]], statuses_given: bool) -> List[str]:
     """Report lines of how often each judge contradicts the released references."""
     where = "a usable reference" if statuses_given else "a reference, every label treated as usable"
+    tasks = "tasks with a usable reference" if statuses_given else "tasks with a reference"
     out = ["JUDGE CONTRADICTION: how often each judge contradicts the released references, on its own valid tasks",
-           f"  A1: {_rate_text(c['A1'], f'tasks with a valid A1 and {where}')}"]
+           f"  A1: {_rate_text(c['A1'], f'tasks with a valid A1 and {where}')}; "
+           f"invalid outputs among {tasks}: {c['A1']['invalid_outputs']}"]
     if c["B1"] is None:
         out.append("  B1: not assessed: the released labels were not supplied, and E alone cannot give "
                    "B1's reference where A1 is invalid.")
     else:
-        out.append(f"  B1: {_rate_text(c['B1'], f'tasks with a valid B1 and {where}')}")
+        out.append(f"  B1: {_rate_text(c['B1'], f'tasks with a valid B1 and {where}')}; "
+                   f"invalid outputs among {tasks}: {c['B1']['invalid_outputs']}")
     return out
 
 

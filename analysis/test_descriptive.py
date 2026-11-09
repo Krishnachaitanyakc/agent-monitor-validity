@@ -357,59 +357,86 @@ class TestValidityMetrics(unittest.TestCase):
     def assert_rate(self, got, value, num, den):
         self.assertEqual((got["value"], got["numerator"], got["denominator"]), (value, num, den))
 
-    def assert_metrics(self, m, confusion, balanced, precision, recall, coverage, prevalence):
+    def assert_metrics(self, m, confusion, invalid, balanced, precision, recall, success_recall, coverage, prevalence):
         self.assertEqual(m["confusion"], dict(zip(("TP", "FP", "FN", "TN"), confusion)))
         tp, fp, fn, tn = confusion
-        self.assertEqual(m["balanced_accuracy"], {"value": balanced, "failure_references": tp + fn,
-                                                  "success_references": tn + fp})
+        inv_f, inv_s = invalid
+        self.assertEqual(m["invalid"], {"failure_references": inv_f, "success_references": inv_s})
+        failure, success = tp + fn + inv_f, tn + fp + inv_s
+        self.assertEqual(m["balanced_accuracy"], {"value": balanced, "failure_references": failure,
+                                                  "success_references": success})
         self.assert_rate(m["failure_precision"], precision, tp, tp + fp)
-        self.assert_rate(m["failure_recall"], recall, tp, tp + fn)
+        self.assert_rate(m["failure_recall"], recall, tp, failure)
+        self.assert_rate(m["success_recall"], success_recall, tn, success)
         n = tp + fp + fn + tn
         self.assert_rate(m["contradiction"], Fraction(fp + fn, n) if n else None, fp + fn, n)
-        self.assert_rate(m["valid_prediction_coverage"], coverage[0], coverage[1], coverage[2])
-        self.assert_rate(m["prevalence"], prevalence, tp + fn, tp + fp + fn + tn)
+        self.assertEqual(m["contradiction"]["invalid_outputs"], inv_f + inv_s)
+        self.assert_rate(m["valid_coverage"], coverage[0], coverage[1], coverage[2])
+        self.assert_rate(m["prevalence"], prevalence, failure, failure + success)
 
     def test_hand_computed_confusion_matrices(self):
         slots, Y = from_rows(ROWS)
         v = sap.describe_panel(slots, Y=Y)["validity"]
-        self.assertEqual((v["n_usable"], v["n_shared"]), (14, 10))
+        self.assertEqual((v["n_usable"], v["n_shared"], v["n_excluded_from_shared"]), (14, 10, 4))
         F = Fraction
-        self.assert_metrics(v["own"]["A1"], (4, 1, 2, 5), F(3, 4), F(4, 5), F(2, 3), (F(6, 7), 12, 14), F(1, 2))
-        self.assert_metrics(v["own"]["B1"], (4, 2, 2, 4), F(2, 3), F(2, 3), F(2, 3), (F(6, 7), 12, 14), F(1, 2))
-        self.assert_metrics(v["shared"]["A1"], (3, 1, 2, 4), F(7, 10), F(3, 4), F(3, 5), (F(5, 7), 10, 14), F(1, 2))
-        self.assert_metrics(v["shared"]["B1"], (3, 2, 2, 3), F(3, 5), F(3, 5), F(3, 5), (F(5, 7), 10, 14), F(1, 2))
+        self.assert_metrics(v["all_usable"]["A1"], (4, 1, 2, 5), (1, 1), F(9, 14), F(4, 5), F(4, 7), F(5, 7), (F(6, 7), 12, 14), F(1, 2))
+        self.assert_metrics(v["all_usable"]["B1"], (4, 2, 2, 4), (1, 1), F(4, 7), F(2, 3), F(4, 7), F(4, 7), (F(6, 7), 12, 14), F(1, 2))
+        self.assert_metrics(v["shared"]["A1"], (3, 1, 2, 4), (0, 0), F(7, 10), F(3, 4), F(3, 5), F(4, 5), (F(5, 7), 10, 14), F(1, 2))
+        self.assert_metrics(v["shared"]["B1"], (3, 2, 2, 3), (0, 0), F(3, 5), F(3, 5), F(3, 5), F(3, 5), (F(5, 7), 10, 14), F(1, 2))
+
+    def test_a_judge_cannot_gain_by_refusing_hard_cases(self):
+        # Three failure references and three success references. The judge answers the two it
+        # gets right and refuses the rest: every refusal stays in the denominator as not correct.
+        answers = [("failure", "failure", "Unsuccessful", 1), ("REFUSAL", "failure", "Unsuccessful", 2),
+                   ("success", "success", "Successful", 1), ("REFUSAL", "success", "Successful", 2)]
+        slots, Y = from_rows(answers)
+        v = sap.describe_panel(slots, Y=Y)["validity"]["all_usable"]["A1"]
+        self.assertEqual(v["failure_recall"]["value"], Fraction(1, 3))
+        self.assertEqual(v["success_recall"]["value"], Fraction(1, 3))
+        self.assertEqual(v["balanced_accuracy"]["value"], Fraction(1, 3))
+        self.assertEqual(v["failure_precision"]["value"], 1)
+        self.assertEqual(v["contradiction"]["value"], 0)
+        self.assertEqual(v["valid_coverage"]["value"], Fraction(1, 3))
 
     def test_report_gives_every_metric_with_its_denominator(self):
         slots, Y = from_rows(ROWS)
         txt = sap.describe_report(sap.describe_panel(slots, Y=Y), EXPOSURE)
-        for needle in ("Tasks with a usable reference: 14; shared subset, where A1 and B1 are both valid: 10.",
-                       "A1 on its own valid set (n = 12)",
-                       "B1 on its own valid set (n = 12)",
+        for needle in ("Tasks with a usable reference: N_Y = 14; shared subset, where A1 and B1 are both valid: 10; "
+                       "usable tasks excluded from the shared subset: 4.",
+                       "A1 on all tasks with a usable reference (n = 14)",
+                       "B1 on all tasks with a usable reference (n = 14)",
                        "A1 on the shared subset (n = 10)",
                        "B1 on the shared subset (n = 10)",
-                       "confusion matrix: TP = 4, FP = 1, FN = 2, TN = 5",
-                       "balanced accuracy: 3/4 (0.7500), denominators 6 failure references and 6 success references",
-                       "failure precision: 4/5 (0.8000), 4 of 5 failure predictions",
-                       "failure recall: 2/3 (0.6667), 4 of 6 failure references",
-                       "valid-prediction coverage: 6/7 (0.8571), 12 of 14 tasks with a usable reference",
-                       "prevalence of failure references: 1/2 (0.5000), 6 of 12 tasks in this set"):
+                       "confusion matrix of valid verdicts: TP = 4, FP = 1, FN = 2, TN = 5",
+                       "invalid outputs: 1 on failure references, 1 on success references",
+                       "balanced accuracy: 9/14 (0.6429), denominators 7 failure references and 7 success references, "
+                       "an invalid output counted as not correct",
+                       "failure precision: 4/5 (0.8000), 4 of 5 valid failure verdicts",
+                       "failure recall: 4/7 (0.5714), 4 of 7 failure references, invalid outputs included",
+                       "success recall: 5/7 (0.7143), 5 of 7 success references, invalid outputs included",
+                       "contradiction rate: 1/4 (0.2500), 3 of 12 valid verdicts in this set; invalid outputs in this set: 2",
+                       "valid coverage: 6/7 (0.8571), 12 of 14 tasks with a usable reference",
+                       "prevalence of failure references: 1/2 (0.5000), 7 of 14 tasks in this set"):
             self.assertIn(needle, txt, needle)
 
     def test_each_heading_prints_its_own_set(self):
         slots, Y = from_rows(ROWS)
         lines = sap.describe_report(sap.describe_panel(slots, Y=Y), EXPOSURE).split("\n")
-        for heading, confusion in (("  A1 on its own valid set (n = 12)", "TP = 4, FP = 1, FN = 2, TN = 5"),
-                                   ("  B1 on its own valid set (n = 12)", "TP = 4, FP = 2, FN = 2, TN = 4"),
+        for heading, confusion in (("  A1 on all tasks with a usable reference (n = 14)", "TP = 4, FP = 1, FN = 2, TN = 5"),
+                                   ("  B1 on all tasks with a usable reference (n = 14)", "TP = 4, FP = 2, FN = 2, TN = 4"),
                                    ("  A1 on the shared subset (n = 10)", "TP = 3, FP = 1, FN = 2, TN = 4"),
                                    ("  B1 on the shared subset (n = 10)", "TP = 3, FP = 2, FN = 2, TN = 3")):
-            self.assertEqual(lines[lines.index(heading) + 1], "    confusion matrix: " + confusion)
+            self.assertEqual(lines[lines.index(heading) + 1], "    confusion matrix of valid verdicts: " + confusion)
         start = lines.index("  A1 on the shared subset (n = 10)")
-        self.assertEqual(lines[start + 2:start + 8],
-                         ["    balanced accuracy: 7/10 (0.7000), denominators 5 failure references and 5 success references",
-                          "    failure precision: 3/4 (0.7500), 3 of 4 failure predictions",
-                          "    failure recall: 3/5 (0.6000), 3 of 5 failure references",
-                          "    contradiction rate: 3/10 (0.3000), 3 of 10 tasks in this set",
-                          "    valid-prediction coverage: 5/7 (0.7143), 10 of 14 tasks with a usable reference",
+        self.assertEqual(lines[start + 2:start + 10],
+                         ["    invalid outputs: 0 on failure references, 0 on success references",
+                          "    balanced accuracy: 7/10 (0.7000), denominators 5 failure references and 5 success references, "
+                          "an invalid output counted as not correct",
+                          "    failure recall: 3/5 (0.6000), 3 of 5 failure references, invalid outputs included",
+                          "    success recall: 4/5 (0.8000), 4 of 5 success references, invalid outputs included",
+                          "    failure precision: 3/4 (0.7500), 3 of 4 valid failure verdicts",
+                          "    contradiction rate: 3/10 (0.3000), 3 of 10 valid verdicts in this set; invalid outputs in this set: 0",
+                          "    valid coverage: 5/7 (0.7143), 10 of 14 tasks with a usable reference",
                           "    prevalence of failure references: 1/2 (0.5000), 5 of 10 tasks in this set"])
 
     def test_verdicts_match_in_any_letter_case(self):
@@ -420,18 +447,18 @@ class TestValidityMetrics(unittest.TestCase):
             d = sap.describe_panel(mixed, Y=Y)
             self.assertEqual(d["validity"], want["validity"])
             self.assertEqual(d["contradiction"], want["contradiction"])
-            self.assert_metrics(d["validity"]["own"]["A1"], (4, 1, 2, 5), Fraction(3, 4), Fraction(4, 5), Fraction(2, 3),
-                                (Fraction(6, 7), 12, 14), Fraction(1, 2))
+            self.assert_metrics(d["validity"]["all_usable"]["A1"], (4, 1, 2, 5), (1, 1), Fraction(9, 14), Fraction(4, 5),
+                                Fraction(4, 7), Fraction(5, 7), (Fraction(6, 7), 12, 14), Fraction(1, 2))
 
     def test_empty_denominators_are_not_defined_and_never_zero(self):
         # No failure reference and no failure prediction.
         slots, Y = from_rows([("success", "success", "Successful", 4)])
         d = sap.describe_panel(slots, Y=Y)
-        a = d["validity"]["own"]["A1"]
-        self.assert_metrics(a, (0, 0, 0, 4), None, None, None, (Fraction(1), 4, 4), Fraction(0))
+        a = d["validity"]["all_usable"]["A1"]
+        self.assert_metrics(a, (0, 0, 0, 4), (0, 0), None, None, None, Fraction(1), (Fraction(1), 4, 4), Fraction(0))
         txt = sap.describe_report(d, EXPOSURE)
         self.assertIn("balanced accuracy: not defined, denominators 0 failure references and 4 success references", txt)
-        self.assertIn("failure precision: not defined, 0 of 0 failure predictions", txt)
+        self.assertIn("failure precision: not defined, 0 of 0 valid failure verdicts", txt)
         self.assertIn("failure recall: not defined, 0 of 0 failure references", txt)
         self.assertIn("prevalence of failure references: 0 (0.0000), 0 of 4 tasks in this set", txt)  # a true zero
         self.assertNotIn("balanced accuracy: 0", txt)
@@ -439,26 +466,27 @@ class TestValidityMetrics(unittest.TestCase):
         self.assertNotIn("failure recall: 0", txt)
         # Failure references only, none found: recall is a true zero, balanced accuracy is not defined.
         slots, Y = from_rows([("success", "success", "Unsuccessful", 3)])
-        a = sap.describe_panel(slots, Y=Y)["validity"]["own"]["A1"]
-        self.assert_metrics(a, (0, 0, 3, 0), None, None, Fraction(0), (Fraction(1), 3, 3), Fraction(1))
-        # No valid first verdict.
+        a = sap.describe_panel(slots, Y=Y)["validity"]["all_usable"]["A1"]
+        self.assert_metrics(a, (0, 0, 3, 0), (0, 0), None, None, Fraction(0), None, (Fraction(1), 3, 3), Fraction(1))
+        # No valid first verdict: every invalid output stays in the recalls as not correct.
         slots, Y = from_rows([("REFUSAL", "success", "Unsuccessful", 2), ("REFUSAL", "success", "Successful", 1)])
         d = sap.describe_panel(slots, Y=Y)
-        self.assert_metrics(d["validity"]["own"]["A1"], (0, 0, 0, 0), None, None, None, (Fraction(0), 0, 3), None)
-        self.assert_metrics(d["validity"]["shared"]["B1"], (0, 0, 0, 0), None, None, None, (Fraction(0), 0, 3), None)
+        self.assert_metrics(d["validity"]["all_usable"]["A1"], (0, 0, 0, 0), (2, 1), Fraction(0), None, Fraction(0), Fraction(0),
+                            (Fraction(0), 0, 3), Fraction(2, 3))
+        self.assert_metrics(d["validity"]["shared"]["B1"], (0, 0, 0, 0), (0, 0), None, None, None, None, (Fraction(0), 0, 3), None)
         self.assertIn("prevalence of failure references: not defined, 0 of 0 tasks in this set",
                       sap.describe_report(d, EXPOSURE))
         # No usable reference: even the coverage has no denominator.
         slots, Y = from_rows([("success", "success", "Unsure", 2), ("failure", "failure", None, 1)])
         d = sap.describe_panel(slots, Y=Y)
-        self.assert_metrics(d["validity"]["own"]["A1"], (0, 0, 0, 0), None, None, None, (None, 0, 0), None)
-        self.assertIn("valid-prediction coverage: not defined, 0 of 0 tasks with a usable reference",
+        self.assert_metrics(d["validity"]["all_usable"]["A1"], (0, 0, 0, 0), (0, 0), None, None, None, None, (None, 0, 0), None)
+        self.assertIn("valid coverage: not defined, 0 of 0 tasks with a usable reference",
                       sap.describe_report(d, EXPOSURE))
 
     def test_balanced_accuracy_averages_the_two_class_recalls(self):
         slots, Y = from_rows([("failure", "failure", "Unsuccessful", 1), ("success", "success", "Unsuccessful", 3),
                               ("success", "success", "Successful", 2)])
-        a = sap.describe_panel(slots, Y=Y)["validity"]["own"]["A1"]
+        a = sap.describe_panel(slots, Y=Y)["validity"]["all_usable"]["A1"]
         self.assertEqual(a["balanced_accuracy"]["value"], (Fraction(1, 4) + 1) / 2)
 
     def test_a_judge_word_as_a_reference_label_stops_the_analysis(self):
@@ -473,47 +501,54 @@ class TestJudgeContradiction(unittest.TestCase):
                 ("success", "failure", "Successful", 4)]
         slots, Y = from_rows(rows)
         d = sap.describe_panel(slots, Y=Y)
-        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(2, 5), "numerator": 4, "denominator": 10})
-        self.assertEqual(d["contradiction"]["B1"], {"value": Fraction(4, 5), "numerator": 8, "denominator": 10})
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(2, 5), "numerator": 4, "denominator": 10, "invalid_outputs": 0})
+        self.assertEqual(d["contradiction"]["B1"], {"value": Fraction(4, 5), "numerator": 8, "denominator": 10, "invalid_outputs": 0})
         lines = sap.describe_report(d, EXPOSURE).split("\n")
-        self.assertIn("  A1: 2/5 (0.4000), 4 of 10 tasks with a valid A1 and a usable reference", lines)
-        self.assertIn("  B1: 4/5 (0.8000), 8 of 10 tasks with a valid B1 and a usable reference", lines)
+        self.assertIn("  A1: 2/5 (0.4000), 4 of 10 tasks with a valid A1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 0", lines)
+        self.assertIn("  B1: 4/5 (0.8000), 8 of 10 tasks with a valid B1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 0", lines)
 
     def test_invalid_and_unknown_tasks_leave_the_denominator(self):
         slots, Y = from_rows(ROWS)
         d = sap.describe_panel(slots, Y=Y)
-        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 4), "numerator": 3, "denominator": 12})
-        self.assertEqual(d["contradiction"]["B1"], {"value": Fraction(1, 3), "numerator": 4, "denominator": 12})
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 4), "numerator": 3, "denominator": 12, "invalid_outputs": 2})
+        self.assertEqual(d["contradiction"]["B1"], {"value": Fraction(1, 3), "numerator": 4, "denominator": 12, "invalid_outputs": 2})
         self.assertEqual(d["contradiction"]["A1"]["numerator"], d["M"])
-        self.assertEqual(d["contradiction"]["A1"], d["validity"]["own"]["A1"]["contradiction"])
+        self.assertEqual(d["contradiction"]["A1"], d["validity"]["all_usable"]["A1"]["contradiction"])
         self.assertEqual(d["validity"]["shared"]["A1"]["contradiction"]["denominator"], 10)
+        self.assertNotIn("own", d["validity"])
         self.assertEqual(d["validity"]["shared"]["B1"]["contradiction"]["numerator"], 4)
 
     def test_E_with_statuses_gives_A1_and_says_why_B1_is_not_assessed(self):
         slots, Y, _ = mixed_panel()
         j = sap.join_reference(slots, Y)
         d = sap.describe_panel(slots, j["E"], reference=j["reference"])
-        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 2), "numerator": 3, "denominator": 6})
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 2), "numerator": 3, "denominator": 6, "invalid_outputs": 1})
         self.assertIsNone(d["contradiction"]["B1"])
         lines = sap.describe_report(d, EXPOSURE).split("\n")
-        self.assertIn("  A1: 1/2 (0.5000), 3 of 6 tasks with a valid A1 and a usable reference", lines)
+        self.assertIn("  A1: 1/2 (0.5000), 3 of 6 tasks with a valid A1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 1", lines)
         self.assertIn("  B1: not assessed: the released labels were not supplied, and E alone cannot give "
                       "B1's reference where A1 is invalid.", lines)
 
     def test_E_without_statuses_says_every_label_was_treated_as_usable(self):
         d = sap.describe_panel([slot("I"), slot("S"), slot("S")], [1, 1, 0])
-        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 2), "numerator": 1, "denominator": 2})
-        self.assertIn("  A1: 1/2 (0.5000), 1 of 2 tasks with a valid A1 and a reference, every label treated as usable",
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 2), "numerator": 1, "denominator": 2, "invalid_outputs": 1})
+        self.assertIn("  A1: 1/2 (0.5000), 1 of 2 tasks with a valid A1 and a reference, every label treated as usable; "
+                      "invalid outputs among tasks with a reference: 1",
                       sap.describe_report(d, EXPOSURE).split("\n"))
 
     def test_an_empty_set_is_not_defined(self):
         slots, Y = from_rows([("REFUSAL", "MALFORMED", "Successful", 2)])
         d = sap.describe_panel(slots, Y=Y)
-        self.assertEqual(d["contradiction"]["A1"], {"value": None, "numerator": 0, "denominator": 0})
-        self.assertEqual(d["contradiction"]["B1"], {"value": None, "numerator": 0, "denominator": 0})
+        self.assertEqual(d["contradiction"]["A1"], {"value": None, "numerator": 0, "denominator": 0, "invalid_outputs": 2})
+        self.assertEqual(d["contradiction"]["B1"], {"value": None, "numerator": 0, "denominator": 0, "invalid_outputs": 2})
         lines = sap.describe_report(d, EXPOSURE).split("\n")
-        self.assertIn("  A1: not defined, 0 of 0 tasks with a valid A1 and a usable reference", lines)
-        self.assertIn("  B1: not defined, 0 of 0 tasks with a valid B1 and a usable reference", lines)
+        self.assertIn("  A1: not defined, 0 of 0 tasks with a valid A1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 2", lines)
+        self.assertIn("  B1: not defined, 0 of 0 tasks with a valid B1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 2", lines)
         slots, Y = from_rows([("success", "success", "Unsure", 2)])
         self.assertIsNone(sap.describe_panel(slots, Y=Y)["contradiction"]["A1"]["value"])
 
@@ -1020,18 +1055,27 @@ class TestInvalidAndUnsure(unittest.TestCase):
         slots, Y, _ = mixed_panel()
         v = sap.describe_panel(slots, Y=Y)["validity"]
         self.assertEqual((v["n_usable"], v["n_shared"]), (7, 5))
+        self.assertEqual(v["n_excluded_from_shared"], 2)
         F = Fraction
-        A1 = v["own"]["A1"]
+        A1 = v["all_usable"]["A1"]
         self.assertEqual(A1["confusion"], {"TP": 0, "FP": 0, "FN": 3, "TN": 3})
-        self.assertEqual(A1["balanced_accuracy"]["value"], F(1, 2))
-        self.assertEqual(A1["valid_prediction_coverage"]["value"], F(6, 7))
+        self.assertEqual(A1["invalid"], {"failure_references": 0, "success_references": 1})
+        self.assertEqual(A1["balanced_accuracy"]["value"], F(3, 8))           # 0 of 3 and 3 of 4
+        self.assertEqual(A1["valid_coverage"]["value"], F(6, 7))
         self.assertIsNone(A1["failure_precision"]["value"])
         self.assertEqual(A1["failure_recall"]["value"], 0)
-        B1 = v["own"]["B1"]
+        self.assertEqual(A1["success_recall"]["value"], F(3, 4))
+        B1 = v["all_usable"]["B1"]
         self.assertEqual(B1["confusion"], {"TP": 0, "FP": 0, "FN": 2, "TN": 4})
-        self.assertEqual(B1["prevalence"]["value"], F(1, 3))
+        self.assertEqual(B1["invalid"], {"failure_references": 1, "success_references": 0})
+        self.assertEqual(B1["prevalence"], {"value": F(3, 7), "numerator": 3, "denominator": 7})
         self.assertEqual(v["shared"]["A1"]["confusion"], {"TP": 0, "FP": 0, "FN": 2, "TN": 3})
-        self.assertEqual(v["shared"]["B1"]["valid_prediction_coverage"]["value"], F(5, 7))
+        self.assertEqual(v["shared"]["B1"]["valid_coverage"]["value"], F(5, 7))
+        lines = sap.describe_report(sap.describe_panel(slots, Y=Y), EXPOSURE).split("\n")
+        for judge, printed in (("A1", "0 on failure references, 1 on success references"),
+                               ("B1", "1 on failure references, 0 on success references")):
+            start = lines.index(f"  {judge} on all tasks with a usable reference (n = 7)")
+            self.assertEqual(lines[start + 2], "    invalid outputs: " + printed)
 
     def test_E_with_statuses_matches_the_released_labels(self):
         slots, Y, bench = mixed_panel()
