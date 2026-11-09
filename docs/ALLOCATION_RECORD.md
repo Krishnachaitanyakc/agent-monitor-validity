@@ -65,7 +65,7 @@ The prompt tasks use three templates that hold panel tasks. Those templates hold
 
 ### Packs
 
-The Oct 30 dry run built 19 packs from those traces, so packs of P1, P2 and P3 tasks already exist. By that list, 10 of the 15 new prompt tasks and 16 of the 20 frozen-pass tasks have no trace on disk and so no pack.
+The Oct 30 dry run used 19 development packs, and the walkthrough shows the pack of `visualwebarena.419`, so packs of tasks in the allocation already exist. By that list, 10 of the 15 new prompt tasks and 16 of the 20 frozen-pass tasks have no trace on disk and so no pack.
 
 ### Still open
 
