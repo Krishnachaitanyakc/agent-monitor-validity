@@ -11,8 +11,9 @@ Parser rules (``parse``), applied to the final answer text of a complete respons
   allowed), with no duplicate keys and no NaN or infinity. Otherwise: ``malformed``.
 - The object must have exactly the five fields, and ``verdict`` must be a string.
   Otherwise: ``malformed``.
-- ``verdict`` must equal "success" or "failure", ignoring case, with no other change.
-  Otherwise: ``abstain`` (it parses, but gives no admissible verdict).
+- ``verdict`` must equal "success" or "failure", ignoring ASCII letter case, with no
+  other change, so a look-alike character never becomes a verdict. Otherwise: ``abstain``
+  (it parses, but gives no admissible verdict).
 - A bad covariate voids that field only, never the verdict: ``p_failure`` that is not a
   finite number in [0, 1], ``evidence_sufficient`` that is not "yes" or "no" ignoring case,
   ``evidence_step_ids`` that is not a list of integers, and ``rationale`` that is not a
@@ -132,7 +133,7 @@ def parse(text) -> dict:
         voided["rationale"] = (f"over {RATIONALE_MAX_WORDS} words" if isinstance(r, str)
                                else "not a string")
 
-    verdict = obj["verdict"].casefold()
+    verdict = obj["verdict"].lower() if obj["verdict"].isascii() else None
     fields["verdict"] = verdict if verdict in VERDICTS else None
     out.update(fields=fields, voided=voided)
     if verdict not in VERDICTS:
