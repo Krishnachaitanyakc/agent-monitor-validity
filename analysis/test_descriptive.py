@@ -246,6 +246,7 @@ class TestGainsAndReference(unittest.TestCase):
         g = d["gain"]
         self.assertEqual(g["over_disagreement"], {"verdicts": Fraction(189, 68), "per_100_panel": Fraction(189, 136)})
         self.assertEqual(g["over_random"], {"verdicts": Fraction(35, 4), "per_100_panel": Fraction(35, 8)})
+        self.assertEqual(g["disagreement_over_random"], {"verdicts": Fraction(203, 34), "per_100_panel": Fraction(203, 68)})
         self.assertEqual(d["N_Y"], 200)
         self.assertEqual(d["secondary"], {"over_disagreement": Fraction(189, 136), "over_random": Fraction(35, 8)})
         txt = sap.describe_report(d, EXPOSURE)
@@ -255,6 +256,8 @@ class TestGainsAndReference(unittest.TestCase):
                        "Random | 15/2 (7.5000) | 3/10 (0.3000)",
                        "over disagreement-first: 189/68 (2.7794) verdicts; 189/136 (1.3897) per 100 panel tasks (N = 200)",
                        "over random: 35/4 (8.7500) verdicts; 35/8 (4.3750) per 100 panel tasks (N = 200)",
+                       "check, disagreement-first minus random: 203/34 (5.9706) verdicts; "
+                       "203/68 (2.9853) per 100 panel tasks (N = 200)",
                        "(N_Y = 200 of N = 200)",
                        "gain over disagreement-first per 100 panel tasks: 189/136 (1.3897); "
                        "observed below the reference."):
@@ -304,6 +307,8 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(d["N_Y"], 7)                               # the invalid A1 with a usable label counts
         self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], Fraction(10, 3))
         self.assertEqual(d["secondary"], {"over_disagreement": Fraction(100, 21), "over_random": Fraction(50, 7)})
+        self.assertEqual(d["gain"]["disagreement_over_random"],     # 5/3 - 3/2, per 100 on the panel of 10
+                         {"verdicts": Fraction(1, 6), "per_100_panel": Fraction(5, 3)})
         txt = sap.describe_report(d, EXPOSURE)
         self.assertIn("(N_Y = 7 of N = 10)", txt)
         lines = txt.split("\n")
@@ -324,7 +329,10 @@ class TestGainsAndReference(unittest.TestCase):
         d = sap.describe_panel([], Y=[])
         self.assertIsNone(d["gain"]["over_disagreement"]["per_100_panel"])
         self.assertIsNone(d["practical_reference"]["status"])
+        self.assertIsNone(d["gain"]["disagreement_over_random"]["per_100_panel"])
         self.assertIn("no comparison is defined", sap.describe_report(d, EXPOSURE))
+        self.assertIn("check, disagreement-first minus random: 0 (0.0000) verdicts; not defined per 100 panel tasks",
+                      sap.describe_report(d, EXPOSURE))
 
 
 ROWS = [  # A1, B1, released label, count; failure is the positive class

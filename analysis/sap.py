@@ -2694,8 +2694,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     The conclusions apply to these tasks and these realized judge calls. Every number
     is computed exactly in the regime at hand, degenerate ones included: the expected
     capture of each policy over its own random choices at the same K, the share of M
-    each captures, and the gain of instability-first review over disagreement-first
-    and over random review, in verdicts and per 100 panel tasks. The secondary result
+    each captures, the gain of instability-first review over disagreement-first and
+    over random review, in verdicts and per 100 panel tasks, and, as a check,
+    disagreement-first minus random on the same two scales. The secondary result
     is the same gain per 100 tasks with a usable label. A rate with an empty
     denominator is None, not defined and never zero. The observed gain over
     disagreement-first review is set against the practical reference of 2 per 100
@@ -2731,6 +2732,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     M = sum(counts.values())
     reviews = {pol: expected_reviewed(design, pol) for pol in POLICY_ORDER}
     over_dis, over_rand = cap["AUG"] - cap["DIS"], cap["AUG"] - cap["RAND"]
+    dis_over_rand = cap["DIS"] - cap["RAND"]
     observed = _per_100(over_dis, design.N)
     if observed is None:
         status = None
@@ -2770,7 +2772,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
             "captures": {pol: cap[pol] for pol in POLICY_ORDER},
             "share_of_M": {pol: cap[pol] / M if M > 0 else None for pol in POLICY_ORDER},
             "gain": {"over_disagreement": {"verdicts": over_dis, "per_100_panel": observed},
-                     "over_random": {"verdicts": over_rand, "per_100_panel": _per_100(over_rand, design.N)}},
+                     "over_random": {"verdicts": over_rand, "per_100_panel": _per_100(over_rand, design.N)},
+                     "disagreement_over_random": {"verdicts": dis_over_rand,
+                                                  "per_100_panel": _per_100(dis_over_rand, design.N)}},
             "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y),
                                                    "over_random": _per_100(over_rand, N_Y)},
             "practical_reference": {"per_100": MATERIAL_M, "status": status},
@@ -2942,6 +2946,9 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     for key, name in (("over_disagreement", "disagreement-first"), ("over_random", "random")):
         out.append(f"  over {name}: {_exact_text(g[key]['verdicts'])} verdicts; "
                    f"{_exact_text(g[key]['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
+    check = g["disagreement_over_random"]
+    out.append(f"  check, disagreement-first minus random: {_exact_text(check['verdicts'])} verdicts; "
+               f"{_exact_text(check['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
     out.append("")
     if d["secondary"] is None:
         out += ["SECONDARY RESULT: the same gain per 100 tasks with a usable label",
