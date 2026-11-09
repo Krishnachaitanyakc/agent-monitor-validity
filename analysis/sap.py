@@ -2161,7 +2161,7 @@ SENSITIVITY_VARIANTS = [
     ("sensitivity: B1 INVALID treated as agreement (D = 0) instead of D = 1", {"b1_invalid": "agree"}),
     ("sensitivity: R_unobserved treated as R = 1", {"r_unobserved": "one"}),
     ("sensitivity: every trajectory with any INVALID slot excluded", {"exclude_any_invalid": True}),
-    ("sensitivity: one INVALID repeat and no observed flip treated as R = 1",
+    ("sensitivity: one INVALID repeat and no observed flip treated as R = 1, and R_unobserved treated as R = 1",
      {"r_unobserved": "one_any"}),
 ]
 
@@ -2746,7 +2746,7 @@ def invalid_outcome_variants(slots: Sequence[Mapping[str, str]], E: Sequence[int
     derive_label_free. s is held at its primary value, capped at the variant's n_D0,
     and N is held as the per-100 denominator. Each variant gives only the difference
     between instability-first and disagreement-first, in verdicts and per 100 panel
-    tasks.
+    tasks. The report prints the difference in verdicts only, as plan section 9 says.
     """
     out = []
     for name, opts in SENSITIVITY_VARIANTS:
@@ -3040,11 +3040,12 @@ def _contradiction_lines(c: Mapping[str, Optional[dict]], statuses_given: bool) 
 
 def _variant_lines(d: Mapping[str, object]) -> List[str]:
     """Report lines of the invalid-outcome variants."""
+    n_y = "not assessed" if d["N_Y"] is None else d["N_Y"]
     out = ["INVALID-OUTCOME VARIANTS: instability-first minus disagreement-first expected capture",
-           f"  s is held at {d['s']}, capped at each variant's n_D0, and N = {d['N']} is held as the per-100 denominator."]
+           f"  s is held at {d['s']}, capped at each variant's n_D0. N = {d['N']} and N_Y = {n_y} stay the per-100 "
+           f"denominators, and each line is the difference in expected capture only."]
     for v in d["invalid_outcome_variants"]:
-        out.append(f"  {v['name']}: {_exact_text(v['difference'])} verdicts; "
-                   f"{_exact_text(v['per_100_panel'])} per 100 panel tasks")
+        out.append(f"  {v['name']}: {_exact_text(v['difference'])} verdicts")
     return out
 
 

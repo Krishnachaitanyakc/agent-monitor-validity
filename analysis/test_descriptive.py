@@ -587,7 +587,7 @@ class TestInvalidOutcomeVariants(unittest.TestCase):
              "difference": F(1, 3), "per_100_panel": F(10, 3)},                          # 2 minus 1 + 1/3 of 2
             {"name": "every trajectory with any INVALID slot excluded",
              "difference": F(1, 3), "per_100_panel": F(10, 3)},                          # 1 minus 2/3 of 1
-            {"name": "one INVALID repeat and no observed flip treated as R = 1",
+            {"name": "one INVALID repeat and no observed flip treated as R = 1, and R_unobserved treated as R = 1",
              "difference": F(7, 12), "per_100_panel": F(35, 6)}])                        # 9/4 minus 5/3
 
     def test_the_report_prints_each_variant(self):
@@ -595,11 +595,30 @@ class TestInvalidOutcomeVariants(unittest.TestCase):
         lines = sap.describe_report(describe_panel(slots, Y=Y), EXPOSURE).split("\n")
         start = lines.index("INVALID-OUTCOME VARIANTS: instability-first minus disagreement-first expected capture")
         self.assertEqual(lines[start + 1:start + 6], [
-            "  s is held at 2, capped at each variant's n_D0, and N = 10 is held as the per-100 denominator.",
-            "  B1 INVALID treated as agreement (D = 0) instead of D = 1: 1/7 (0.1429) verdicts; 10/7 (1.4286) per 100 panel tasks",
-            "  R_unobserved treated as R = 1: 1/3 (0.3333) verdicts; 10/3 (3.3333) per 100 panel tasks",
-            "  every trajectory with any INVALID slot excluded: 1/3 (0.3333) verdicts; 10/3 (3.3333) per 100 panel tasks",
-            "  one INVALID repeat and no observed flip treated as R = 1: 7/12 (0.5833) verdicts; 35/6 (5.8333) per 100 panel tasks"])
+            "  s is held at 2, capped at each variant's n_D0. N = 10 and N_Y = 7 stay the per-100 denominators, and "
+            "each line is the difference in expected capture only.",
+            "  B1 INVALID treated as agreement (D = 0) instead of D = 1: 1/7 (0.1429) verdicts",
+            "  R_unobserved treated as R = 1: 1/3 (0.3333) verdicts",
+            "  every trajectory with any INVALID slot excluded: 1/3 (0.3333) verdicts",
+            "  one INVALID repeat and no observed flip treated as R = 1, and R_unobserved treated as R = 1: 7/12 (0.5833) verdicts"])
+
+    def test_the_heading_says_when_N_Y_was_not_assessed(self):
+        slots, Y, _ = mixed_panel()
+        j = sap.join_reference(slots, Y)
+        lines = sap.describe_report(describe_panel(slots, j["E"]), EXPOSURE).split("\n")
+        self.assertIn("  s is held at 2, capped at each variant's n_D0. N = 10 and N_Y = not assessed stay the per-100 "
+                      "denominators, and each line is the difference in expected capture only.", lines)
+
+    def test_the_last_variant_says_it_also_treats_R_unobserved_as_one(self):
+        # No task has exactly one invalid repeat, and the variant still moves: the two tasks with both repeats invalid.
+        both = dict(slot("S"), A2="REFUSAL", A3="MALFORMED")
+        slots = [slot("U1")] * 2 + [both] * 2 + [slot("S")] * 16
+        d = describe_panel(slots, [1, 0, 1, 1] + [0] * 16)
+        self.assertEqual(d["repeat_flags"], {"both_repeats_invalid": 2, "one_repeat_invalid_no_flip": 0, "one_repeat_invalid_flip": 0})
+        self.assertEqual(d["gain"]["over_disagreement"]["verdicts"], Fraction(119, 180))
+        self.assertEqual(d["invalid_outcome_variants"][3]["difference"], Fraction(9, 5))
+        self.assertIn("  one INVALID repeat and no observed flip treated as R = 1, and R_unobserved treated as R = 1: 9/5 (1.8000) verdicts",
+                      sap.describe_report(d, EXPOSURE).split("\n"))
 
     def test_they_match_the_population_paths_own_sensitivity_gain(self):
         seen = set()
@@ -657,8 +676,7 @@ class TestInvalidOutcomeVariants(unittest.TestCase):
     def test_an_empty_panel_is_not_defined_per_100(self):
         d = describe_panel([], Y=[])
         self.assertTrue(all(v["per_100_panel"] is None for v in d["invalid_outcome_variants"]))
-        self.assertIn("  R_unobserved treated as R = 1: 0 (0.0000) verdicts; not defined per 100 panel tasks",
-                      sap.describe_report(d, EXPOSURE).split("\n"))
+        self.assertIn("  R_unobserved treated as R = 1: 0 (0.0000) verdicts", sap.describe_report(d, EXPOSURE).split("\n"))
 
     def test_the_section_carries_no_test_interval_or_threshold(self):
         slots, Y, _ = mixed_panel()
