@@ -32,10 +32,9 @@ Main rules
   missing stays in the panel, in the selections and in the review count K. The
   primary result is per 100 panel tasks (N) and counts such a task as not
   reference-contradicted (E = 0); its fragility count flips usable labels only.
-  The secondary result is per 100 tasks with a usable label (N_Y): first the
-  rescaled gain, 100 Delta / N_Y, then a proposed usable-only comparison. Coverage
-  of Unsure and missing labels is reported separately; these tasks are unknown,
-  never correct. See join_reference(), analyze(), secondary_analysis() and
+  The secondary result is the same gain rescaled per 100 tasks with a usable label
+  (N_Y), 100 Delta / N_Y. Coverage of Unsure and missing labels is reported
+  separately; these tasks are unknown, never correct. See join_reference(), analyze(), secondary_analysis() and
   reference_coverage().
 - Panel unit. The default panel is one trajectory per task; the
   one-task-per-template panel is a labeled sensitivity analysis, and the wider
@@ -1244,24 +1243,16 @@ def classify_size(delta_L: float, delta_U: float, delta_m: Optional[float], reac
 # ---------------------------------------------------------------------------
 # Partial regime
 # ---------------------------------------------------------------------------
-def permutation_p(design: Design, m: Mapping[str, int],
-                  sizes: Optional[Mapping[str, int]] = None,
-                  weights: Optional[Mapping[str, Fraction]] = None) -> Fraction:
+def permutation_p(design: Design, m: Mapping[str, int]) -> Fraction:
     """Exact within-D permutation p-value of Delta, as a Fraction.
 
     Holding E fixed and shuffling R within D = 0, (m_U2, m_U1, m_S) is
     multivariate hypergeometric given (n_U2, n_U1, n_S, m_D0). Delta is linear in
     these counts with exact weights delta_weights(design), so the enumeration
     is exact. Valid in every regime; in coverage it equals Fisher's p.
-
-    sizes and weights replace the stratum sizes and the weights; the secondary
-    result passes the counts of tasks with a usable label and its own weights.
     """
-    w = delta_weights(design) if weights is None else weights
-    if sizes is None:
-        nU2, nU1, nS = design.n_U2, design.n_U1, design.n_S
-    else:
-        nU2, nU1, nS = sizes["U2"], sizes["U1"], sizes["S"]
+    w = delta_weights(design)
+    nU2, nU1, nS = design.n_U2, design.n_U1, design.n_S
     t = m["U2"] + m["U1"] + m["S"]
     obs = w["U2"] * m["U2"] + w["U1"] * m["U1"] + w["S"] * m["S"]
     acc = 0
@@ -1274,25 +1265,17 @@ def permutation_p(design: Design, m: Mapping[str, int],
 
 
 def partial_bootstrap(design: Design, m: Mapping[str, int], B: int = 10000, seed: int = 0,
-                      level: float = 0.95, sizes: Optional[Mapping[str, int]] = None,
-                      weights: Optional[Mapping[str, Fraction]] = None,
-                      N_per100: Optional[int] = None) -> dict:
+                      level: float = 0.95) -> dict:
     """APPROXIMATE Jeffreys-smoothed parametric bootstrap interval for G_partial.
 
     G_partial = (100/N) sum_j w_j n_j p_j over j in {U2, U1, S}, w = delta_weights.
     Implementation choice: smoothed plug-in p~_j = (m_j + 1/2)/(n_j + 1); B draws of
     m*_j ~ Binomial(n_j, p~_j), independent across strata; percentile interval of
     (100/N) sum_j w_j m*_j. No threshold claim is ever made from it.
-
-    sizes, weights and N_per100 replace n_j, w_j and N; the secondary result passes
-    the counts of tasks with a usable label, its own weights and N_Y.
     """
-    w = {k: float(v) for k, v in (delta_weights(design) if weights is None else weights).items()}
-    if sizes is None:
-        n = {"U2": design.n_U2, "U1": design.n_U1, "S": design.n_S}
-    else:
-        n = {j: sizes[j] for j in ("U2", "U1", "S")}
-    den = design.N_per100 if N_per100 is None else N_per100
+    w = {k: float(v) for k, v in delta_weights(design).items()}
+    n = {"U2": design.n_U2, "U1": design.n_U1, "S": design.n_S}
+    den = design.N_per100
     rng = np.random.default_rng(seed)
     tot = np.zeros(B)
     for j in ("U2", "U1", "S"):
@@ -1710,9 +1693,7 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
     res["secondary"] = None
     res["coverage"] = None
     if supplied:
-        res["secondary"] = secondary_analysis(design, labels_k, ref_k, counts, res,
-                                              method=method, boot_B=boot_B, boot_seed=boot_seed,
-                                              N_Y_ref=N_Y_ref)
+        res["secondary"] = secondary_analysis(design, labels_k, ref_k, counts, res, N_Y_ref=N_Y_ref)
         res["coverage"] = reference_coverage(labels_k, ref_k, design, benchmarks=bench_k,
                                              draw=res.get("draw"))
     return res
@@ -1720,81 +1701,31 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
 
 def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequence[str],
                        counts: Mapping[str, int], primary: Mapping[str, object],
-                       method: Optional[str] = None, boot_B: int = 10000, boot_seed: int = 0,
                        N_Y_ref: Optional[int] = None) -> dict:
     """Secondary result: the gain per 100 tasks with a usable label [labels].
 
     The label-free design, the regime and the selections stay those of the full
-    panel. primary is the primary result of analyze() on the same panel. Notation:
-      Y       the panel tasks with a usable label; N_Y = |Y| (all strata, I included);
-      n_jY    the tasks of stratum j in Y; n1Y = n_U2Y + n_U1Y, n0Y = n_SY,
-              n_D0Y = n1Y + n0Y;
-      m_j     discordant first verdicts in stratum j (only tasks in Y can be
-              discordant, so m_j is the primary count); m1 = m_U2 + m_U1, m0 = m_S;
-      pi_j    the instability-first review fraction of stratum j; disagreement-first
-              reviews s/n_D0 of every agreeing stratum;
-      w_j     = pi_j - s/n_D0, the full-panel weights, Delta = sum_j w_j m_j
-              (delta_weights).
+    panel. primary is the primary result of analyze() on the same panel. N_Y counts
+    the panel tasks with a usable label, in every stratum, I included, and n_jY those
+    of stratum j.
 
-    (a) First number: 100 Delta / N_Y. A task without a
-    usable label has E = 0, so this is the primary realized gain rescaled by N/N_Y,
-    and it carries the primary's test. Coverage regime: the interval for G rescaled,
-    (100 L / N_Y) (delta_L, delta_U) from the primary interval for delta; existence by
-    the primary's Fisher p. Partial regime: the primary's G_partial_hat and its
-    approximate bootstrap interval, each times N/N_Y. Not estimable when N_Y = 0.
+    The result is 100 Delta / N_Y. A task without a usable label has E = 0, so this
+    is the primary realized gain rescaled by N/N_Y, and it carries the primary's
+    test. Coverage regime: the interval for G rescaled, (100 L / N_Y) (delta_L,
+    delta_U) from the primary interval for delta; existence by the primary's Fisher
+    p. Partial regime: the primary's G_partial_hat and its approximate bootstrap
+    interval, each times N/N_Y. Not estimable when N_Y = 0.
 
-    (b) Usable-only comparison, a proposed analysis pending confirmation:
-      B_Y     = sum_j w_j n_jY, how many more tasks with a usable label
-                instability-first review reviews than disagreement-first review;
-                B_Y = 0 when every label is usable;
-      G_hat_Y = (100/N_Y) (Delta - B_Y m0/n0Y) = (100/N_Y) sum_j w'_j m_j, with
-                w'_j = w_j for U2 and U1 and w'_S = w_S - B_Y/n0Y.
-    G_hat_Y is the capture of an implied comparator minus that of disagreement-first
-    review, per 100 tasks with a usable label. The implied comparator reviews the
-    unstable usable tasks at the fractions pi_U2 and pi_U1, then stable usable tasks
-    until it has reviewed as many usable agreeing tasks as disagreement-first review
-    does, s n_D0Y / n_D0. It reviews pi_S n0Y - B_Y stable usable tasks, so the two
-    review counts among usable agreeing tasks are equal only when that number lies
-    in [0, n0Y]; otherwise (b) is not reported.
-    Coverage regime (pi_U = 1, pi_S = (s - n1)/n0, w_U = L/n1, w_S = -L/n0):
-      L_Y = n1Y (n_D0 - s) / n_D0 = L n1Y / n1;
-      G_hat_Y = (100/N_Y) L_Y (m1/n1Y - m0/n0Y), zero exactly when the usable
-      rates are equal;
-      G_Y = (100/N_Y) L_Y delta_Y, with delta_Y = p1Y - p0Y the discordance rates among
-      unstable and stable agreeing tasks with a usable label;
-      existence: one-sided Fisher exact p = P(M1 >= m1 | n1Y, n0Y, m1 + m0), which is
-      also the exact permutation p of G_hat_Y among agreeing tasks with a usable label;
-      interval for delta_Y: the frozen exact score interval from (m1 of n1Y, m0 of
-      n0Y) on the grid k/100 plus 0; G_Y interval = (100 L_Y/N_Y) (delta_L, delta_U).
-    Partial regime (pi_S = 0): existence by the exact permutation p of sum_j w'_j m_j
-    with (m_U2, m_U1, m_S) multivariate hypergeometric given (n_U2Y, n_U1Y, n_SY, m_D0);
-    size by the approximate bootstrap of (100/N_Y) sum_j w'_j m*_j with
-    m*_j ~ Binomial(n_jY, p~_j).
-    In both regimes 100 Delta / N_Y = G_hat_Y + (100/N_Y) B_Y m0/n0Y; in coverage the
-    second term is (100 L / N_Y) (n1Y/n1 - n0Y/n0) (m0/n0Y), the part of (a) due to
-    unequal usable shares between U and S.
-    (b) is not reported when n1Y = 0 or n0Y = 0, or when the implied comparator would
-    review a negative number of stable usable tasks: in coverage when
-    n1Y > s n_D0Y / n_D0, in the partial regime when B_Y > 0. It is also not reported
-    when that number exceeds n0Y, since the comparator would then need more stable
-    usable tasks than exist. Only the partial regime allows this.
-
-    No threshold claim is made for (a) or (b): the threshold of 2 per 100 refers to
-    the primary result only. In the degenerate regimes Delta = 0 identically and
-    nothing is tested. With every label usable, (a) equals the primary result, and
-    (b) has the primary's point estimate and test.
+    No threshold claim is made: the threshold of 2 per 100 refers to the primary
+    result only. In the degenerate regimes Delta = 0 identically and nothing is
+    tested. With every label usable, the result equals the primary result.
     """
-    method = INTERVAL_METHOD if method is None else method
     nY = {j: sum(1 for l, r in zip(labels, reference) if l == j and r == USABLE) for j in STRATA}
     N_Y = sum(nY.values())
     den = N_Y if N_Y_ref is None else N_Y_ref
-    n1Y, n0Y = nY["U2"] + nY["U1"], nY["S"]
-    m1, m0 = counts["U2"] + counts["U1"], counts["S"]
     Delta = expected_captures(design, counts)["Delta"]
-    out = {"N_Y": N_Y, "N_Y_per100": den, "n_Y": nY, "n1_Y": n1Y, "n0_Y": n0Y,
-           "n_D0_Y": n1Y + n0Y, "m1": m1, "m0": m0, "regime": design.regime,
-           "not_estimable": None, "plan_literal": None, "usable_only": None,
-           "usable_only_omitted": None}
+    out = {"N_Y": N_Y, "N_Y_per100": den, "n_Y": nY, "n1_Y": nY["U2"] + nY["U1"], "n0_Y": nY["S"],
+           "regime": design.regime, "not_estimable": None, "plan_literal": None}
     reg = design.regime
     if reg not in ("COVERAGE", "PARTIAL"):
         return out
@@ -1802,7 +1733,6 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
         out["not_estimable"] = "no panel task has a usable label"
         return out
 
-    # (a) The first number: the primary result rescaled by N/N_Y.
     ratio = Fraction(design.N_per100, den)
     ex, sz = primary["existence"], primary["size"]
     pl = {"rescale": ratio,
@@ -1818,64 +1748,6 @@ def secondary_analysis(design: Design, labels: Sequence[str], reference: Sequenc
         pl["partial"] = dict(b, G_partial_hat=r * b["G_partial_hat"], lower=r * b["lower"],
                              upper=r * b["upper"])
     out["plan_literal"] = pl
-
-    # (b) The usable-only comparison, a proposed analysis.
-    w = delta_weights(design)
-    B_Y = w["U2"] * nY["U2"] + w["U1"] * nY["U1"] + w["S"] * nY["S"]
-    pi_S = review_fractions([n for _, n in _layout(design, "AUG")], design.K)[4]
-    # Stable usable tasks the implied comparator of (b) reviews. It reviews unstable
-    # usable tasks at the instability-first fractions, then stable usable tasks up to
-    # disagreement-first's usable agreeing count s n_D0Y / n_D0, so the number is
-    # s n_D0Y / n_D0 - sum_U pi_j n_jY = pi_S n0Y - B_Y, since
-    # B_Y = sum_j pi_j n_jY - s n_D0Y / n_D0. In coverage (pi_U = 1) it is
-    # s n_D0Y / n_D0 - n1Y, negative exactly when n1Y > s n_D0Y / n_D0, and never above
-    # n0Y because s < n_D0. In the partial regime (pi_S = 0) it is -B_Y, negative
-    # exactly when B_Y > 0; it can exceed n0Y when U2 holds few usable labels.
-    implied = pi_S * n0Y - B_Y
-    out.update(B_Y=B_Y, implied_stable_reviews=implied)
-    if n1Y == 0:
-        out["usable_only_omitted"] = "no unstable agreeing task has a usable label"
-    elif n0Y == 0:
-        out["usable_only_omitted"] = "no stable agreeing task has a usable label"
-    elif implied < 0:
-        if reg == "COVERAGE":
-            cond = (f"n1Y = {n1Y} > s n_D0Y / n_D0 = "
-                    f"{_f(Fraction(design.s * (n1Y + n0Y), design.n_D0))}")
-        else:
-            cond = f"B_Y = {_f(B_Y)} > 0"
-        out["usable_only_omitted"] = (f"its implied comparator would review {_f(implied)} stable "
-                                      f"agreeing tasks with a usable label, a negative number ({cond})")
-    elif implied > n0Y:
-        out["usable_only_omitted"] = (f"its implied comparator would review {_f(implied)} stable "
-                                      f"agreeing tasks with a usable label, more than the n0Y = {n0Y} "
-                                      "there are")
-    if out["usable_only_omitted"] is not None:
-        return out
-    w_adj = {"U2": w["U2"], "U1": w["U1"], "S": w["S"] - B_Y / n0Y}
-    G_hat_exact = Fraction(100) * sum((w_adj[j] * counts[j] for j in ("U2", "U1", "S")),
-                                      Fraction(0)) / den
-    uo = {"weights": w_adj, "G_hat_exact": G_hat_exact,
-          "usable_share_term": Fraction(100) * B_Y * m0 / (n0Y * den)}
-    if reg == "COVERAGE":
-        L_Y = Fraction(n1Y * (design.n_D0 - design.s), design.n_D0)
-        p = fisher_one_sided(m1, n1Y, m0, n0Y)
-        uo["L_Y"] = L_Y
-        uo["existence"] = {"test": "one-sided Fisher exact on tasks with a usable label",
-                           "p": p, "reject": p <= ALPHA}
-        ci = ExactScoreDiff(n1Y, n0Y, method=method).interval(m1, m0, extra_grid=[0.0])
-        scale = 100.0 * float(L_Y) / den
-        dL, dU = ci["delta_L"], ci["delta_U"]
-        dhat = m1 / n1Y - m0 / n0Y
-        uo["size"] = {"delta_hat": dhat, "delta_L": dL, "delta_U": dU,
-                      "G_L": scale * dL, "G_U": scale * dU, "G_hat": scale * dhat}
-    else:
-        sizes = {j: nY[j] for j in ("U2", "U1", "S")}
-        p = permutation_p(design, counts, sizes=sizes, weights=w_adj)
-        uo["existence"] = {"test": "exact permutation p-value among agreeing tasks with a usable label",
-                           "p": float(p), "reject": p <= Fraction(1, 40)}
-        uo["size"] = {"partial": partial_bootstrap(design, counts, boot_B, boot_seed, sizes=sizes,
-                                                   weights=w_adj, N_per100=den)}
-    out["usable_only"] = uo
     return out
 
 
@@ -2130,9 +2002,7 @@ def _primary_lines(res: dict) -> List[str]:
 def _secondary_lines(res: dict) -> List[str]:
     """Report lines of the secondary result, per 100 tasks with a usable label.
 
-    (a), the primary result rescaled, comes first; (b), the usable-only comparison, is
-    printed as a proposed analysis, or with the reason it is not reported. Neither
-    carries a threshold claim.
+    It is the primary result rescaled, and it carries no threshold claim.
     """
     sec = res.get("secondary")
     if sec is None:
@@ -2154,8 +2024,7 @@ def _secondary_lines(res: dict) -> List[str]:
     pl = sec["plan_literal"]
     ex = pl["existence"]
     out.append("")
-    out.append(f"  (a) First number: 100 Delta / N_Y, the primary realized gain rescaled "
-               f"by N/N_Y = {_f(pl['rescale'])}")
+    out.append(f"  100 Delta / N_Y, the primary realized gain rescaled by N/N_Y = {_f(pl['rescale'])}")
     out.append(f"  Existence: same test as the primary, p = {ex['p']:.6g}; "
                f"{'REJECT H0' if ex['reject'] else 'do not reject H0'}")
     if sec["regime"] == "COVERAGE":
@@ -2168,47 +2037,8 @@ def _secondary_lines(res: dict) -> List[str]:
                    f"primary APPROXIMATE bootstrap interval rescaled: "
                    f"[{_f(b['lower'])}, {_f(b['upper'])}] (B = {b['B']}, seed {b['seed']})")
     out.append("")
-    out.append("  (b) Usable-only comparison: a proposed analysis, pending confirmation")
-    if sec["n1_Y"] > 0 and sec["n0_Y"] > 0:
-        dis_usable = Fraction(lf["s"] * sec["n_D0_Y"], lf["n_D0"])
-        out.append("  It compares disagreement-first review with an implied comparator, which reviews "
-                   "unstable agreeing tasks with a usable label as instability-first review does, then "
-                   "stable ones until it has reviewed as many agreeing tasks with a usable label as "
-                   f"disagreement-first review, s n_D0Y / n_D0 = {_f(dis_usable)}. B_Y = {_f(sec['B_Y'])} "
-                   "is how many more agreeing tasks with a usable label instability-first review reviews "
-                   "than disagreement-first review (exact, tie-averaged; negative means fewer).")
-    if sec["usable_only_omitted"] is not None:
-        out.append(f"  Not reported: {sec['usable_only_omitted']}.")
-    else:
-        uo = sec["usable_only"]
-        ux, uz = uo["existence"], uo["size"]
-        verdict = "REJECT H0" if ux["reject"] else "do not reject H0"
-        out.append("  Tasks without a usable reference label are left out of the rates. The implied "
-                   f"comparator reviews {_f(sec['implied_stable_reviews'])} of the n0Y = {sec['n0_Y']} "
-                   "stable agreeing tasks with a usable label.")
-        if sec["regime"] == "COVERAGE":
-            out.append(f"  Existence: one-sided Fisher exact test of p1Y = p0Y against p1Y > p0Y on "
-                       f"tasks with a usable label: m1 = {sec['m1']} of n1Y = {sec['n1_Y']}, "
-                       f"m0 = {sec['m0']} of n0Y = {sec['n0_Y']}; p = {ux['p']:.6g}; {verdict}")
-            out.append(f"  Size: L_Y = {_f(uo['L_Y'])}; delta_Y_hat = {_f(uz['delta_hat'])}; interval "
-                       f"for δ_Y (grid k/100 plus 0): {_interval_text(uz['delta_L'], uz['delta_U'])}")
-            out.append(f"  G_hat_Y = {_f(uz['G_hat'])} per 100 tasks with a usable label; interval "
-                       f"for G_Y: {_g_interval_text(uz['G_L'], uz['G_U'], uz['delta_L'], uz['delta_U'])}")
-        else:
-            b = uz["partial"]
-            out.append(f"  Existence: exact permutation p-value among agreeing tasks with a usable "
-                       f"label: p = {ux['p']:.6g}; {verdict}")
-            out.append(f"  G_partial_hat_Y = {_f(b['G_partial_hat'])} per 100 tasks with a usable "
-                       f"label; APPROXIMATE bootstrap interval [{_f(b['lower'])}, {_f(b['upper'])}] "
-                       f"(B = {b['B']}, seed {b['seed']})")
-        term = uo["usable_share_term"]
-        name = "G_hat_Y" if sec["regime"] == "COVERAGE" else "G_partial_hat_Y"
-        out.append(f"  (a) = (b) {'-' if term < 0 else '+'} {_f(abs(term))}: 100 Delta / N_Y also "
-                   f"carries the difference in usable shares between unstable and stable agreeing "
-                   f"tasks, which {name} removes")
-    out.append("")
     out.append(f"  The threshold of {lf['m']} per 100 refers to the primary result only: no threshold "
-               f"claim is made for either secondary analysis.")
+               f"claim is made for the secondary result.")
     return out
 
 
@@ -2383,24 +2213,13 @@ def _brief(name: str, r: dict) -> List[str]:
             lines.append(head + f"not estimable, {sec['not_estimable']}")
         else:
             pl = sec["plan_literal"]
-            txt = head + f"(a) 100 Delta / N_Y = {_f(pl['G_hat'])}"
+            txt = head + f"100 Delta / N_Y = {_f(pl['G_hat'])}"
             if "G_L" in pl:
                 txt += (f", interval for G rescaled "
                         f"{_g_interval_text(pl['G_L'], pl['G_U'], pl['delta_L'], pl['delta_U'])}")
             else:
                 txt += f", approximate interval [{_f(pl['partial']['lower'])}, {_f(pl['partial']['upper'])}]"
             lines.append(txt)
-            if sec["usable_only_omitted"] is not None:
-                lines.append(f"    (b) proposed usable-only comparison: not reported, {sec['usable_only_omitted']}")
-            else:
-                uo = sec["usable_only"]
-                txt = (f"    (b) proposed usable-only comparison: existence p = {uo['existence']['p']:.6g} "
-                       f"({'reject' if uo['existence']['reject'] else 'do not reject'})")
-                if "delta_L" in uo["size"]:
-                    sz = uo["size"]
-                    txt += (f"; interval for δ_Y {_interval_text(sz['delta_L'], sz['delta_U'])}; for G_Y "
-                            f"{_g_interval_text(sz['G_L'], sz['G_U'], sz['delta_L'], sz['delta_U'])}")
-                lines.append(txt)
     return lines
 
 

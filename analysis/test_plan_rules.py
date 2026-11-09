@@ -246,35 +246,19 @@ class TestAllLabelsUsable(unittest.TestCase):
                         self.assertIsNone(r["secondary"])
                         self.assertIsNone(r["coverage"])
                         continue
-                    # With every label usable, (a) is the primary result itself, and (b) has the
-                    # primary's point estimate and test.
+                    # With every label usable, the secondary result is the primary result itself.
                     sec = r["secondary"]
                     N, Delta = len(labels), r["captures"]["Delta"]
-                    self.assertEqual((sec["N_Y"], sec["B_Y"], sec["not_estimable"], sec["usable_only_omitted"]),
-                                     (N, 0, None, None))
-                    pl, uo = sec["plan_literal"], sec["usable_only"]
+                    self.assertEqual((sec["N_Y"], sec["not_estimable"]), (N, None))
+                    pl = sec["plan_literal"]
                     self.assertEqual(pl["rescale"], 1)
                     self.assertEqual(pl["G_hat_exact"], 100 * Delta / N)
                     self.assertEqual(pl["existence"]["p"], ex["p"])
-                    self.assertEqual(uo["G_hat_exact"], 100 * Delta / N)
-                    self.assertEqual(uo["existence"]["p"], ex["p"])
-                    self.assertEqual(uo["usable_share_term"], 0)
                     if "size" in g:
                         for k in ("delta_L", "delta_U", "G_L", "G_U"):
                             self.assertEqual(pl[k], r["size"][k], k)
-                        self.assertEqual(uo["L_Y"], r["label_free"]["L"])
-                        self.assertEqual(sec["implied_stable_reviews"],
-                                         r["label_free"]["s"] - r["label_free"]["n1"])
-                        # (b) carries no threshold, so its grid is k/100 plus 0 only.
-                        m1, m0, n1, n0 = r["m1"], r["m0"], r["label_free"]["n1"], r["label_free"]["n0"]
-                        ci = sap.ExactScoreDiff(n1, n0).interval(m1, m0, extra_grid=[0.0])
-                        self.assertEqual((uo["size"]["delta_L"], uo["size"]["delta_U"]),
-                                         (ci["delta_L"], ci["delta_U"]))
-                        self.assertEqual(uo["size"]["delta_hat"], r["size"]["delta_hat"])
                     else:
                         self.assertEqual(pl["partial"], r["size"]["partial"])
-                        self.assertEqual(uo["size"]["partial"], r["size"]["partial"])
-                        self.assertEqual(sec["implied_stable_reviews"], 0)
                     cov = r["coverage"]["groups"]["all"]
                     self.assertEqual((cov["unsure"], cov["missing"], cov["usable"]), (0, 0, len(labels)))
 
@@ -335,8 +319,8 @@ class TestReferenceHandling(unittest.TestCase):
         r = sap.analyze(labels, E, reference=ref)
         sec, lf = r["secondary"], r["label_free"]
         L, Delta = lf["L"], r["captures"]["Delta"]
-        self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"], sec["n_D0_Y"]), (110, 10, 80, 90))
-        # (a) The first number is the primary rescaled by N/N_Y, with the primary's test.
+        self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"]), (110, 10, 80))
+        # The primary rescaled by N/N_Y, with the primary's test.
         pl = sec["plan_literal"]
         self.assertEqual(pl["rescale"], Fraction(190, 110))
         self.assertEqual(pl["G_hat_exact"], 100 * Delta / 110)
@@ -345,52 +329,17 @@ class TestReferenceHandling(unittest.TestCase):
         self.assertEqual((pl["delta_L"], pl["delta_U"]), (r["size"]["delta_L"], r["size"]["delta_U"]))
         self.assertAlmostEqual(pl["G_L"], 100 * float(L) / 110 * r["size"]["delta_L"], places=12)
         self.assertAlmostEqual(pl["G_U"], 100 * float(L) / 110 * r["size"]["delta_U"], places=12)
-        # (b) The usable-only comparison.
-        uo = sec["usable_only"]
-        self.assertEqual(uo["L_Y"], L)                           # every unstable task has a usable label
-        self.assertEqual(uo["G_hat_exact"], 0)                   # equal usable rates: no gain
-        self.assertEqual(uo["size"]["delta_hat"], 0.0)
-        self.assertEqual(uo["existence"]["p"], sap.fisher_one_sided(2, 10, 16, 80))
-        self.assertFalse(uo["existence"]["reject"])
-        self.assertLess(uo["size"]["delta_L"], 0.0)
-        self.assertGreater(uo["size"]["delta_U"], 0.0)
-        self.assertNotIn("class", uo["size"])                    # no threshold claim for the secondary
-        self.assertNotIn("delta_m_Y", uo)
-        # The primary shows a gain that comes only from the missing references among S.
         self.assertAlmostEqual(r["size"]["delta_hat"], 0.1, places=15)
-        self.assertLess(r["existence"]["p"], uo["existence"]["p"])
-        # Identity: 100 Delta / N_Y = G_hat_Y + (100 L / N_Y)(n1Y/n1 - n0Y/n0)(m0/n0Y).
-        self.assertEqual(uo["usable_share_term"],
-                         Fraction(100) * L / 110 * (1 - Fraction(1, 2)) * Fraction(16, 80))
-        self.assertEqual(uo["G_hat_exact"] + uo["usable_share_term"], pl["G_hat_exact"])
-        self.assertEqual(sec["B_Y"], L * (1 - Fraction(1, 2)))
-        self.assertEqual(sec["implied_stable_reviews"], Fraction(29 * 90, 170) - 10)
 
         # Reverse: half of the unstable tasks are Unsure.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 5, 5)), block("S", rows(16, 160)))
         r = sap.analyze(labels, E, reference=ref)
-        sec, lf = r["secondary"], r["label_free"]
-        L, Delta = lf["L"], r["captures"]["Delta"]
-        uo = sec["usable_only"]
+        sec = r["secondary"]
         self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"]), (185, 5, 160))
-        self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * Delta / 185)
-        self.assertEqual(uo["L_Y"], L * Fraction(5, 10))
-        dY = Fraction(2, 5) - Fraction(16, 160)
-        self.assertEqual(uo["G_hat_exact"], Fraction(100) * uo["L_Y"] * dY / 185)
-        self.assertAlmostEqual(uo["size"]["G_hat"], float(uo["G_hat_exact"]), places=12)
-        self.assertEqual(uo["G_hat_exact"] + uo["usable_share_term"], 100 * Delta / 185)
-        self.assertLess(uo["usable_share_term"], 0)
-        self.assertEqual(uo["existence"]["p"], sap.fisher_one_sided(2, 5, 16, 160))
-        # The coverage-regime (b) p equals the permutation p of its own statistic.
-        nY = {"U2": 0, "U1": 5, "S": 160}
-        perm = sap.permutation_p(sap.Design.from_labels(labels), r["m_counts"], sizes=nY, weights=uo["weights"])
-        self.assertEqual(perm, sap.fisher_one_sided(2, 5, 16, 160, exact=True))
-        # The (b) weights are budget-balanced on the tasks with a usable label.
-        self.assertEqual(sum(uo["weights"][j] * nY[j] for j in nY), 0)
+        self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 185)
         txt = sap.report(r)
         self.assertIn("SECONDARY RESULT: gain per 100 tasks with a usable label (N_Y = 185 of N = 190)", txt)
         self.assertLess(txt.index("EXISTENCE QUESTION"), txt.index("SECONDARY RESULT"))
-        self.assertIn("(a) = (b) - ", txt)
 
     def test_all_labels_unsure_in_one_stratum(self):
         # All stable agreeing tasks Unsure.
@@ -401,29 +350,23 @@ class TestReferenceHandling(unittest.TestCase):
         self.assertEqual(r["existence"]["p"], sap.fisher_one_sided(3, 10, 0, 160))
         self.assertIsNotNone(r["size"])
         sec = r["secondary"]
-        self.assertIsNone(sec["not_estimable"])                  # (a) needs only N_Y > 0
+        self.assertIsNone(sec["not_estimable"])                  # needs only N_Y > 0
         self.assertEqual(sec["N_Y"], 32)
         self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 32)
-        self.assertEqual(sec["usable_only_omitted"], "no stable agreeing task has a usable label")
-        self.assertIsNone(sec["usable_only"])
         self.assertEqual(r["coverage"]["groups"]["stable agreeing"],
                          {"tasks": 160, "usable": 0, "unsure": 160, "missing": 0})
-        txt = sap.report(r)
-        self.assertIn("Not reported: no stable agreeing task has a usable label", txt)
-        self.assertIn("(a) First number", txt)
+        self.assertIn("100 Delta / N_Y, the primary realized gain", sap.report(r))
         # All unstable agreeing tasks Unsure: m1 is 0 by construction.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U2", rows(0, 0, 4)), block("U1", rows(0, 0, 6)),
                                block("S", rows(16, 160)))
         r = sap.analyze(labels, E, reference=ref)
         self.assertEqual((r["m1"], r["existence"]["p"]), (0, 1.0))
-        self.assertEqual(r["secondary"]["usable_only_omitted"], "no unstable agreeing task has a usable label")
         # Every label Unsure or missing.
         labels = labels_for(0, 20, 0, 10, 160)
         ref = [UNS] * 100 + [MIS] * 90
         r = sap.analyze(labels, [0] * 190, reference=ref)
         self.assertEqual(r["secondary"]["N_Y"], 0)
         self.assertIsNone(r["secondary"]["plan_literal"])
-        self.assertIsNone(r["secondary"]["usable_only"])
         self.assertEqual(r["secondary"]["not_estimable"], "no panel task has a usable label")
         self.assertEqual(r["captures"]["Delta"], 0)
         self.assertIn("Not estimable: no panel task has a usable label", sap.report(r))
@@ -432,12 +375,8 @@ class TestReferenceHandling(unittest.TestCase):
                                block("S", rows(16, 160)))
         r = sap.analyze(labels, E, reference=ref)
         sec = r["secondary"]
-        uo = sec["usable_only"]
-        self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"], sec["B_Y"]), (190, 10, 160, 0))
-        self.assertEqual(uo["existence"]["p"], r["existence"]["p"])
+        self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"]), (190, 10, 160))
         self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 190)
-        self.assertEqual(uo["G_hat_exact"], Fraction(100) * r["label_free"]["L"]
-                         * (Fraction(2, 10) - Fraction(16, 160)) / 190)
 
     def test_secondary_in_the_partial_regime(self):
         # N = 26, s = 4 < n1 = 9: partial regime, with Unsure tasks in every agreeing stratum.
@@ -449,7 +388,7 @@ class TestReferenceHandling(unittest.TestCase):
         self.assertEqual(sec["N_Y"], 19)
         nY = {"U2": 2, "U1": 4, "S": 8}
         self.assertEqual({j: sec["n_Y"][j] for j in nY}, nY)
-        # (a) The primary's partial-regime result rescaled by N/N_Y = 26/19.
+        # The primary's partial-regime result rescaled by N/N_Y = 26/19.
         pl, pb = sec["plan_literal"], r["size"]["partial"]
         self.assertEqual(pl["rescale"], Fraction(26, 19))
         for k in ("G_partial_hat", "lower", "upper"):
@@ -457,32 +396,6 @@ class TestReferenceHandling(unittest.TestCase):
         self.assertEqual(pl["G_hat_exact"], 100 * r["captures"]["Delta"] / 19)
         self.assertAlmostEqual(pl["partial"]["G_partial_hat"], pl["G_hat"], places=12)
         self.assertEqual(pl["existence"]["p"], r["existence"]["p"])
-        # (b) Here B_Y = 0: instability-first reviews as many usable agreeing tasks as
-        # disagreement-first does, so the implied comparator reviews no stable usable task.
-        w = sap.delta_weights(sap.Design.from_labels(labels))
-        B_Y = sum(w[j] * nY[j] for j in nY)
-        self.assertEqual(sec["B_Y"], B_Y)
-        self.assertEqual(B_Y, 0)
-        self.assertEqual(sec["implied_stable_reviews"], 0)
-        uo = sec["usable_only"]
-        self.assertEqual(uo["weights"], {"U2": w["U2"], "U1": w["U1"], "S": w["S"] - B_Y / 8})
-        # Brute force: every way to place the 4 discordant verdicts among the 14 usable agreeing tasks.
-        strata = ["U2"] * 2 + ["U1"] * 4 + ["S"] * 8
-        ws = [uo["weights"][j] for j in strata]
-        obs = uo["weights"]["U2"] * 1 + uo["weights"]["U1"] * 1 + uo["weights"]["S"] * 2
-        hits = total = 0
-        for chosen in itertools.combinations(range(14), 4):
-            total += 1
-            hits += sum(ws[i] for i in chosen) >= obs
-        self.assertEqual(sap.permutation_p(sap.Design.from_labels(labels), r["m_counts"], sizes=nY,
-                                           weights=uo["weights"]), Fraction(hits, total))
-        self.assertEqual(uo["existence"]["p"], hits / total)
-        self.assertEqual(sum(uo["weights"][j] * nY[j] for j in nY), 0)
-        b = uo["size"]["partial"]
-        self.assertAlmostEqual(b["G_partial_hat"], float(uo["G_hat_exact"]), places=12)
-        self.assertEqual(uo["G_hat_exact"], Fraction(100, 19) * sum(uo["weights"][j] * r["m_counts"][j] for j in nY))
-        self.assertEqual(uo["G_hat_exact"] + uo["usable_share_term"], pl["G_hat_exact"])
-        self.assertLessEqual(b["lower"], b["upper"])
         self.assertIn("no threshold claim", sap.report(r))
 
     def test_sensitivities_hold_both_denominators(self):
@@ -755,9 +668,7 @@ class TestSecondaryResult(unittest.TestCase):
     def check_layout(self, r):
         txt = sap.report(r)
         sec = self.section(txt)
-        self.assertLess(sec.index("(a) First number: 100 Delta / N_Y, the primary realized gain "
-                                  "rescaled by N/N_Y"),
-                        sec.index("(b) Usable-only comparison: a proposed analysis, pending confirmation"))
+        self.assertIn("100 Delta / N_Y, the primary realized gain rescaled by N/N_Y", sec)
         self.assertIn("Existence: same test as the primary", sec)
         self.assertEqual(txt.count("The threshold of 2 per 100 refers to the primary result only"), 1)
         self.assertIn("The threshold of 2 per 100 refers to the primary result only", sec)
@@ -766,168 +677,29 @@ class TestSecondaryResult(unittest.TestCase):
             self.assertNotIn(word, sec, word)
         return sec
 
-    def test_plan_literal_first_and_no_threshold_claim(self):
-        labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 5, 5)), block("S", rows(16, 160)))
-        r = sap.analyze(labels, E, reference=ref)
-        sec = self.check_layout(r)
-        self.assertIn("G_hat_Y =", sec)
-        labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(1, 2, 1)), block("U1", rows(1, 4, 2)),
-                               block("S", rows(2, 8, 4)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=500)
-        self.assertEqual(r["label_free"]["regime"], "PARTIAL")
-        sec = self.check_layout(r)
-        self.assertIn("G_partial_hat_Y =", sec)
+    def panels(self):
+        yield panel(block("G1", rows(5, 20)), block("U1", rows(2, 5, 5)), block("S", rows(16, 160)))
+        yield panel(block("G1", rows(2, 5)), block("U2", rows(1, 2, 1)), block("U1", rows(1, 4, 2)),
+                    block("S", rows(2, 8, 4)))
 
-    def test_report_defines_the_comparator_and_names_each_regime_gain(self):
-        definition = ("It compares disagreement-first review with an implied comparator, which reviews "
-                      "unstable agreeing tasks with a usable label as instability-first review does, then "
-                      "stable ones until it has reviewed as many agreeing tasks with a usable label as "
-                      "disagreement-first review, s n_D0Y / n_D0 = {}. B_Y = {} is how many more agreeing "
-                      "tasks with a usable label instability-first review reviews than disagreement-first "
-                      "review (exact, tie-averaged; negative means fewer).")
-        # Coverage, reported: s = 29, n_D0 = 170, n_D0Y = 170 - 5 Unsure.
-        labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 5, 5)), block("S", rows(16, 160)))
-        r = sap.analyze(labels, E, reference=ref)
-        sec, s2 = r["secondary"], self.section(sap.report(r))
-        self.assertIsNotNone(sec["usable_only"])
-        self.assertIn(definition.format(sap._f(Fraction(29 * 165, 170)), sap._f(sec["B_Y"])), s2)
-        self.assertLess(s2.index("It compares disagreement-first review"), s2.index("The implied comparator reviews"))
-        self.assertIn("which G_hat_Y removes", s2)
-        self.assertNotIn("G_partial_hat_Y", s2)
-        # Partial regime, reported: the decomposition names the partial-regime gain.
-        labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(1, 1, 2)), block("U1", rows(1, 6)),
-                               block("S", rows(2, 12)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=500)
-        s2 = self.section(sap.report(r))
-        self.assertIsNotNone(r["secondary"]["usable_only"])
-        self.assertIn("which G_partial_hat_Y removes", s2)
-        self.assertNotIn("which G_hat_Y removes", s2)
-        # Partial regime, omitted because B_Y > 0: B_Y is defined before the reason uses it.
-        labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(1, 2, 1)), block("U1", rows(1, 4, 2)),
-                               block("S", rows(1, 2, 10)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=500)
-        s2 = self.section(sap.report(r))
-        self.assertIsNone(r["secondary"]["usable_only"])
-        self.assertLess(s2.index("B_Y = 1.1429 is how many more"), s2.index("Not reported: "))
-        # No usable unstable label: nothing to define.
-        labels, E, ref = panel(block("G1", rows(0, 10)), block("U1", rows(0, 0, 8)), block("S", rows(5, 80)))
-        s2 = self.section(sap.report(sap.analyze(labels, E, reference=ref)))
-        self.assertIn("Not reported: no unstable agreeing task has a usable label.", s2)
-        self.assertNotIn("implied comparator", s2)
-
-    def test_usable_only_omitted_when_its_comparator_is_negative_in_coverage(self):
-        # N = 200, n_D0 = 150, s = 30, n1Y = 10: the implied comparator reviews
-        # s n_D0Y / n_D0 - n1Y = n_D0Y / 5 - 10 stable usable tasks.
-        def make(n0Y):
-            return panel(block("G1", rows(10, 50)), block("U1", rows(4, 10)), block("S", rows(5, n0Y, 140 - n0Y)))
-        labels, E, ref = make(40)                                 # exactly zero: reported
-        r = sap.analyze(labels, E, reference=ref)
-        sec = r["secondary"]
-        self.assertEqual((r["label_free"]["s"], r["label_free"]["n_D0"], r["label_free"]["regime"]),
-                         (30, 150, "COVERAGE"))
-        self.assertEqual(sec["implied_stable_reviews"], 0)
-        self.assertIsNone(sec["usable_only_omitted"])
-        self.assertIsNotNone(sec["usable_only"])
-        labels, E, ref = make(39)                                 # 9.8 - 10 < 0: not reported
-        r = sap.analyze(labels, E, reference=ref)
-        sec = r["secondary"]
-        self.assertEqual(sec["implied_stable_reviews"], Fraction(30 * 49, 150) - 10)
-        self.assertIsNone(sec["usable_only"])
-        self.assertIsNotNone(sec["plan_literal"])                 # (a) is still reported
-        why = ("its implied comparator would review -0.2000 stable agreeing tasks with a usable label, "
-               "a negative number (n1Y = 10 > s n_D0Y / n_D0 = 9.8000)")
-        self.assertEqual(sec["usable_only_omitted"], why)
-        txt = sap.report(r)
-        self.assertIn("Not reported: " + why, txt)
-        self.assertNotIn("G_hat_Y =", txt)
-        self.assertIn("(a) First number", txt)
-        self.assertTrue(any("(b) proposed usable-only comparison: not reported, " + why in x
-                            for x in sap._brief("x", r)))
-
-    def test_usable_only_in_the_partial_regime(self):
-        # N = 26, s = 4: instability-first reviews the 3 U2 tasks and 1 of the 6 U1 tasks.
-        def run(u2, u1, s_rows):
-            labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(*u2)), block("U1", rows(*u1)),
-                                   block("S", rows(*s_rows)))
+    def test_no_threshold_claim_in_either_regime(self):
+        for (labels, E, ref), regime in zip(self.panels(), ("COVERAGE", "PARTIAL")):
             r = sap.analyze(labels, E, reference=ref, boot_B=500)
-            self.assertEqual(r["label_free"]["regime"], "PARTIAL")
-            return r, labels
-        # B_Y > 0: most stable tasks are Unsure; the comparator would review -B_Y < 0 of them.
-        r, _ = run((1, 2, 1), (1, 4, 2), (1, 2, 10))
-        sec = r["secondary"]
-        self.assertEqual(sec["B_Y"], Fraction(8, 7))
-        self.assertEqual(sec["implied_stable_reviews"], -Fraction(8, 7))
-        self.assertIsNone(sec["usable_only"])
-        self.assertEqual(sec["usable_only_omitted"], "its implied comparator would review -1.1429 stable "
-                         "agreeing tasks with a usable label, a negative number (B_Y = 1.1429 > 0)")
-        self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 13)
-        self.assertNotIn("G_partial_hat_Y", sap.report(r))
-        # B_Y < 0: the comparator reviews 34/21 of the 12 stable usable tasks; reported.
-        r, labels = run((1, 1, 2), (1, 6), (2, 12))
-        sec = r["secondary"]
-        self.assertEqual(sec["B_Y"], -Fraction(34, 21))
-        self.assertEqual(sec["implied_stable_reviews"], Fraction(34, 21))
-        uo = sec["usable_only"]
-        nY = {"U2": 1, "U1": 6, "S": 12}
-        self.assertEqual(sum(uo["weights"][j] * nY[j] for j in nY), 0)
-        strata = ["U2"] * 1 + ["U1"] * 6 + ["S"] * 12
-        ws = [uo["weights"][j] for j in strata]
-        obs = sum(uo["weights"][j] * r["m_counts"][j] for j in nY)
-        combos = list(itertools.combinations(range(19), sum(r["m_counts"][j] for j in nY)))
-        hits = sum(sum(ws[i] for i in c) >= obs for c in combos)
-        self.assertEqual(uo["existence"]["p"], hits / len(combos))
-        self.assertEqual(uo["G_hat_exact"] + uo["usable_share_term"], sec["plan_literal"]["G_hat_exact"])
-        self.assertIn("G_partial_hat_Y =", sap.report(r))
-        # More stable usable tasks than exist: N = 60, s = 9, all 8 U2 tasks Unsure, 1 of 26 S usable.
-        labels, E, ref = panel(block("G1", rows(1, 6)), block("U2", rows(0, 0, 8)), block("U1", rows(2, 20)),
-                               block("S", rows(0, 1, 25)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=500)
-        sec = r["secondary"]
-        self.assertEqual((r["label_free"]["s"], r["label_free"]["regime"]), (9, "PARTIAL"))
-        self.assertEqual(sec["implied_stable_reviews"], Fraction(5, 2))
-        self.assertIsNone(sec["usable_only"])
-        self.assertEqual(sec["usable_only_omitted"], "its implied comparator would review 2.5000 stable "
-                         "agreeing tasks with a usable label, more than the n0Y = 1 there are")
+            self.assertEqual(r["label_free"]["regime"], regime)
+            self.check_layout(r)
 
-    def test_implied_comparator_algebra(self):
-        # The usable-only gain is the implied comparator's capture minus disagreement-first's,
-        # per 100 tasks with a usable label, at equal review counts among usable agreeing tasks.
-        rng = np.random.default_rng(41)
-        done = reported = 0
-        while done < 150:
-            d = sap.Design(int(rng.integers(0, 3)), int(rng.integers(0, 15)), int(rng.integers(0, 6)),
-                           int(rng.integers(0, 10)), int(rng.integers(1, 40)))
-            if d.regime not in ("COVERAGE", "PARTIAL"):
-                continue
-            labels = labels_for(d.n_inv, d.n_D1, d.n_U2, d.n_U1, d.n_S)
-            ref = [U if rng.random() < 0.7 else UNS for _ in labels]
-            E = [int(s == U and l != "I" and rng.random() < 0.25) for l, s in zip(labels, ref)]
-            res = sap.analyze(labels, E, reference=ref, boot_B=50, fragility=False)
-            sec = res["secondary"]
-            if sec["not_estimable"] is not None:
-                continue
-            nY, m = sec["n_Y"], res["m_counts"]
-            pi = dict(zip(sap.STRATA, sap.review_fractions([d.n_inv, d.n_D1, d.n_U2, d.n_U1, d.n_S], d.K)))
-            dis = Fraction(d.s, d.n_D0)
-            implied = dis * sec["n_D0_Y"] - pi["U2"] * nY["U2"] - pi["U1"] * nY["U1"]
-            self.assertEqual(sec["implied_stable_reviews"], implied)
-            if d.regime == "COVERAGE":
-                self.assertEqual(implied, Fraction(d.s * sec["n_D0_Y"], d.n_D0) - sec["n1_Y"])
-                self.assertLessEqual(implied, sec["n0_Y"])
-            else:
-                self.assertEqual(implied, -sec["B_Y"])
-            feasible = sec["n1_Y"] > 0 and sec["n0_Y"] > 0 and 0 <= implied <= sec["n0_Y"]
-            self.assertEqual(sec["usable_only"] is not None, feasible)
-            if feasible:
-                f_S = implied / sec["n0_Y"]
-                diff = (pi["U2"] - dis) * m["U2"] + (pi["U1"] - dis) * m["U1"] + (f_S - dis) * m["S"]
-                self.assertEqual(sec["usable_only"]["G_hat_exact"], 100 * diff / sec["N_Y"])
-                reviewed = pi["U2"] * nY["U2"] + pi["U1"] * nY["U1"] + implied
-                self.assertEqual(reviewed, dis * sec["n_D0_Y"])
-                reported += 1
-            done += 1
-        self.assertGreater(reported, 50)
-        self.assertLess(reported, 150)
+    def test_the_usable_only_comparator_is_gone(self):
+        # The secondary result is the same policy gain rescaled by usable labels, nothing else.
+        for labels, E, ref in self.panels():
+            r = sap.analyze(labels, E, reference=ref, boot_B=500)
+            self.assertEqual(set(r["secondary"]), {"N_Y", "N_Y_per100", "n_Y", "n1_Y", "n0_Y", "regime",
+                                                   "not_estimable", "plan_literal"})
+            text = sap.report(r) + "\n".join(sap._brief("x", r))
+            for gone in ("sable-only", "implied comparator", "G_hat_Y", "G_partial_hat_Y", "B_Y", "L_Y",
+                         "(a)", "(b)", "either secondary"):
+                self.assertNotIn(gone, text, gone)
+            # The fragility count still flips usable labels only.
+            self.assertIn("usable reference-label flip", text)
 
 
 NOT_DEFINED = ("Fragility: not defined; no set of usable reference-label flips among agreeing tasks "

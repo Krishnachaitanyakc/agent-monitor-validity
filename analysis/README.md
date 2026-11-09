@@ -17,7 +17,7 @@ sap.py reads and writes no files, and its results depend only on its inputs and 
 A released primary label of Successful or Unsuccessful, in any letter case, is usable. Unsure is Unsure, a blank or absent label is missing, and any other value stops the analysis. A task whose label is Unsure or missing stays in the panel, in the selections and in the review count.
 
 - **Primary, per 100 panel tasks N.** Such a task counts as not reference-contradicted, so the threshold of 2 per 100 keeps its meaning. In the coverage regime G_hat = (100/N) L (m1/n1 - m0/n0), with Fisher's test on m1 of n1 and m0 of n0.
-- **Secondary, per 100 tasks with a usable label N_Y.** First the rescaled gain, 100 Delta / N_Y: the primary gain times N/N_Y, with the primary's test and its interval rescaled the same way. Then a usable-only comparison, printed as a proposed analysis pending confirmation. In the coverage regime it is G_hat_Y = (100/N_Y) L_Y (m1/n1Y - m0/n0Y) with L_Y = n1Y (n_D0 - s) / n_D0, with Fisher's test on m1 of n1Y and m0 of n0Y and the same interval method for p1Y - p0Y. It is not reported when its implied comparator would review a negative number of stable agreeing tasks with a usable label, or more of them than there are. The threshold of 2 per 100 refers to the primary result only, so neither secondary analysis makes a threshold claim.
+- **Secondary, per 100 tasks with a usable label N_Y.** The rescaled gain, 100 Delta / N_Y: the primary gain times N/N_Y, with the primary's test and its interval rescaled the same way. The threshold of 2 per 100 refers to the primary result only, so the secondary result makes no threshold claim.
 
 When reference statuses are not supplied, every label is treated as usable. The report then says that Unsure and missing labels were not assessed, and prints no secondary result and no coverage table. The docstrings of `analyze` and `secondary_analysis` give every formula.
 
@@ -36,7 +36,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_sap.py` holds the tests of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes twenty-six deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, printing a threshold class for the secondary result or searching the fragility count in one direction only, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_sap.py` holds the tests of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes twenty-one deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, leaving the secondary result unscaled or searching the fragility count in one direction only, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 
