@@ -356,8 +356,8 @@ MUTATIONS = [
      '        return {"max_gain_per_100": Fraction(0), "reference_reachable": False, "x_per_100": Fraction(0)}\n',
      '        return {"max_gain_per_100": Fraction(0), "reference_reachable": True, "x_per_100": Fraction(0)}\n'),
     ("compute the lock quantities in the degenerate regimes as in the others",
-     "    if design.regime in DEGENERATE_REGIMES:\n",
-     "    if False:\n"),
+     '    if design.regime in DEGENERATE_REGIMES:\n        return {"max_gain_per_100"',
+     '    if False:\n        return {"max_gain_per_100"'),
     ("leave the lock quantities out of the descriptive result",
      '            "lock": lock, "result_sentences": ',
      '            "result_sentences": '),
@@ -899,6 +899,9 @@ MUTATIONS = [
     ("print N where the variants' heading names N_Y",
      '''and N_Y = {n_y} stay the per-100 "''',
      '''and N_Y = {d['N']} stay the per-100 "'''),
+    ("compare the gain with the reference in the degenerate regimes",
+     "    if design.regime in DEGENERATE_REGIMES:             # plan section 7: printed in COVERAGE and in PARTIAL\n",
+     "    if observed is None:\n"),
 ]
 
 

@@ -2859,7 +2859,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     holds the difference in expected capture under each rule of plan section 9. The
     observed gain over
     disagreement-first review is set against the practical reference of 2 per 100
-    panel tasks only as observed at or above it, or below it. contradiction gives how
+    panel tasks only as observed at or above it, or below it, and only in COVERAGE and
+    PARTIAL; a degenerate regime makes no comparison. contradiction gives how
     often each judge contradicts the references on its own valid tasks with a usable
     reference, with the number of its invalid outputs among usable-reference tasks;
     B1's is None without Y. review_probability holds each task's exact
@@ -2899,7 +2900,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     over_dis, over_rand = cap["AUG"] - cap["DIS"], cap["AUG"] - cap["RAND"]
     dis_over_rand = cap["DIS"] - cap["RAND"]
     observed = _per_100(over_dis, design.N)
-    if observed is None:
+    if design.regime in DEGENERATE_REGIMES:             # plan section 7: printed in COVERAGE and in PARTIAL
         status = None
     elif observed >= MATERIAL_M:
         status = "observed at or above the reference"

@@ -743,6 +743,17 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], Fraction(68, 35))
         self.assertEqual(d["practical_reference"]["status"], "observed below the reference")
 
+    def test_the_reference_is_compared_only_in_coverage_and_partial(self):
+        for sizes, regime, compared in (((1, 3, 0, 0, 16), "DEGENERATE-NONE", False), ((0, 7, 0, 1, 0), "DEGENERATE-CAP", False),
+                                        ((0, 0, 1, 1, 1), "DEGENERATE-NOSLICE", False), ((0, 30, 3, 7, 160), "COVERAGE", True),
+                                        ((0, 10, 4, 10, 36), "PARTIAL", True)):
+            d = describe(labels_for(*sizes), [0] * sum(sizes))
+            self.assertEqual(d["regime"], regime)
+            lines = sap.describe_report(d, EXPOSURE).split("\n")
+            start = next(i for i, x in enumerate(lines) if x.startswith("PRACTICAL REFERENCE"))
+            want = "observed below the reference." if compared else "no comparison is defined."
+            self.assertEqual(lines[start + 1], f"  gain over disagreement-first per 100 panel tasks: 0 (0.0000); {want}", regime)
+
     def test_share_of_M_is_not_defined_when_nothing_is_contradicted(self):
         d = describe(labels_for(0, 2, 0, 2, 16), [0] * 20)
         self.assertEqual(d["M"], 0)
@@ -763,7 +774,7 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(d["gain"]["over_disagreement"], {"verdicts": 0, "per_100_panel": 0})
         self.assertEqual(d["gain"]["over_random"]["verdicts"], Fraction(5, 2) - Fraction(54, 19))
         self.assertEqual(d["secondary"]["over_disagreement"], 0)
-        self.assertEqual(d["practical_reference"]["status"], "observed below the reference")
+        self.assertIsNone(d["practical_reference"]["status"])
         self.assertIsNone(d["costs"]["extra_per_extra_verdict"])
         txt = sap.describe_report(d, EXPOSURE)
         self.assertIn("regime: DEGENERATE-NONE; no instability among agreeing verdicts", txt)
