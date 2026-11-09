@@ -660,6 +660,48 @@ class TestGainsAndReference(unittest.TestCase):
         txt = sap.describe_report(d, EXPOSURE)
         self.assertIn("over disagreement-first: not defined per 100", txt)
 
+    def secondary_block(self, d):
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = next(i for i, x in enumerate(lines) if x.startswith("SECONDARY RESULT"))
+        return lines[start:lines.index("", start)]
+
+    def test_the_secondary_prints_in_every_regime(self):
+        seen = set()
+        for sizes in ((1, 3, 0, 0, 16), (0, 7, 0, 1, 0), (0, 0, 1, 1, 1), (0, 30, 3, 7, 160), (0, 10, 4, 10, 36)):
+            labels = labels_for(*sizes)
+            d = describe(labels, [i % 2 for i in range(len(labels))])
+            seen.add(d["regime"])
+            block = self.secondary_block(d)
+            self.assertEqual(block[0], f"SECONDARY RESULT: the same gain per 100 tasks with a usable label "
+                                       f"(N_Y = {len(labels)} of N = {len(labels)})", sizes)
+            want = d["secondary"]
+            self.assertEqual(block[1:], [f"  over disagreement-first: {sap._exact_text(want['over_disagreement'])} per 100",
+                                         f"  over random: {sap._exact_text(want['over_random'])} per 100"], sizes)
+            self.assertEqual(want["over_disagreement"], d["gain"]["over_disagreement"]["verdicts"] * 100 / len(labels), sizes)
+        self.assertEqual(seen, REGIMES)
+
+    def test_the_secondary_is_not_defined_without_a_usable_label_in_every_regime(self):
+        seen = set()
+        for sizes in ((1, 3, 0, 0, 16), (0, 7, 0, 1, 0), (0, 0, 1, 1, 1), (0, 30, 3, 7, 160), (0, 10, 4, 10, 36)):
+            labels = labels_for(*sizes)
+            slots, _ = build(labels, [0] * len(labels))
+            Y = ["Unsure" if i % 2 else None for i in range(len(labels))]
+            d = sap.describe_panel(slots, Y=Y)
+            seen.add(d["regime"])
+            self.assertEqual(d["N_Y"], 0, sizes)
+            self.assertEqual(d["secondary"], {"over_disagreement": None, "over_random": None}, sizes)
+            self.assertEqual(self.secondary_block(d),
+                             [f"SECONDARY RESULT: the same gain per 100 tasks with a usable label (N_Y = 0 of N = {len(labels)})",
+                              "  over disagreement-first: not defined per 100", "  over random: not defined per 100"], sizes)
+        self.assertEqual(seen, REGIMES)
+
+    def test_the_secondary_carries_no_reference_line(self):
+        for d in report_panels():
+            if d["secondary"] is not None:
+                block = "\n".join(self.secondary_block(d))
+                self.assertNotIn("practical", block)
+                self.assertNotIn("2 per 100", block)
+
     def test_empty_panel_rates_are_not_defined(self):
         d = sap.describe_panel([], Y=[])
         self.assertIsNone(d["gain"]["over_disagreement"]["per_100_panel"])
