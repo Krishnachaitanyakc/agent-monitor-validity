@@ -2425,6 +2425,7 @@ def panel_report(panel: dict, prior_exposure: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 NOT_DEFINED_TEXT = "not defined"
 POLICY_ORDER = ("AUG", "DIS", "RAND")
+DEGENERATE_REGIMES = ("DEGENERATE-NONE", "DEGENERATE-CAP", "DEGENERATE-NOSLICE")
 REGIME_NOTES = {
     "DEGENERATE-NONE": ("no instability among agreeing verdicts, so instability-first and "
                         "disagreement-first review capture the same expected number"),
@@ -2674,6 +2675,33 @@ def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
             "extra_per_extra_verdict": extra / gain if gain > 0 else None}
 
 
+def lock_quantities(design: Design) -> dict:
+    """What the gain on this panel can do, without reading a label.
+
+    These three quantities are committed at the prediction lock, with the rest of the
+    label-free design.
+
+    max_gain_per_100 is the largest gain per 100 panel tasks the panel can reach: the
+    sum over U2, U1 and S of max(0, w_j) n_j, times 100/N, exact, where w_j is the share
+    of group j that instability-first reviews minus s/n_D0. The gain is the sum of
+    w_j m_j, so it is largest when every task of a group with a positive weight is
+    reference-contradicted and no other agreeing task is. reference_reachable says
+    whether that largest gain reaches the practical reference of 2 per 100. x_per_100 is
+    the change in the gain per 100 from one unstable task: 100/N times the largest weight
+    among unstable groups with at least one task, which in COVERAGE is (n_D0 - s)/n_D0.
+    In the degenerate regimes the gain is 0 whatever the labels are, so all of these
+    are 0 and the reference is not reachable.
+    """
+    if design.regime in DEGENERATE_REGIMES:
+        return {"max_gain_per_100": Fraction(0), "reference_reachable": False, "x_per_100": Fraction(0)}
+    weight = delta_weights(design)
+    size = {"U2": design.n_U2, "U1": design.n_U1, "S": design.n_S}
+    per_100 = Fraction(100, design.N_per100)
+    largest = per_100 * sum((max(Fraction(0), weight[j]) * size[j] for j in weight), Fraction(0))
+    return {"max_gain_per_100": largest, "reference_reachable": largest >= MATERIAL_M,
+            "x_per_100": per_100 * max(weight[j] for j in UNSTABLE_GROUPS if size[j] > 0)}
+
+
 def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]] = None, *,
                    Y: Optional[Sequence[Optional[str]]] = None,
                    reference: Optional[Sequence[str]] = None,
@@ -2698,7 +2726,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     over random review, in verdicts and per 100 panel tasks, and, as a check,
     disagreement-first minus random on the same two scales. The secondary result
     is the same gain per 100 tasks with a usable label. A rate with an empty
-    denominator is None, not defined and never zero. The observed gain over
+    denominator is None, not defined and never zero. lock holds the label-free
+    quantities committed at the prediction lock (lock_quantities). The observed gain over
     disagreement-first review is set against the practical reference of 2 per 100
     panel tasks only as observed at or above it, or below it. contradiction gives how
     often each judge contradicts the references on its own valid tasks with a usable
@@ -2761,6 +2790,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
+            "lock": lock_quantities(design),
             "K_by_policy": reviews, "K_equal": all(v == design.K for v in reviews.values()),
             "R_unobserved": int((lf["R_unobserved"] == 1).sum()), "repeat_flags": _repeat_flags(lf),
             "invalid_by_slot": {k: sum(c for (slot, _), c in by_slot_category.items() if slot == k)
@@ -2918,6 +2948,9 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"  slice s = {d['s']}; review count K = {d['K']}, {equal} ("
             + ", ".join(f"{POLICY_NAMES[p]} {d['K_by_policy'][p]}" for p in POLICY_ORDER) + ")",
             f"  regime: {d['regime']}; {REGIME_NOTES[d['regime']]}",
+            f"  largest gain per 100 panel tasks the panel can reach: {_exact_text(d['lock']['max_gain_per_100'])}",
+            f"  2 per 100 reachable on this panel: {'yes' if d['lock']['reference_reachable'] else 'no'}",
+            f"  change in the gain per 100 panel tasks from one unstable task, x: {_exact_text(d['lock']['x_per_100'])}",
             ""]
     out += _repeat_lines(d["repeat_flags"])
     out += ["", "INVALID OUTPUTS by judge slot and category", "  slot | invalid | categories"]

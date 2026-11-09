@@ -234,6 +234,104 @@ class TestDesignAndReviewCount(unittest.TestCase):
         self.assertIn("  agreeing items with both repeats INVALID (R set to 0): 1", lines)
 
 
+class TestLockQuantities(unittest.TestCase):
+    def brute(self, sizes):
+        """The largest gain per 100 and the largest effect of one unstable task, over every E."""
+        labels = labels_for(*sizes)
+        design = sap.Design.from_labels(labels)
+        K, N = design.K, len(labels)
+        review = {p: [Fraction(sum(i in c for c in sets), len(sets)) for i in range(N)]
+                  for p, sets in ((p, list(draws(labels, p, K))) for p in ("AUG", "DIS"))}
+        agreeing = [i for i, lab in enumerate(labels) if lab in ("U2", "U1", "S")]
+        effect = {i: review["AUG"][i] - review["DIS"][i] for i in agreeing}
+        gains = [sum((effect[i] for i, e in zip(agreeing, bits) if e), Fraction(0))
+                 for bits in itertools.product((0, 1), repeat=len(agreeing))]
+        unstable = [effect[i] for i in agreeing if labels[i] in ("U2", "U1")]
+        return Fraction(100, N) * max(gains), Fraction(100, N) * max(unstable, default=Fraction(0)), design
+
+    def check(self, sizes):
+        largest, one_task, design = self.brute(sizes)
+        got = sap.lock_quantities(design)
+        self.assertEqual(got["max_gain_per_100"], largest, sizes)
+        self.assertEqual(got["reference_reachable"], largest >= 2, sizes)
+        self.assertEqual(got["x_per_100"], one_task, sizes)
+        return design.regime
+
+    def test_the_maximum_is_the_brute_force_maximum_over_every_E(self):
+        seen = set()
+        for N in range(1, 8):
+            for n_inv, n_D1, n_U2, n_U1 in itertools.product(range(N + 1), repeat=4):
+                n_S = N - n_inv - n_D1 - n_U2 - n_U1
+                if n_S >= 0:
+                    seen.add(self.check((n_inv, n_D1, n_U2, n_U1, n_S)))
+        for sizes in ((0, 0, 3, 3, 4), (0, 1, 1, 4, 5), (0, 0, 5, 2, 3), (1, 0, 0, 6, 4), (0, 2, 2, 2, 5), (0, 0, 1, 1, 8)):
+            seen.add(self.check(sizes))
+        self.assertEqual(seen, REGIMES)
+
+    def test_hand_computed_coverage(self):
+        # N = 200, s = 30, n_D0 = 170: an unstable task has weight 1 - 30/170 = 14/17.
+        got = sap.lock_quantities(sap.Design.from_labels(labels_for(0, 30, 3, 7, 160)))
+        self.assertEqual(got, {"max_gain_per_100": Fraction(70, 17), "reference_reachable": True, "x_per_100": Fraction(7, 17)})
+
+    def test_hand_computed_partial(self):
+        # N = 60, s = 9, n_D0 = 50: U2 is reviewed in full and U1 half, so the weights are
+        # 1 - 9/50 = 41/50 and 1/2 - 9/50 = 8/25; S has the negative weight -9/50.
+        got = sap.lock_quantities(sap.Design.from_labels(labels_for(0, 10, 4, 10, 36)))
+        self.assertEqual(got, {"max_gain_per_100": Fraction(54, 5), "reference_reachable": True, "x_per_100": Fraction(41, 30)})
+
+    def test_a_group_with_a_negative_weight_adds_nothing(self):
+        # N = 100, s = 15: U2 takes the whole slice, so U1's weight is -15/50 and its tasks cannot help.
+        got = sap.lock_quantities(sap.Design.from_labels(labels_for(0, 50, 20, 10, 20)))
+        self.assertEqual(got["x_per_100"], Fraction(3, 4) - Fraction(3, 10))
+        self.assertEqual(got["max_gain_per_100"], (Fraction(3, 4) - Fraction(3, 10)) * 20)
+
+    def test_the_reference_is_reachable_at_exactly_two_per_100(self):
+        # N = 100, s = 15, n_D0 = 30: four unstable tasks of weight 1/2 reach exactly 2.
+        got = sap.lock_quantities(sap.Design.from_labels(labels_for(0, 70, 0, 4, 26)))
+        self.assertEqual(got["max_gain_per_100"], 2)
+        self.assertTrue(got["reference_reachable"])
+        # N = 100, s = 15, n_D0 = 25: three unstable tasks of weight 2/5 reach 6/5.
+        got = sap.lock_quantities(sap.Design.from_labels(labels_for(0, 75, 0, 3, 22)))
+        self.assertEqual(got["max_gain_per_100"], Fraction(6, 5))
+        self.assertFalse(got["reference_reachable"])
+
+    def test_the_weights_count_only_groups_with_a_task(self):
+        # No U2 task: x is U1's weight, and in COVERAGE that is (n_D0 - s)/n_D0.
+        design = sap.Design.from_labels(labels_for(0, 30, 0, 7, 163))
+        self.assertEqual(sap.lock_quantities(design)["x_per_100"], Fraction(100, 200) * Fraction(170 - 30, 170))
+
+    def test_zero_in_the_degenerate_regimes(self):
+        zero = {"max_gain_per_100": 0, "reference_reachable": False, "x_per_100": 0}
+        for sizes, regime in (((1, 3, 0, 0, 16), "DEGENERATE-NONE"), ((0, 7, 0, 1, 0), "DEGENERATE-CAP"),
+                              ((0, 0, 1, 1, 1), "DEGENERATE-NOSLICE"), ((0, 0, 0, 0, 0), "DEGENERATE-NONE")):
+            design = sap.Design.from_labels(labels_for(*sizes))
+            self.assertEqual(design.regime, regime)
+            self.assertEqual(sap.lock_quantities(design), zero, sizes)
+
+    def test_the_held_per_100_denominator_is_used(self):
+        design = sap.Design.from_labels(labels_for(0, 30, 3, 7, 160), N_ref=400)
+        self.assertEqual(sap.lock_quantities(design)["max_gain_per_100"], Fraction(35, 17))
+
+    def test_the_result_holds_them_without_reading_a_label(self):
+        labels = labels_for(0, 30, 3, 7, 160)
+        slots, Y = build(labels, [0] * 200)
+        other = ["Unsure" if i % 3 == 0 else ("Unsuccessful" if i % 3 == 1 else None) for i in range(200)]
+        want = sap.lock_quantities(sap.Design.from_labels(labels))
+        self.assertEqual(sap.describe_panel(slots, Y=Y)["lock"], want)
+        self.assertEqual(sap.describe_panel(slots, Y=other)["lock"], want)
+
+    def test_the_label_free_design_block_prints_them(self):
+        d = describe(labels_for(0, 30, 3, 7, 160), [0] * 200)
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = next(i for i, x in enumerate(lines) if x.startswith("  regime: COVERAGE"))
+        self.assertEqual(lines[start + 1:start + 4],
+                         ["  largest gain per 100 panel tasks the panel can reach: 70/17 (4.1176)",
+                          "  2 per 100 reachable on this panel: yes",
+                          "  change in the gain per 100 panel tasks from one unstable task, x: 7/17 (0.4118)"])
+        d = describe(labels_for(0, 75, 0, 3, 22), [0] * 100)
+        self.assertIn("  2 per 100 reachable on this panel: no", sap.describe_report(d, EXPOSURE).split("\n"))
+
+
 class TestGainsAndReference(unittest.TestCase):
     def test_hand_computed_panel(self):
         # K = 60. Random: 60/200 of M = 25. Disagreement-first: 11 + 30/170 of 14.

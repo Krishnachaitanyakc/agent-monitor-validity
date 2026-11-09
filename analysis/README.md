@@ -21,6 +21,7 @@ A released primary label of Successful or Unsuccessful, in any letter case, is u
 
 In every regime, degenerate ones included, it gives:
 
+- The label-free quantities committed at the prediction lock, from `lock_quantities`: the largest gain per 100 panel tasks the panel can reach, whether 2 per 100 is reachable, and x, the change in the gain per 100 from one unstable task.
 - N, n_inv, n_D1, n_D0, s, K and that K is equal across the three policies; U2, U1 and S counts; R_unobserved, the valid first verdicts with both repeats invalid, disagreeing tasks included; invalid outputs by slot and category.
 - Usable, Unsure and missing counts overall, by review group and by benchmark.
 - How often each judge contradicts the released references: the count and the rate over its own valid verdicts with a usable reference, with the denominator and the number of its invalid outputs among usable-reference tasks beside it. A1's needs only `E`; B1's needs the released labels and is otherwise reported as not assessed.
@@ -57,7 +58,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 185 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 200 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 
