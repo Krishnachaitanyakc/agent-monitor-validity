@@ -720,8 +720,8 @@ class TestReporting(unittest.TestCase):
         # Label-free: E is not an input, so the choice cannot depend on it.
         E1 = [0] * 30
         E2 = [1] * 30
-        r1 = sap.template_sensitivity(labels, E1, tmpl, seed=1)
-        r2 = sap.template_sensitivity(labels, E2, tmpl, seed=1)
+        r1 = sap.template_sensitivity(labels, E1, tmpl, seed=1, path=sap.PATH_POPULATION)
+        r2 = sap.template_sensitivity(labels, E2, tmpl, seed=1, path=sap.PATH_POPULATION)
         self.assertEqual((r1["n1"], r1["n0"]), (r2["n1"], r2["n0"]))
 
 

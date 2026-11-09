@@ -368,7 +368,7 @@ class TestReferenceHandling(unittest.TestCase):
         self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 32)
         self.assertEqual(r["coverage"]["groups"]["stable agreeing"],
                          {"tasks": 160, "usable": 0, "unsure": 160, "missing": 0})
-        self.assertIn("100 Delta / N_Y, the primary realized gain", sap.report(r))
+        self.assertIn("100 Delta / N_Y, the realized gain of the per-100-panel-task result", sap.report(r))
         # All unstable agreeing tasks Unsure: m1 is 0 by construction.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U2", rows(0, 0, 4)), block("U1", rows(0, 0, 6)),
                                block("S", rows(16, 160)))
@@ -598,7 +598,7 @@ class TestPanelUnit(unittest.TestCase):
                          {"n_tasks": 200, "n_templates": 100, "max_multiplicity": 2, "tasks_sharing": 200,
                           "histogram": {2: 100}})
         txt = sap.panel_report(out)
-        for needle in ("The primary panel keeps one trajectory per task (N = 200)",
+        for needle in ("The default panel keeps one trajectory per task (N = 200)",
                        "One-task-per-template panel (chosen label-free before evaluation",
                        "- one task per template: N = 100", "Panel tasks: 200 in 100 templates",
                        "One agreeing item per template"):
@@ -681,10 +681,10 @@ class TestSecondaryResult(unittest.TestCase):
     def check_layout(self, r):
         txt = sap.report(r)
         sec = self.section(txt)
-        self.assertIn("100 Delta / N_Y, the primary realized gain rescaled by N/N_Y", sec)
-        self.assertIn("Existence: same test as the primary", sec)
-        self.assertEqual(txt.count("The threshold of 2 per 100 refers to the primary result only"), 1)
-        self.assertIn("The threshold of 2 per 100 refers to the primary result only", sec)
+        self.assertIn("100 Delta / N_Y, the realized gain of the per-100-panel-task result rescaled by N/N_Y", sec)
+        self.assertIn("Existence: same test as the per-100-panel-task result", sec)
+        self.assertEqual(txt.count("The threshold of 2 per 100 refers to the per-100-panel-task result only"), 1)
+        self.assertIn("The threshold of 2 per 100 refers to the per-100-panel-task result only", sec)
         for word in ("exceeds", "below the threshold", "unresolved", "size:", "δ_m", "delta_m",
                      "reachable", "class"):
             self.assertNotIn(word, sec, word)

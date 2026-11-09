@@ -1,9 +1,10 @@
 """Tests of the descriptive path in sap.py, the primary result. Synthetic data only.
 
 Covers the exact expected captures against an enumeration of every draw, the equal
-review count, the A1 and B1 validity metrics, invalid and Unsure handling, costs, the
-report's fixed statements and its freedom from inferential wording, and the path
-argument that keeps population inference out of the primary result.
+review count, the A1 and B1 validity metrics and contradiction rates, the cases of the
+recorded rule, invalid and Unsure handling, costs, the report's fixed statements and
+its freedom from inferential wording, and the path argument that keeps population
+inference out of the primary result.
 
 Run from the repository root: python -m unittest discover -s analysis -v
 """
@@ -13,6 +14,7 @@ import os
 import re
 import sys
 import unittest
+from collections import Counter
 from fractions import Fraction
 
 import numpy as np
@@ -202,8 +204,17 @@ class TestDesignAndReviewCount(unittest.TestCase):
         self.assertEqual(d["R_unobserved"], 1)
         self.assertEqual(d["repeat_flags"], {"both_repeats_invalid": 1, "one_repeat_invalid_no_flip": 1,
                                              "one_repeat_invalid_flip": 1})
-        txt = sap.describe_report(d, EXPOSURE)
-        self.assertIn("agreeing groups: U2 = 1, U1 = 2, S = 3; R_unobserved = 1", txt)
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        for line in ("  N = 10, invalid A1 n_inv = 2, valid N_V = 8",
+                     "  disagreeing n_D1 = 2, agreeing n_D0 = 6",
+                     "  agreeing groups: U2 = 1, U1 = 2, S = 3",
+                     "  valid first verdicts with both repeats invalid, disagreeing tasks included (R_unobserved): 1"):
+            self.assertIn(line, lines)
+        start = lines.index("Repeat observation (label-free)")
+        self.assertEqual(lines[start + 1:start + 4],
+                         ["  agreeing items with both repeats INVALID (R set to 0): 1",
+                          "  agreeing items with one repeat INVALID and no observed flip (R = 0 from one repeat): 1",
+                          "  agreeing items with one repeat INVALID and an observed flip: 1"])
 
     def test_R_unobserved_counts_every_valid_first_verdict(self):
         both = {"A2": "REFUSAL", "A3": "MALFORMED"}
@@ -211,6 +222,16 @@ class TestDesignAndReviewCount(unittest.TestCase):
         d = sap.describe_panel(slots, Y=["Successful"] * 3)
         self.assertEqual(d["R_unobserved"], 2)                      # one agreeing, one disagreeing
         self.assertEqual(d["repeat_flags"]["both_repeats_invalid"], 1)
+
+    def test_the_name_R_unobserved_has_one_value_in_the_report(self):
+        both = {"A2": "REFUSAL", "A3": "MALFORMED"}
+        slots = [dict(slot("S"), **both), dict(slot("G1"), **both), dict(slot("S"))]
+        txt = sap.describe_report(sap.describe_panel(slots, Y=["Successful"] * 3), EXPOSURE)
+        lines = txt.split("\n")
+        self.assertEqual(txt.count("R_unobserved"), 1)
+        self.assertIn("  agreeing groups: U2 = 0, U1 = 0, S = 2", lines)
+        self.assertIn("  valid first verdicts with both repeats invalid, disagreeing tasks included (R_unobserved): 2", lines)
+        self.assertIn("  agreeing items with both repeats INVALID (R set to 0): 1", lines)
 
 
 class TestGainsAndReference(unittest.TestCase):
@@ -283,7 +304,11 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(d["N_Y"], 7)                               # the invalid A1 with a usable label counts
         self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], Fraction(10, 3))
         self.assertEqual(d["secondary"], {"over_disagreement": Fraction(100, 21), "over_random": Fraction(50, 7)})
-        self.assertIn("(N_Y = 7 of N = 10)", sap.describe_report(d, EXPOSURE))
+        txt = sap.describe_report(d, EXPOSURE)
+        self.assertIn("(N_Y = 7 of N = 10)", txt)
+        lines = txt.split("\n")
+        self.assertIn("  over disagreement-first: 100/21 (4.7619) per 100", lines)
+        self.assertIn("  over random: 50/7 (7.1429) per 100", lines)
 
     def test_no_usable_label_at_all(self):
         labels = labels_for(0, 2, 0, 2, 16)
@@ -339,6 +364,8 @@ class TestValidityMetrics(unittest.TestCase):
                                                   "success_references": tn + fp})
         self.assert_rate(m["failure_precision"], precision, tp, tp + fp)
         self.assert_rate(m["failure_recall"], recall, tp, tp + fn)
+        n = tp + fp + fn + tn
+        self.assert_rate(m["contradiction"], Fraction(fp + fn, n) if n else None, fp + fn, n)
         self.assert_rate(m["valid_prediction_coverage"], coverage[0], coverage[1], coverage[2])
         self.assert_rate(m["prevalence"], prevalence, tp + fn, tp + fp + fn + tn)
 
@@ -367,6 +394,34 @@ class TestValidityMetrics(unittest.TestCase):
                        "valid-prediction coverage: 6/7 (0.8571), 12 of 14 tasks with a usable reference",
                        "prevalence of failure references: 1/2 (0.5000), 6 of 12 tasks in this set"):
             self.assertIn(needle, txt, needle)
+
+    def test_each_heading_prints_its_own_set(self):
+        slots, Y = from_rows(ROWS)
+        lines = sap.describe_report(sap.describe_panel(slots, Y=Y), EXPOSURE).split("\n")
+        for heading, confusion in (("  A1 on its own valid set (n = 12)", "TP = 4, FP = 1, FN = 2, TN = 5"),
+                                   ("  B1 on its own valid set (n = 12)", "TP = 4, FP = 2, FN = 2, TN = 4"),
+                                   ("  A1 on the shared subset (n = 10)", "TP = 3, FP = 1, FN = 2, TN = 4"),
+                                   ("  B1 on the shared subset (n = 10)", "TP = 3, FP = 2, FN = 2, TN = 3")):
+            self.assertEqual(lines[lines.index(heading) + 1], "    confusion matrix: " + confusion)
+        start = lines.index("  A1 on the shared subset (n = 10)")
+        self.assertEqual(lines[start + 2:start + 8],
+                         ["    balanced accuracy: 7/10 (0.7000), denominators 5 failure references and 5 success references",
+                          "    failure precision: 3/4 (0.7500), 3 of 4 failure predictions",
+                          "    failure recall: 3/5 (0.6000), 3 of 5 failure references",
+                          "    contradiction rate: 3/10 (0.3000), 3 of 10 tasks in this set",
+                          "    valid-prediction coverage: 5/7 (0.7143), 10 of 14 tasks with a usable reference",
+                          "    prevalence of failure references: 1/2 (0.5000), 5 of 10 tasks in this set"])
+
+    def test_verdicts_match_in_any_letter_case(self):
+        slots, Y = from_rows(ROWS)
+        want = sap.describe_panel(slots, Y=Y)
+        for spell in (str.upper, str.title):
+            mixed = [{k: spell(v) if v in sap.VERDICTS else v for k, v in s.items()} for s in slots]
+            d = sap.describe_panel(mixed, Y=Y)
+            self.assertEqual(d["validity"], want["validity"])
+            self.assertEqual(d["contradiction"], want["contradiction"])
+            self.assert_metrics(d["validity"]["own"]["A1"], (4, 1, 2, 5), Fraction(3, 4), Fraction(4, 5), Fraction(2, 3),
+                                (Fraction(6, 7), 12, 14), Fraction(1, 2))
 
     def test_empty_denominators_are_not_defined_and_never_zero(self):
         # No failure reference and no failure prediction.
@@ -412,6 +467,210 @@ class TestValidityMetrics(unittest.TestCase):
             sap.describe_panel(slots, Y=["success", "Successful"])
 
 
+class TestJudgeContradiction(unittest.TestCase):
+    def test_each_judge_is_measured_on_its_own_valid_tasks(self):
+        rows = [("failure", "failure", "Successful", 4), ("success", "success", "Successful", 2),
+                ("success", "failure", "Successful", 4)]
+        slots, Y = from_rows(rows)
+        d = sap.describe_panel(slots, Y=Y)
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(2, 5), "numerator": 4, "denominator": 10})
+        self.assertEqual(d["contradiction"]["B1"], {"value": Fraction(4, 5), "numerator": 8, "denominator": 10})
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  A1: 2/5 (0.4000), 4 of 10 tasks with a valid A1 and a usable reference", lines)
+        self.assertIn("  B1: 4/5 (0.8000), 8 of 10 tasks with a valid B1 and a usable reference", lines)
+
+    def test_invalid_and_unknown_tasks_leave_the_denominator(self):
+        slots, Y = from_rows(ROWS)
+        d = sap.describe_panel(slots, Y=Y)
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 4), "numerator": 3, "denominator": 12})
+        self.assertEqual(d["contradiction"]["B1"], {"value": Fraction(1, 3), "numerator": 4, "denominator": 12})
+        self.assertEqual(d["contradiction"]["A1"]["numerator"], d["M"])
+        self.assertEqual(d["contradiction"]["A1"], d["validity"]["own"]["A1"]["contradiction"])
+        self.assertEqual(d["validity"]["shared"]["A1"]["contradiction"]["denominator"], 10)
+        self.assertEqual(d["validity"]["shared"]["B1"]["contradiction"]["numerator"], 4)
+
+    def test_E_with_statuses_gives_A1_and_says_why_B1_is_not_assessed(self):
+        slots, Y, _ = mixed_panel()
+        j = sap.join_reference(slots, Y)
+        d = sap.describe_panel(slots, j["E"], reference=j["reference"])
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 2), "numerator": 3, "denominator": 6})
+        self.assertIsNone(d["contradiction"]["B1"])
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  A1: 1/2 (0.5000), 3 of 6 tasks with a valid A1 and a usable reference", lines)
+        self.assertIn("  B1: not assessed: the released labels were not supplied, and E alone cannot give "
+                      "B1's reference where A1 is invalid.", lines)
+
+    def test_E_without_statuses_says_every_label_was_treated_as_usable(self):
+        d = sap.describe_panel([slot("I"), slot("S"), slot("S")], [1, 1, 0])
+        self.assertEqual(d["contradiction"]["A1"], {"value": Fraction(1, 2), "numerator": 1, "denominator": 2})
+        self.assertIn("  A1: 1/2 (0.5000), 1 of 2 tasks with a valid A1 and a reference, every label treated as usable",
+                      sap.describe_report(d, EXPOSURE).split("\n"))
+
+    def test_an_empty_set_is_not_defined(self):
+        slots, Y = from_rows([("REFUSAL", "MALFORMED", "Successful", 2)])
+        d = sap.describe_panel(slots, Y=Y)
+        self.assertEqual(d["contradiction"]["A1"], {"value": None, "numerator": 0, "denominator": 0})
+        self.assertEqual(d["contradiction"]["B1"], {"value": None, "numerator": 0, "denominator": 0})
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  A1: not defined, 0 of 0 tasks with a valid A1 and a usable reference", lines)
+        self.assertIn("  B1: not defined, 0 of 0 tasks with a valid B1 and a usable reference", lines)
+        slots, Y = from_rows([("success", "success", "Unsure", 2)])
+        self.assertIsNone(sap.describe_panel(slots, Y=Y)["contradiction"]["A1"]["value"])
+
+
+CONTRADICTED = "contradicted: caught with these probabilities, missed with the rest"
+NOTHING_TO_CATCH = "not contradicted: nothing to catch"
+UNKNOWN = "unknown, not correct"
+
+
+class TestCases(unittest.TestCase):
+    IDS = [f"t{i}" for i in range(10)]
+
+    def mixed(self, **kw):
+        slots, Y, _ = mixed_panel()
+        return sap.describe_panel(slots, Y=Y, ids=self.IDS, **kw)
+
+    def test_the_rule_as_written_out(self):
+        labels = labels_for(2, 3, 4, 5, 6)
+        ids = [f"task-{20 - i:02d}" for i in range(len(labels))]
+        for seed in (0, 1, 17):
+            rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(6,)))
+            want = []
+            for group in ("G1", "U2", "U1", "S"):
+                members = sorted((i for i, lab in enumerate(labels) if lab == group), key=lambda i: ids[i])
+                want += [int(i) for i in rng.permutation(np.array(members, dtype=int))[:2]]
+            self.assertEqual(sap.select_cases(labels, ids, seed), want, seed)
+
+    def test_two_of_each_group_and_never_an_invalid_first_verdict(self):
+        labels = labels_for(3, 4, 4, 4, 4)
+        chosen = sap.select_cases(labels)
+        self.assertEqual(Counter(labels[i] for i in chosen), {"G1": 2, "U2": 2, "U1": 2, "S": 2})
+        self.assertEqual(len(set(chosen)), 8)
+        labels = labels_for(1, 1, 0, 3, 1)                          # a small group gives all it has
+        self.assertEqual(sorted(labels[i] for i in sap.select_cases(labels)), ["G1", "S", "U1", "U1"])
+
+    def test_the_choice_is_blind_to_the_labels(self):
+        labels = labels_for(1, 4, 3, 3, 6)
+        rng = np.random.default_rng(3)
+        slots, _ = build(labels, [0] * len(labels))
+        seen = set()
+        for _ in range(30):
+            E = [int(rng.random() < 0.5) for _ in labels]
+            _, Y = build(labels, E)
+            Y = ["Unsure" if rng.random() < 0.2 else y for y in Y]
+            d = sap.describe_panel(slots, Y=Y)
+            e = sap.describe_panel(slots, E)
+            seen.add(tuple(t["task"] for t in d["cases"]["tasks"]))
+            seen.add(tuple(t["task"] for t in e["cases"]["tasks"]))
+        self.assertEqual(len(seen), 1)
+
+    def test_the_choice_follows_the_ids_not_the_stored_order(self):
+        labels = labels_for(1, 4, 3, 3, 6)
+        ids = [f"t{i:02d}" for i in range(len(labels))]
+        order = [int(i) for i in np.random.default_rng(11).permutation(len(labels))]
+        moved, moved_ids = [labels[i] for i in order], [ids[i] for i in order]
+        self.assertEqual([ids[i] for i in sap.select_cases(labels, ids, 5)],
+                         [moved_ids[i] for i in sap.select_cases(moved, moved_ids, 5)])
+
+    def test_the_seed_decides_the_choice_and_is_reported(self):
+        labels = labels_for(0, 30, 30, 30, 30)
+        self.assertEqual(sap.select_cases(labels, seed=3), sap.select_cases(labels, seed=3))
+        self.assertGreater(len({tuple(sap.select_cases(labels, seed=s)) for s in range(10)}), 1)
+        d = self.mixed(case_seed=9)
+        self.assertEqual((d["cases"]["seed"], d["cases"]["per_group"], d["cases"]["sort_key"]), (9, 2, "ids"))
+        txt = sap.describe_report(d, EXPOSURE)
+        rule = sap.CASE_RULE_TEXT.format(sort_key="ids", seed=9, per_group=2)
+        self.assertIn("  " + rule, txt.split("\n"))
+        for needle in ("blind to E and the released labels", "SeedSequence(9, spawn_key=(6,))",
+                       "take the first 2", "has no verdict to catch and is left out"):
+            self.assertIn(needle, rule)
+
+    def test_the_case_seed_reaches_the_choice(self):
+        labels = labels_for(0, 6, 6, 6, 6)
+        ids = [f"t{i:02d}" for i in range(len(labels))]
+        slots, Y = build(labels, [0] * len(labels))
+        names = lambda d: [t["task"] for t in d["cases"]["tasks"]]
+        for seed in range(6):
+            d = sap.describe_panel(slots, Y=Y, ids=ids, case_seed=seed)
+            self.assertEqual(names(d), [ids[i] for i in sap.select_cases(labels, ids, seed)], seed)
+        default = sap.describe_panel(slots, Y=Y, ids=ids)
+        self.assertEqual(default["cases"]["seed"], 0)
+        self.assertEqual(names(default), [ids[i] for i in sap.select_cases(labels, ids, 0)])
+
+    def test_review_probabilities_match_every_draw(self):
+        for sizes in ((1, 2, 0, 1, 5), (0, 2, 3, 1, 3), (0, 1, 1, 3, 5), (0, 7, 0, 1, 0), (0, 0, 1, 1, 1), (1, 2, 0, 0, 5)):
+            labels = labels_for(*sizes)
+            d = describe(labels, [0] * len(labels))
+            for pol in POLICIES:
+                sets = list(draws(labels, pol, d["K"]))
+                want = [Fraction(sum(i in s for s in sets), len(sets)) for i in range(len(labels))]
+                self.assertEqual(d["review_probability"][pol], want, (sizes, pol))
+                for t in d["cases"]["tasks"]:
+                    self.assertEqual(t["review_probability"][pol], want[t["task"]], (sizes, pol))
+
+    def test_each_row_states_the_probabilities_E_and_the_reference(self):
+        d = self.mixed()
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = lines.index("CASES: what each policy caught and missed")
+        self.assertEqual(lines[start + 1], "  " + sap.CASE_RULE_TEXT.format(sort_key="ids", seed=0, per_group=2))
+        self.assertEqual(lines[start + 2], "  E is 1 when the released reference contradicts the first verdict. Each "
+                                           "probability is that policy's exact chance of reviewing the task, over its "
+                                           "own random choices. A contradicted task is caught with that probability "
+                                           "and missed with the rest.")
+        self.assertEqual(lines[start + 3], "  task | group | A1, A2, A3, B1 | reference | E | "
+                                           "Instability-first | Disagreement-first | Random | reading")
+        for row in ("t2 | G1 | success, success, success, MALFORMED | usable | 1 | 1 (1.0000) | 1 (1.0000) | 1/2 (0.5000) | " + CONTRADICTED,
+                    "t3 | G1 | failure, failure, failure, success | unsure | 0 | 1 (1.0000) | 1 (1.0000) | 1/2 (0.5000) | " + UNKNOWN,
+                    "t4 | U2 | success, failure, failure, success | usable | 1 | 1 (1.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + CONTRADICTED,
+                    "t5 | U1 | success, failure, success, success | missing | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + UNKNOWN,
+                    "t8 | U1 | success, ABSTAIN, failure, success | usable | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + NOTHING_TO_CATCH):
+            self.assertIn("  " + row, lines, row)
+        slots, Y, _ = mixed_panel()
+        j = sap.join_reference(slots, Y)
+        self.assertEqual(len(d["cases"]["tasks"]), 7)               # G1 2, U2 1, U1 2, S 2 of 3
+        for t in d["cases"]["tasks"]:
+            i = self.IDS.index(t["task"])
+            self.assertEqual((t["E"], t["reference"]), (j["E"][i], j["reference"][i]), t["task"])
+
+    def test_the_slots_print_in_canonical_spelling(self):
+        slots = [{"A1": "SUCCESS", "A2": "Failure", "A3": "success", "B1": "sUcCeSs"}]
+        self.assertIn("  0 | U1 | success, failure, success, success | usable | 0 ",
+                      sap.describe_report(sap.describe_panel(slots, Y=["Successful"]), EXPOSURE))
+
+    def test_without_ids_the_tasks_are_named_by_position(self):
+        d = sap.describe_panel([slot("S")] * 4, [0, 1, 0, 0])
+        self.assertEqual(d["cases"]["sort_key"], "stored order")
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  position from 0 | group | A1, A2, A3, B1 | reference | E | "
+                      "Instability-first | Disagreement-first | Random | reading", lines)
+        rows = [x for x in lines if " | S | " in x]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            position = int(row.split(" | ")[0])
+            self.assertIn(" | not assessed | ", row)                # no statuses were supplied
+            self.assertIn(f" | {[0, 1, 0, 0][position]} | ", row)
+            self.assertTrue(row.endswith(CONTRADICTED if position == 1 else NOTHING_TO_CATCH), row)
+
+    def test_a_panel_without_a_valid_first_verdict_has_no_case(self):
+        for d in (sap.describe_panel([slot("I")] * 3, Y=["Successful"] * 3), sap.describe_panel([], Y=[])):
+            self.assertEqual(d["cases"]["tasks"], [])
+            self.assertIn("  None: no task has a valid first verdict.", sap.describe_report(d, EXPOSURE).split("\n"))
+
+    def test_bad_ids_are_refused(self):
+        ok = slot("S")
+        for bad in (["a"], ["a", "a"], ["a", "b", "c"]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                sap.describe_panel([ok, ok], Y=["Successful"] * 2, ids=bad)
+
+    def test_the_keywords_reach_the_path_that_takes_them(self):
+        slots, Y, _ = mixed_panel()
+        out = sap.analyze_panel(slots, Y=Y, ids=self.IDS, case_seed=2)
+        self.assertEqual(out["cases"]["seed"], 2)
+        self.assertIn(out["cases"]["tasks"][0]["task"], self.IDS)
+        with self.assertRaises(TypeError):
+            sap.analyze_panel(slots, [0] * 10, case_seed=2, path=sap.PATH_POPULATION)
+
+
 class TestInvalidAndUnsure(unittest.TestCase):
     def test_invalid_outputs_by_slot_and_category(self):
         slots, Y, bench = mixed_panel()
@@ -450,6 +709,12 @@ class TestInvalidAndUnsure(unittest.TestCase):
         txt = sap.describe_report(d, EXPOSURE)
         for needle in ("unknown, not correct verdicts", "unstable agreeing | 3 | 2 | 0 | 1", "wa | 4 | 3 | 1 | 0"):
             self.assertIn(needle, txt, needle)
+        # Unsure then missing, in the groups all, invalid, disagreement, unstable, stable. K = 6, s = 2.
+        lines = txt.split("\n")
+        for row in ("  Random: 1.50 / 0.50; 1.00 / 0.00; 0.50 / 0.00; 0.00 / 0.50; 0.00 / 0.00",
+                    "  Disagreement-first: 2.00 / 0.33; 1.00 / 0.00; 1.00 / 0.00; 0.00 / 0.33; 0.00 / 0.00",
+                    "  Instability-first: 2.00 / 0.50; 1.00 / 0.00; 1.00 / 0.00; 0.00 / 0.50; 0.00 / 0.00"):
+            self.assertIn(row, lines)
 
     def test_validity_ignores_unknown_references_and_invalid_slots(self):
         slots, Y, _ = mixed_panel()
@@ -715,6 +980,49 @@ class TestPaths(unittest.TestCase):
         self.assertIn("Population inference on the panel, statistical analysis plan v3.2", txt)
         self.assertNotIn("Prior exposure statement", txt)
         self.assertIn("Prior exposure statement: " + EXPOSURE, sap.panel_report(panel, EXPOSURE))
+        lines = txt.split("\n")
+        self.assertIn("  agreeing items with both repeats INVALID (R set to 0): 0", lines)
+
+    def test_population_report_says_primary_only_of_the_descriptive_audit(self):
+        def check(txt):
+            self.assertEqual(txt.count(sap.POPULATION_PATH_TEXT), 1)
+            self.assertNotIn("primary", txt.replace(sap.POPULATION_PATH_TEXT, "").lower())
+        seen = set()
+        for sizes in ((0, 3, 0, 0, 16), (0, 7, 0, 1, 0), (0, 0, 1, 1, 1), (0, 3, 1, 1, 15), (0, 4, 3, 4, 9)):
+            labels = labels_for(*sizes)
+            n = len(labels)
+            ref = [sap.UNSURE if i == n - 1 else sap.USABLE for i in range(n)]
+            E = [int(i % 2 == 0 and i != n - 1) for i in range(n)]
+            res = sap.analyze(labels, E, reference=ref, path=sap.PATH_POPULATION, boot_B=50)
+            seen.add(res["label_free"]["regime"])
+            check(sap.report(res))
+            # Held values are printed only on a sensitivity analysis, the wording with them.
+            check(sap.report(sap.analyze(labels, E, reference=ref, s_override=res["label_free"]["s"], N_ref=n + 5,
+                                         N_Y_ref=n + 4, path=sap.PATH_POPULATION, boot_B=50)))
+            slots, _ = build(labels, E)
+            ids = [f"t{i:02d}" for i in range(n)]
+            panel = sap.analyze_panel(slots, E, ids=ids, templates=[f"tpl{i // 2}" for i in range(n)],
+                                      template_panel=ids[::2], reference=ref, path=sap.PATH_POPULATION, boot_B=50)
+            check(sap.panel_report(panel, EXPOSURE))
+        self.assertEqual(seen, REGIMES)
+
+    def test_held_values_are_named_in_the_population_report(self):
+        labels = labels_for(0, 3, 1, 1, 15)
+        ref = [sap.UNSURE] + [sap.USABLE] * 19
+        txt = sap.report(sap.analyze(labels, [0] * 20, reference=ref, s_override=3, N_ref=25, N_Y_ref=24,
+                                     path=sap.PATH_POPULATION))
+        for needle in ("held at its value in the per-100-panel-task result",
+                       "per-100 denominator held at the N of the per-100-panel-task result, 25",
+                       "per-100 denominator held at its value on the full panel, N_Y = 24"):
+            self.assertIn(needle, txt, needle)
+
+    def test_template_sensitivity_needs_the_explicit_argument(self):
+        labels, E, tmpl = ["U1"] * 6 + ["S"] * 12, [1] * 5 + [0] * 13, [f"t{i}" for i in range(18)]
+        with self.assertRaises(ValueError):
+            sap.template_sensitivity(labels, E, tmpl)
+        with self.assertRaises(ValueError):
+            sap.template_sensitivity(labels, E, tmpl, path="descriptive")
+        self.assertIn("p", sap.template_sensitivity(labels, E, tmpl, path=sap.PATH_POPULATION))
 
     def test_inference_code_is_still_there(self):
         labels, E, slots, _ = self.data()

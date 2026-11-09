@@ -8,10 +8,14 @@ and these realized judge calls, with no population claim. analyze_panel() runs t
 path unless told otherwise.
 
 The population inference of the study's statistical analysis plan, version 3.2, is
-outside the primary result and separately scoped. It stays in this module and runs
-only on the explicit argument path="population_inference". Everything below this
-paragraph describes that path unless it says otherwise, and "primary" there means
-the plan's result per 100 panel tasks. One piece of it is still to come. The
+outside the primary result and separately scoped. It stays in this module, and its
+entry points analyze(), analyze_with_sensitivities(), analyze_panel() and
+template_sensitivity() run it only on the explicit argument
+path="population_inference". The numeric building blocks they call, such as
+fisher_one_sided(), take no path. Everything below this paragraph describes that
+path unless it says otherwise, and "primary" there means the plan's result per 100
+panel tasks, which that path's report calls the per-100-panel-task result. One
+piece of it is still to come. The
 inference that handles the template dependence retained on the
 one-trajectory-per-task panel, and its synthetic validation, do not exist. Until
 they do, the path's test and interval assume independent tasks, and its report says so.
@@ -1588,8 +1592,12 @@ def template_subsample(labels: Sequence[str], templates: Sequence[str],
 
 def template_sensitivity(labels: Sequence[str], E: Sequence[int], templates: Sequence[str],
                          ids: Optional[Sequence[str]] = None, seed: int = 0,
-                         method: Optional[str] = None) -> dict:
-    """Existence p and delta interval on one agreeing item per template (labeled sensitivity)."""
+                         method: Optional[str] = None, path: str = PATH_DESCRIPTIVE) -> dict:
+    """Existence p and delta interval on one agreeing item per template (labeled sensitivity).
+
+    Runs only with path="population_inference", as analyze() does.
+    """
+    _require_population_path(path, "template_sensitivity")
     chosen, info = template_subsample(labels, templates, ids, seed)
     lab = [labels[i] for i in chosen]
     e = [int(E[i]) for i in chosen]
@@ -1883,12 +1891,12 @@ def _primary_lines(res: dict) -> List[str]:
     out.append(f"  N = {lf['N']}, invalid A1 n_inv = {lf['n_inv']}, valid N_V = {lf['N_V']}")
     out.append(f"  disagreeing n_D1 = {lf['n_D1']}, agreeing n_D0 = {lf['n_D0']}: "
                f"unstable n1 = {lf['n1']} (U2 = {lf['n_U2']}, U1 = {lf['n_U1']}), stable n0 = {lf['n0']}")
-    s_src = "held at the primary value" if lf.get("s_held") else f"s_nom = {lf['s_nom']}"
+    s_src = "held at its value in the per-100-panel-task result" if lf.get("s_held") else f"s_nom = {lf['s_nom']}"
     out.append(f"  slice s = {lf['s']} ({s_src}, cap binds: "
                f"{'yes' if lf['cap_binds'] else 'no'}); review count K = {lf['K']} "
                f"({100 * lf['K'] / lf['N']:.1f}% of N), identical for all three policies")
     if lf.get("N_per100", lf["N"]) != lf["N"]:
-        out.append(f"  per-100 denominator held at the primary N = {lf['N_per100']}")
+        out.append(f"  per-100 denominator held at the N of the per-100-panel-task result, {lf['N_per100']}")
     if reg == "COVERAGE":
         out.append(f"  regime: {reg}; L = {_f(lf['L'])}")
         if lf["delta_m"] is not None:
@@ -1900,7 +1908,7 @@ def _primary_lines(res: dict) -> List[str]:
     cov = res.get("coverage")
     if res.get("reference_supplied") and cov is not None:
         g = cov["groups"]["all"]
-        out.append(f"  primary result per 100 panel tasks (N = {lf['N']}); "
+        out.append(f"  per-100-panel-task result (N = {lf['N']}); "
                    f"{g['unsure'] + g['missing']} tasks without a usable reference label "
                    f"(Unsure {g['unsure']}, missing {g['missing']}) count as not reference-contradicted")
     else:
@@ -2048,7 +2056,7 @@ def _secondary_lines(res: dict) -> List[str]:
     out = [f"SECONDARY RESULT: gain per 100 tasks with a usable label "
            f"(N_Y = {sec['N_Y']} of N = {lf['N']})"]
     if sec["N_Y_per100"] != sec["N_Y"]:
-        out.append(f"  per-100 denominator held at the primary N_Y = {sec['N_Y_per100']}")
+        out.append(f"  per-100 denominator held at its value on the full panel, N_Y = {sec['N_Y_per100']}")
     out.append("  The label-free design, the regime and the selections are those of the full panel.")
     out.append(f"  usable labels among agreeing tasks: unstable n1Y = {sec['n1_Y']} of {lf['n1']}, "
                f"stable n0Y = {sec['n0_Y']} of {lf['n0']}")
@@ -2061,20 +2069,21 @@ def _secondary_lines(res: dict) -> List[str]:
     pl = sec["plan_literal"]
     ex = pl["existence"]
     out.append("")
-    out.append(f"  100 Delta / N_Y, the primary realized gain rescaled by N/N_Y = {_f(pl['rescale'])}")
-    out.append(f"  Existence: same test as the primary, p = {ex['p']:.6g}; "
+    out.append(f"  100 Delta / N_Y, the realized gain of the per-100-panel-task result rescaled by "
+               f"N/N_Y = {_f(pl['rescale'])}")
+    out.append(f"  Existence: same test as the per-100-panel-task result, p = {ex['p']:.6g}; "
                f"{'REJECT H0' if ex['reject'] else 'do not reject H0'}")
     if sec["regime"] == "COVERAGE":
         out.append(f"  100 Delta / N_Y = {_f(pl['G_hat'])} per 100 tasks with a usable label; the "
-                   f"primary interval for G rescaled, (100 L / N_Y)(δ_L, δ_U): "
+                   f"per-100-panel-task interval for G rescaled, (100 L / N_Y)(δ_L, δ_U): "
                    f"{_g_interval_text(pl['G_L'], pl['G_U'], pl['delta_L'], pl['delta_U'])}")
     else:
         b = pl["partial"]
         out.append(f"  100 Delta / N_Y = {_f(pl['G_hat'])} per 100 tasks with a usable label; the "
-                   f"primary APPROXIMATE bootstrap interval rescaled: "
+                   f"per-100-panel-task APPROXIMATE bootstrap interval rescaled: "
                    f"[{_f(b['lower'])}, {_f(b['upper'])}] (B = {b['B']}, seed {b['seed']})")
     out.append("")
-    out.append(f"  The threshold of {lf['m']} per 100 refers to the primary result only: no threshold "
+    out.append(f"  The threshold of {lf['m']} per 100 refers to the per-100-panel-task result only: no threshold "
                f"claim is made for the secondary result.")
     return out
 
@@ -2085,8 +2094,8 @@ def _coverage_lines(res: dict) -> List[str]:
     if cov is None:
         return []
     out = ["REFERENCE LABEL COVERAGE: Unsure and missing labels",
-           "  These tasks are unknown, not correct verdicts. The primary result counts them as "
-           "not reference-contradicted, per 100 panel tasks; the secondary result is per 100 "
+           "  These tasks are unknown, not correct verdicts. The result per 100 panel tasks counts "
+           "them as not reference-contradicted; the secondary result is per 100 "
            "tasks with a usable label.",
            "  group | tasks | usable | Unsure | missing"]
     for name, g in cov["groups"].items():
@@ -2250,7 +2259,8 @@ def _population_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
     if templates is not None:
         out["template_multiplicities"] = template_multiplicities(templates)
         out["templates"] = template_sensitivity(list(lf["stratum"]), E, templates, ids,
-                                                seed=0 if seed is None else seed, method=method)
+                                                seed=0 if seed is None else seed, method=method,
+                                                path=PATH_POPULATION)
     if sub is not None:
         ref_t = None
         if reference is not None:
@@ -2324,7 +2334,7 @@ def _provenance_lines(prov: Optional[dict]) -> List[str]:
 def _repeat_lines(rf: Mapping[str, int]) -> List[str]:
     """Report lines for the agreeing trajectories with an unobserved repeat."""
     return ["Repeat observation (label-free)",
-            f"  agreeing items with both repeats INVALID (R_unobserved, R set to 0): {rf['both_repeats_invalid']}",
+            f"  agreeing items with both repeats INVALID (R set to 0): {rf['both_repeats_invalid']}",
             f"  agreeing items with one repeat INVALID and no observed flip (R = 0 from one repeat): "
             f"{rf['one_repeat_invalid_no_flip']}",
             f"  agreeing items with one repeat INVALID and an observed flip: {rf['one_repeat_invalid_flip']}"]
@@ -2369,7 +2379,7 @@ def panel_report(panel: dict, prior_exposure: Optional[str] = None) -> str:
     else:
         dens = f"denominator N = {lf['N']}"
     out.append(f"Sensitivity analyses (labeled; s = {lf['s']} and the per-100 {dens} "
-               f"are held at their primary values, s capped at n_D0)")
+               f"are held at their values on the full panel, s capped at n_D0)")
     for name, r in panel["sensitivities"]:
         out.extend(_brief(name, r))
     out.append("")
@@ -2377,11 +2387,12 @@ def panel_report(panel: dict, prior_exposure: Optional[str] = None) -> str:
     tm = panel.get("templates")
     out.append("")
     out.append("Template sensitivity (labeled)")
-    out.append(f"  The primary panel keeps one trajectory per task (N = {lf['N']}), so tasks that share "
+    out.append(f"  The default panel keeps one trajectory per task (N = {lf['N']}), so tasks that share "
                "a template stay in it and can be correlated; the one-task-per-template panel is the "
-               "labeled sensitivity analysis for that dependence. The primary test and interval "
-               "assume independent tasks; the inference that handles the retained dependence, and "
-               "its synthetic validation, are still to come and are required before the freeze.")
+               "labeled sensitivity analysis for that dependence. The test and interval of the "
+               "per-100-panel-task result assume independent tasks; the inference that handles the "
+               "retained dependence, and its synthetic validation, are still to come and are "
+               "required before the freeze.")
     mult = panel.get("template_multiplicities")
     if mult is not None:
         out.append(f"  Panel tasks: {mult['n_tasks']} in {mult['n_templates']} templates; largest template "
@@ -2421,6 +2432,17 @@ REGIME_NOTES = {
     "COVERAGE": "the slice reaches every unstable agreeing task",
     "PARTIAL": "the slice reaches only part of the unstable agreeing tasks",
 }
+CASES_PER_GROUP = 2
+CASE_GROUPS = ("G1", "U2", "U1", "S")   # an invalid first verdict has no verdict to catch
+# The rule the report prints with its cases, word for word, with the seed and counts filled in.
+CASE_RULE_TEXT = ("Rule, blind to E and the released labels: for G1, U2, U1 and S in "
+                  "turn, sort the tasks by {sort_key}, shuffle them with one default_rng from "
+                  "SeedSequence({seed}, spawn_key=(6,)) and take the first {per_group}; a group with "
+                  "fewer gives all of its tasks. A task with an invalid first verdict has no verdict to "
+                  "catch and is left out.")
+CASE_READING_TEXT = ("E is 1 when the released reference contradicts the first verdict. Each probability "
+                     "is that policy's exact chance of reviewing the task, over its own random choices. "
+                     "A contradicted task is caught with that probability and missed with the rest.")
 
 
 def _rate(num: int, den: int) -> dict:
@@ -2453,6 +2475,7 @@ def _judge_metrics(pairs: Sequence[Tuple[str, str]], n_usable: int) -> dict:
             "balanced_accuracy": {"value": balanced, "failure_references": tp + fn, "success_references": tn + fp},
             "failure_precision": _rate(tp, tp + fp),
             "failure_recall": recall,
+            "contradiction": _rate(fp + fn, n),
             "valid_prediction_coverage": _rate(n, n_usable),
             "prevalence": _rate(tp + fn, n)}
 
@@ -2465,7 +2488,9 @@ def validity_metrics(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[st
     denominator. Each judge is measured on its own valid set, the usable tasks where
     its slot is a verdict, and on the shared subset, where both A1 and B1 are verdicts.
     Valid-prediction coverage is the size of the set over the tasks with a usable
-    reference, n_usable; prevalence is the share of failure references within the set.
+    reference, n_usable; prevalence is the share of failure references within the set;
+    the contradiction rate is the share of the set where the judge differs from its
+    reference.
     """
     usable = []
     for sl, y in zip(slots, Y):
@@ -2478,6 +2503,30 @@ def validity_metrics(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[st
     return {"n_usable": n, "n_shared": len(shared),
             "own": {k: _judge_metrics(pairs(usable, k), n) for k in ("A1", "B1")},
             "shared": {k: _judge_metrics(pairs(shared, k), n) for k in ("A1", "B1")}}
+
+
+def select_cases(labels: Sequence[str], ids: Optional[Sequence[str]] = None, seed: int = 0) -> List[int]:
+    """The tasks the report explains, chosen label-free by the recorded rule.
+
+    Within each of the groups G1, U2, U1 and S, tasks are ordered by the sort key (ids,
+    else stored order, which the real run must not use), shuffled with one generator
+    from SeedSequence(seed, spawn_key=(6,)), independent of the other streams, and the
+    first CASES_PER_GROUP are taken. E and the released labels are not inputs, so the
+    choice can be fixed before the join and a drawn case can turn out not contradicted.
+    """
+    labels = list(labels)
+    if ids is None:
+        keys = list(range(len(labels)))
+    else:
+        keys = list(ids)
+        if len(keys) != len(labels) or len(set(keys)) != len(keys):
+            raise ValueError("ids must be unique and one per trajectory")
+    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(6,)))
+    chosen: List[int] = []
+    for group in CASE_GROUPS:
+        members = _sorted_by_key([i for i, l in enumerate(labels) if l == group], keys)
+        chosen += [int(i) for i in rng.permutation(members)[:CASES_PER_GROUP]]
+    return chosen
 
 
 def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
@@ -2520,7 +2569,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                    reference: Optional[Sequence[str]] = None,
                    benchmarks: Optional[Sequence[str]] = None,
                    costs: Optional[Mapping[str, object]] = None,
-                   provenance: Optional[dict] = None) -> dict:
+                   provenance: Optional[dict] = None,
+                   ids: Optional[Sequence[str]] = None, case_seed: int = 0) -> dict:
     """The primary result: a descriptive audit of the frozen panel [labels].
 
     Give the released primary labels Y, or E with its reference statuses as
@@ -2528,7 +2578,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     cannot give B1's reference where A1 is invalid; with E they are not assessed.
     Without statuses every label is treated as usable, and the secondary result and
     the label coverage are not assessed, as in analyze(). costs comes from the
-    spending ledger (inference_costs) and provenance from resolve_panel.
+    spending ledger (inference_costs) and provenance from resolve_panel. ids names
+    the tasks, and it and case_seed fix the label-free choice of cases (select_cases).
 
     The conclusions apply to these tasks and these realized judge calls. Every number
     is computed exactly in the regime at hand, degenerate ones included: the expected
@@ -2538,7 +2589,10 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     is the same gain per 100 tasks with a usable label. A rate with an empty
     denominator is None, not defined and never zero. The observed gain over
     disagreement-first review is set against the practical reference of 2 per 100
-    panel tasks only as observed at or above it, or below it.
+    panel tasks only as observed at or above it, or below it. contradiction gives how
+    often each judge contradicts the references on its own valid tasks with a usable
+    reference; B1's is None without Y. review_probability holds each task's exact
+    probability of review under each policy, and cases the tasks of the recorded rule.
     """
     if (E is None) == (Y is None):
         raise ValueError("give either E or the released labels Y, and not both")
@@ -2580,6 +2634,14 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     statuses_given = Y is not None or reference is not None
     cov = reference_coverage(labels, ref, design, benchmarks=benchmarks) if statuses_given else None
     N_Y = cov["groups"]["all"]["usable"] if statuses_given else None
+    validity = validity_metrics(slots, Y) if Y is not None else None
+    n_a1_usable = sum(1 for l, r in zip(labels, ref) if l != "I" and r == USABLE)
+    probs = selection_probabilities(design, labels)
+    cases = [{"task": i if ids is None else ids[i], "group": labels[i],
+              "slots": {k: canonical_outcome(slots[i][k]) for k in SLOT_NAMES.values()},
+              "E": E[i], "reference": ref[i] if statuses_given else None,
+              "review_probability": {pol: probs[pol][i] for pol in POLICY_ORDER}}
+             for i in select_cases(labels, ids=ids, seed=case_seed)]
     return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
@@ -2598,7 +2660,12 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
             "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y),
                                                    "over_random": _per_100(over_rand, N_Y)},
             "practical_reference": {"per_100": MATERIAL_M, "status": status},
-            "validity": validity_metrics(slots, Y) if Y is not None else None,
+            "contradiction": {"A1": _rate(M, n_a1_usable),
+                              "B1": validity["own"]["B1"]["contradiction"] if validity is not None else None},
+            "review_probability": {pol: probs[pol] for pol in POLICY_ORDER},
+            "cases": {"seed": case_seed, "per_group": CASES_PER_GROUP,
+                      "sort_key": "ids" if ids is not None else "stored order", "tasks": cases},
+            "validity": validity,
             "costs": inference_costs(costs, over_dis) if costs is not None else None}
 
 
@@ -2619,6 +2686,7 @@ def _metric_lines(name: str, mt: dict, n_set: int) -> List[str]:
             f"{ba['failure_references']} failure references and {ba['success_references']} success references",
             f"    failure precision: {_rate_text(mt['failure_precision'], 'failure predictions')}",
             f"    failure recall: {_rate_text(mt['failure_recall'], 'failure references')}",
+            f"    contradiction rate: {_rate_text(mt['contradiction'], 'tasks in this set')}",
             f"    valid-prediction coverage: "
             f"{_rate_text(mt['valid_prediction_coverage'], 'tasks with a usable reference')}",
             f"    prevalence of failure references: {_rate_text(mt['prevalence'], 'tasks in this set')}"]
@@ -2637,6 +2705,47 @@ def _validity_lines(v: Optional[dict]) -> List[str]:
         out += _metric_lines(f"{k} on its own valid set", m, m["valid_prediction_coverage"]["numerator"])
     for k in ("A1", "B1"):
         out += _metric_lines(f"{k} on the shared subset", v["shared"][k], v["n_shared"])
+    return out
+
+
+def _contradiction_lines(c: Mapping[str, Optional[dict]], statuses_given: bool) -> List[str]:
+    """Report lines of how often each judge contradicts the released references."""
+    where = "a usable reference" if statuses_given else "a reference, every label treated as usable"
+    out = ["JUDGE CONTRADICTION: how often each judge contradicts the released references, on its own valid tasks",
+           f"  A1: {_rate_text(c['A1'], f'tasks with a valid A1 and {where}')}"]
+    if c["B1"] is None:
+        out.append("  B1: not assessed: the released labels were not supplied, and E alone cannot give "
+                   "B1's reference where A1 is invalid.")
+    else:
+        out.append(f"  B1: {_rate_text(c['B1'], f'tasks with a valid B1 and {where}')}")
+    return out
+
+
+def _case_reading(case: Mapping[str, object]) -> str:
+    """What one case shows: contradicted, nothing to catch, or unknown."""
+    if case["E"] == 1:
+        return "contradicted: caught with these probabilities, missed with the rest"
+    if case["reference"] in (UNSURE, MISSING):
+        return "unknown, not correct"
+    return "not contradicted: nothing to catch"
+
+
+def _case_lines(c: dict) -> List[str]:
+    """Report lines of the cases chosen by the recorded rule."""
+    out = ["CASES: what each policy caught and missed",
+           "  " + CASE_RULE_TEXT.format(sort_key=c["sort_key"], seed=c["seed"], per_group=c["per_group"]),
+           "  " + CASE_READING_TEXT]
+    if not c["tasks"]:
+        out.append("  None: no task has a valid first verdict.")
+        return out
+    name = "task" if c["sort_key"] == "ids" else "position from 0"
+    out.append(f"  {name} | group | A1, A2, A3, B1 | reference | E | "
+               + " | ".join(POLICY_NAMES[p] for p in POLICY_ORDER) + " | reading")
+    for t in c["tasks"]:
+        outcomes = ", ".join(t["slots"][k] for k in SLOT_NAMES.values())
+        reference = "not assessed" if t["reference"] is None else t["reference"]
+        probs = " | ".join(_exact_text(t["review_probability"][p]) for p in POLICY_ORDER)
+        out.append(f"  {t['task']} | {t['group']} | {outcomes} | {reference} | {t['E']} | {probs} | {_case_reading(t)}")
     return out
 
 
@@ -2679,8 +2788,9 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     out += ["", "Label-free design",
             f"  N = {d['N']}, invalid A1 n_inv = {d['n_inv']}, valid N_V = {d['N_V']}",
             f"  disagreeing n_D1 = {d['n_D1']}, agreeing n_D0 = {d['n_D0']}",
-            f"  agreeing groups: U2 = {d['n_U2']}, U1 = {d['n_U1']}, S = {d['n_S']}; "
-            f"R_unobserved = {d['R_unobserved']}",
+            f"  agreeing groups: U2 = {d['n_U2']}, U1 = {d['n_U1']}, S = {d['n_S']}",
+            f"  valid first verdicts with both repeats invalid, disagreeing tasks included "
+            f"(R_unobserved): {d['R_unobserved']}",
             f"  slice s = {d['s']}; review count K = {d['K']}, {equal} ("
             + ", ".join(f"{POLICY_NAMES[p]} {d['K_by_policy'][p]}" for p in POLICY_ORDER) + ")",
             f"  regime: {d['regime']}; {REGIME_NOTES[d['regime']]}",
@@ -2699,6 +2809,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     else:
         out += ["REFERENCE LABEL COVERAGE: Unsure and missing labels", "  " + REFERENCE_NOT_SUPPLIED_TEXT]
     mc = d["m_counts"]
+    out += [""] + _contradiction_lines(d["contradiction"], d["reference_supplied"])
     out += ["", "REFERENCE-CONTRADICTED FIRST VERDICTS",
             f"  M = {d['M']}: disagreement m_G1 = {mc['G1']}; unstable agreeing m1 = {d['m1']} "
             f"(m_U2 = {mc['U2']}, m_U1 = {mc['U1']}); stable agreeing m0 = {d['m0']}",
@@ -2726,6 +2837,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"{_exact_text(g['over_disagreement']['per_100_panel'])}; "
             f"{pr['status'] if pr['status'] is not None else 'no comparison is defined'}.",
             ""]
+    out += _case_lines(d["cases"])
+    out.append("")
     out += _validity_lines(d["validity"])
     out.append("")
     out += _cost_lines(d["costs"])

@@ -17,16 +17,18 @@ A released primary label of Successful or Unsuccessful, in any letter case, is u
 
 ## The primary path
 
-`analyze_panel` runs this path unless it is given `path="population_inference"`. It calls `describe_panel`, which takes the resolved slots and either the released labels `Y` or `E` with its reference statuses, and, when given, the benchmark names, the costs from the spending ledger and the attempt log's provenance. `describe_report`, or `panel_report` on its result, prints the report. The report refuses to run without a prior exposure statement passed as an argument, prints the fixed scope sentence and names the panel as a retrospective evaluation panel with documented prior exposure.
+`analyze_panel` runs this path unless it is given `path="population_inference"`. It calls `describe_panel`, which takes the resolved slots and either the released labels `Y` or `E` with its reference statuses, and, when given, the benchmark names, the costs from the spending ledger, the attempt log's provenance, the task ids and the seed of the cases. `describe_report`, or `panel_report` on its result, prints the report. The report refuses to run without a prior exposure statement passed as an argument, prints the fixed scope sentence and names the panel as a retrospective evaluation panel with documented prior exposure.
 
 In every regime, degenerate ones included, it gives:
 
-- N, n_inv, n_D1, n_D0, s, K and that K is equal across the three policies; U2, U1, S and R_unobserved counts; invalid outputs by slot and category.
+- N, n_inv, n_D1, n_D0, s, K and that K is equal across the three policies; U2, U1 and S counts; R_unobserved, the valid first verdicts with both repeats invalid, disagreeing tasks included; invalid outputs by slot and category.
 - Usable, Unsure and missing counts overall, by review group and by benchmark.
+- How often each judge contradicts the released references: the count and the rate over its own valid tasks with a usable reference. A1's needs only `E`; B1's needs the released labels and is otherwise reported as not assessed.
 - M, m1 and m0; each policy's exact expected capture over its own random choices, as a fraction and a decimal, and the share of M it captures.
 - The gain of instability-first review over disagreement-first and over random review, in verdicts and per 100 panel tasks. The secondary result is the same gain per 100 tasks with a usable label, N_Y. Nothing else is computed on usable labels only.
 - The observed gain against the practical reference of 2 per 100 panel tasks, stated only as observed at or above the reference, or below it.
-- A1 and B1 validity against usable references with failure as the positive class: confusion matrix, balanced accuracy, failure precision, failure recall, valid-prediction coverage and prevalence, each with its denominator, on each judge's own valid set and on the shared subset where both are valid. These need the released labels, since `E` alone cannot give B1's reference where A1 is invalid.
+- A few cases chosen by a recorded rule, which the report prints. `select_cases` takes two tasks from each of G1, U2, U1 and S in a seeded order fixed by the task ids, blind to `E` and the released labels, so a drawn case can turn out not contradicted. A task with an invalid first verdict has no verdict to catch and is left out. Each row gives the task, its slot outcomes, its reference status, E and each policy's exact review probability; a contradicted task is caught with that probability and missed with the rest. `describe_panel` also returns every task's review probabilities as `review_probability`.
+- A1 and B1 validity against usable references with failure as the positive class: confusion matrix, balanced accuracy, failure precision, failure recall, contradiction rate, valid-prediction coverage and prevalence, each with its denominator, on each judge's own valid set and on the shared subset where both are valid. These need the released labels, since `E` alone cannot give B1's reference where A1 is invalid.
 - Actual inference costs: total, by slot, the extra cost of A2 and A3, and that cost per extra expected verdict captured when the gain is positive.
 
 A rate with an empty denominator is reported as not defined, never as zero. The report carries no p-value, interval, significance wording, size class, fragility count or bootstrap.
@@ -35,12 +37,12 @@ The `costs` argument has `total` and `by_slot`, with one amount for each of A1, 
 
 ## Population inference, outside the primary result
 
-`analyze`, `analyze_with_sensitivities` and `analyze_panel` run this path only with `path="population_inference"`, and its report opens with a line saying it is outside the primary result and separately scoped. "Primary" in this section is the plan's result per 100 panel tasks.
+`analyze`, `analyze_with_sensitivities`, `analyze_panel` and `template_sensitivity` run this path only with `path="population_inference"`, and its report opens with a line saying it is outside the primary result and separately scoped. That line is the report's only use of "primary", which it keeps for the descriptive audit. It calls the plan's own result per 100 panel tasks the per-100-panel-task result.
 
 - The existence question, by Fisher's exact test or an exact permutation test, and the size question, by the exact score interval or an approximate bootstrap, depending on the regime. The fragility count is the fewest flips of usable reference labels among agreeing tasks that reverse the existence decision; it is reported as not defined when no set of such flips reverses it.
 - The labeled sensitivity analyses, the template checks and a text report.
-- **Primary, per 100 panel tasks N.** A task without a usable label counts as not reference-contradicted, so the threshold of 2 per 100 keeps its meaning. In the coverage regime G_hat = (100/N) L (m1/n1 - m0/n0), with Fisher's test on m1 of n1 and m0 of n0.
-- **Secondary, per 100 tasks with a usable label N_Y.** The rescaled gain, 100 Delta / N_Y: the primary gain times N/N_Y, with the primary's test and its interval rescaled the same way. The threshold of 2 per 100 refers to the primary result only, so the secondary result makes no threshold claim.
+- **Per 100 panel tasks N.** A task without a usable label counts as not reference-contradicted, so the threshold of 2 per 100 keeps its meaning. In the coverage regime G_hat = (100/N) L (m1/n1 - m0/n0), with Fisher's test on m1 of n1 and m0 of n0.
+- **Secondary, per 100 tasks with a usable label N_Y.** The rescaled gain, 100 Delta / N_Y: the gain per 100 panel tasks times N/N_Y, with that result's test and its interval rescaled the same way. The threshold of 2 per 100 refers to the per-100-panel-task result only, so the secondary result makes no threshold claim.
 
 When reference statuses are not supplied, every label is treated as usable. The report then says that Unsure and missing labels were not assessed, and prints no secondary result and no coverage table. The docstrings of `analyze` and `secondary_analysis` give every formula.
 
@@ -55,7 +57,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes sixty-six deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 119 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 
