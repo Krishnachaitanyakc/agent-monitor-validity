@@ -178,9 +178,9 @@ class TestCharge(unittest.TestCase):
         kind, cost, _, _ = S.charge("anthropic", A, 200, a_raw(inp=60000, out=32000, stop="max_tokens"))
         self.assertEqual((kind, cost), (S.SETTLE, Decimal("0.44")))
 
-    def test_errors_settle_at_zero_and_unknown_usage_holds(self):
+    def test_anthropic_errors_settle_at_zero_and_unknown_usage_holds(self):
         self.assertEqual(S.charge("anthropic", A, 400, b'{"type":"error"}')[:2], (S.SETTLE, Decimal(0)))
-        self.assertEqual(S.charge("openai", B, 529, b"")[:2], (S.SETTLE, Decimal(0)))
+        self.assertEqual(S.charge("anthropic", A, 529, b"")[:2], (S.SETTLE, Decimal(0)))
         self.assertEqual(S.charge("anthropic", A, None, b"")[0], S.HOLD)
         raw = a_raw(write=60000)
         self.assertEqual(S.charge("anthropic", A, 200, raw[:len(raw) // 2])[0], S.HOLD)
@@ -188,8 +188,7 @@ class TestCharge(unittest.TestCase):
         self.assertEqual(S.charge("openai", B, 200, no_usage)[0], S.HOLD)
         no_split = sse(anthropic_events(answer(), usage={"cache_creation_input_tokens": 500, "cache_creation": {}}))
         self.assertEqual(S.charge("anthropic", A, 200, no_split)[0], S.HOLD)
-        self.assertIn("Anthropic does not bill failed requests; OpenAI's behavior is unverified",
-                      S.charge("openai", B, 400, b"")[3])
+        self.assertIn("Anthropic does not bill failed requests", S.charge("anthropic", A, 400, b"")[3])
 
     def test_an_anthropic_stream_without_final_usage_holds(self):
         kind, cost, _, reason = S.charge("anthropic", A, 200, a_raw(inp=60000, out=3000, final_usage=False))
@@ -634,7 +633,7 @@ class TestMetered(MeteredCase):
         self.assertEqual(led.reservations, {})
 
 
-class TestReconcile(LedgerCase):
+class ReconcileCase(LedgerCase):
     def settled(self, led, provider, model, raw):
         rid = led.reserve(fields(provider, model), Decimal("1"))
         led.close_reservation(rid, ({"http_status": 200}, raw))
@@ -655,6 +654,8 @@ class TestReconcile(LedgerCase):
                 "period_end": end or S._now(lambda: self.t[0]),
                 "scope": scope or ("wrkspc_study" if provider == "anthropic" else "proj_study")}
 
+
+class TestReconcile(ReconcileCase):
     def test_csv_and_json_exports_read_the_same(self):
         rows = [self.row("anthropic", A, write=60000, out=3000), self.row("openai", B, inp=60000, out=3000, cost="0.2")]
         from_csv, sha_csv = self.export("u.csv", rows)
@@ -793,23 +794,23 @@ class TestReconcile(LedgerCase):
 
     def test_a_provider_whose_calls_all_settled_at_zero_still_needs_export_rows(self):
         led = self.ledger()
-        self.settled(led, "anthropic", A, a_raw(inp=100000, out=0))
-        for _ in range(10):                                          # every B call an HTTP 400, settled at $0
-            led.close_reservation(led.reserve(fields("openai", B), Decimal("1")), ({"http_status": 400}, b"{}"))
+        self.settled(led, "openai", B, b_raw(100000, 0))
+        for _ in range(10):                                          # every A call an HTTP 400, settled at $0
+            led.close_reservation(led.reserve(fields(), Decimal("1")), ({"http_status": 400}, b"{}"))
         self.assertEqual(led.totals()["committed"], Decimal("0.2"))
-        rows, sha = self.export("a.csv", [self.row("anthropic", A, inp=100000)])
-        with self.assertRaisesRegex(ValueError, r"no rows for \['openai'\]"):
+        rows, sha = self.export("a.csv", [self.row("openai", B, inp=100000)])
+        with self.assertRaisesRegex(ValueError, r"no rows for \['anthropic'\]"):
             led.reconcile(rows, sha)
-        late = self.row("openai", B, end=led.created_at)               # zero tokens, but ends too early
-        rows, sha = self.export("b.csv", [self.row("anthropic", A, inp=100000), late])
-        with self.assertRaisesRegex(ValueError, "before the ledger's last openai call"):
+        late = self.row("anthropic", A, end=led.created_at)            # zero tokens, but ends too early
+        rows, sha = self.export("b.csv", [self.row("openai", B, inp=100000), late])
+        with self.assertRaisesRegex(ValueError, "before the ledger's last anthropic call"):
             led.reconcile(rows, sha)
-        rows, sha = self.export("c.csv", [self.row("anthropic", A, inp=100000), self.row("openai", B)])
+        rows, sha = self.export("c.csv", [self.row("openai", B, inp=100000), self.row("anthropic", A)])
         entry = led.reconcile(rows, sha)
         self.assertTrue(entry["ok"])
         self.assertEqual(sorted(entry["coverage"]), ["anthropic", "openai"])
-        rows, sha = self.export("d.csv", [self.row("anthropic", A, inp=100000), self.row("openai", B, inp=1000)])
-        self.assertFalse(led.reconcile(rows, sha)["ok"])              # OpenAI billed what the ledger holds at $0
+        rows, sha = self.export("d.csv", [self.row("openai", B, inp=100000), self.row("anthropic", A, inp=1000)])
+        self.assertFalse(led.reconcile(rows, sha)["ok"])              # Anthropic billed what the ledger holds at $0
 
     def test_an_export_below_the_usage_the_responses_reported_is_refused(self):
         led = self.ledger()
@@ -889,6 +890,282 @@ class TestReconcile(LedgerCase):
         led.close()
         reopened = self.ledger()
         self.assertEqual((reopened.totals()["committed"], reopened.blocking_reconciliation()), (Decimal("10"), None))
+
+
+class TestHeldErrors(ReconcileCase):
+    """An OpenAI error response stays held until a passing reconciliation establishes its cost."""
+
+    def error(self, led, amount="0.5", status=400):
+        rid = led.reserve(fields("openai", B), Decimal(amount))
+        led.close_reservation(rid, ({"http_status": status}, b"{}"))
+        return rid
+
+    def reported(self, led):
+        self.settled(led, "openai", B, b_raw(100000, 0))                     # $0.20
+
+    def reconcile(self, led, inp, name="u.csv", **kw):
+        rows, sha = self.export(name, [self.row("openai", B, inp=inp, **kw)])
+        return led.reconcile(rows, sha)
+
+    @staticmethod
+    def released(led):
+        return [(e["id"], Decimal(e["cost_usd"])) for e in led.entries if e["type"] == "release"]
+
+    def test_an_openai_error_is_held_and_an_anthropic_error_settles_at_zero(self):
+        kind, cost, tokens, reason = S.charge("openai", B, 400, b"{}")
+        self.assertEqual((kind, cost, tokens), (S.HOLD, None, None))
+        self.assertIn("held until a reconciliation establishes its cost", reason)
+        for status in (401, 429, 500, 529):
+            self.assertEqual(S.charge("openai", B, status, b"")[:2], (S.HOLD, None), status)
+        self.assertEqual(S.charge("openai", B, 200, b_raw(60000, 3000))[:2], (S.SETTLE, Decimal("0.15")))
+        led = self.ledger()
+        self.error(led)
+        self.assertEqual((led.entries[-1]["type"], led.entries[-1]["until_reconciled"]), ("hold", True))
+        self.assertEqual(led.totals(), {"settled": 0, "held": Decimal("0.5"), "open": 0, "committed": Decimal("0.5")})
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), ({"http_status": 400}, b"{}"))
+        self.assertEqual((led.entries[-1]["type"], led.entries[-1]["cost_usd"]), ("settle", "0"))
+        self.assertEqual(led.totals()["committed"], Decimal("0.5"))
+
+    def test_a_passing_reconciliation_releases_at_zero_when_nothing_is_billed_beyond_reported_usage(self):
+        for inp in (100000, 101000):                                         # exactly, and at the 1% tolerance
+            led = S.Ledger(self.tmp / f"{inp}.jsonl", "pilot", clock=self.tick)
+            self.addCleanup(led.close)
+            self.reported(led)
+            rid = self.error(led)
+            entry = self.reconcile(led, inp)
+            self.assertTrue(entry["ok"])
+            release = led.entries[-1]
+            self.assertEqual((release["type"], release["id"], release["cost_usd"], release["reconcile_seq"]),
+                             ("release", rid, "0", entry["seq"]))
+            self.assertEqual(led.reservations[rid]["state"], "settled")
+            self.assertEqual(led.totals(), {"settled": Decimal("0.2"), "held": 0, "open": 0,
+                                            "committed": Decimal("0.2")})
+
+    def test_a_provider_whose_calls_all_failed_is_released_at_zero_by_zero_token_rows(self):
+        led = self.ledger()
+        rid = self.error(led)
+        rows, sha = self.export("a.csv", [self.row("anthropic", A)])
+        with self.assertRaisesRegex(ValueError, r"no rows for \['openai'\]"):
+            led.reconcile(rows, sha)
+        self.assertTrue(self.reconcile(led, 0)["ok"])
+        self.assertEqual(self.released(led), [(rid, Decimal(0))])
+        self.assertEqual(led.totals()["committed"], 0)
+
+    def test_usage_just_past_the_tolerance_is_established_in_full(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led)
+        self.assertTrue(self.reconcile(led, 101001)["ok"])                   # $0.202002 on $0.20 reported
+        self.assertEqual(self.released(led), [(rid, Decimal("0.002002"))])
+        self.assertEqual(led.totals()["committed"], Decimal("0.202002"))
+
+    def test_usage_beyond_reported_is_given_to_the_held_calls_in_order_up_to_each_reservation(self):
+        led = self.ledger()
+        self.reported(led)
+        first, second, third = self.error(led), self.error(led), self.error(led)
+        for found in (None, ({"http_status": None}, b"")):                   # held for good, whatever the export
+            led.close_reservation(led.reserve(fields("openai", B), Decimal("0.5")), found)
+        self.assertTrue(self.reconcile(led, 400000)["ok"])                   # $0.80: $0.60 beyond reported
+        self.assertEqual(self.released(led), [(first, Decimal("0.5")), (second, Decimal("0.1")), (third, Decimal(0))])
+        self.assertEqual(led.totals(), {"settled": Decimal("0.8"), "held": Decimal("1"), "open": 0,
+                                        "committed": Decimal("1.8")})
+
+    def test_only_a_non_2xx_openai_response_can_be_released(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led, status=503)
+        raw = b_raw(60000, 3000)
+        rebuilt = {"http_status": None, "recovered": {"from": "1.raw"}, "error": {"type": "invalid_request_error"}}
+        for found in (None, ({"http_status": None}, b""), ({"http_status": 200}, raw[:len(raw) // 2]),
+                      (rebuilt, b'{"error": {"type": "invalid_request_error"}}')):
+            led.close_reservation(led.reserve(fields("openai", B), Decimal("0.5")), found)
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), None)   # an Anthropic hold
+        rows, sha = self.export("u.csv", [self.row("openai", B, inp=100000), self.row("anthropic", A)])
+        self.assertTrue(led.reconcile(rows, sha)["ok"])
+        self.assertEqual(self.released(led), [(rid, Decimal(0))])
+        self.assertEqual(led.totals()["held"], Decimal("2.5"))
+
+    def test_earlier_releases_count_as_known_usage(self):
+        led = self.ledger()
+        self.reported(led)
+        first = self.error(led)
+        self.assertTrue(self.reconcile(led, 150000)["ok"])                   # $0.30: $0.10 beyond reported
+        self.assertEqual(self.released(led), [(first, Decimal("0.1"))])
+        second = self.error(led)
+        self.assertTrue(self.reconcile(led, 150000, name="v.csv")["ok"])     # nothing new was billed
+        self.assertEqual(self.released(led)[1:], [(second, Decimal(0))])
+        self.assertEqual(led.totals()["committed"], Decimal("0.3"))
+
+    def test_an_earlier_adjustment_counts_as_known_usage(self):
+        led = self.ledger()
+        self.reported(led)
+        self.assertFalse(self.reconcile(led, 150000)["ok"])                  # $0.30 on $0.20
+        led.record_correction("Checked the export: the usage is the study's.")
+        rid = self.error(led)
+        self.assertTrue(self.reconcile(led, 150000, name="v.csv")["ok"])     # nothing new was billed
+        self.assertEqual(self.released(led), [(rid, Decimal(0))])
+        self.assertEqual(led.totals()["committed"], Decimal("0.3"))
+
+    def test_usage_above_the_ledger_leaves_the_hold_to_the_correction(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led)                                                # the ledger stands at $0.70
+        self.assertFalse(self.reconcile(led, 500000)["ok"])                  # $1.00
+        self.assertEqual((self.released(led), led.reservations[rid]["state"]), ([], "held"))
+        with self.assertRaises(S.SpendHalt) as cm:
+            led.reserve(fields("openai", B), Decimal("0.01"))
+        self.assertEqual(cm.exception.kind, "reconciliation")
+        self.assertTrue(self.reconcile(led, 100000, name="v.csv")["ok"])     # a later pass is not a correction
+        self.assertEqual((self.released(led), led.reservations[rid]["state"]), ([], "held"))
+        led.record_correction("Checked the export: the usage is the study's.")
+        self.assertEqual((led.reservations[rid]["state"], led.totals()["committed"]), ("held", Decimal("1")))
+        self.assertTrue(self.reconcile(led, 500000, name="w.csv")["ok"])     # known: $0.20 and a $0.30 adjustment
+        self.assertEqual(self.released(led), [(rid, Decimal("0.5"))])
+        self.assertEqual(led.totals(), {"settled": Decimal("1"), "held": 0, "open": 0, "committed": Decimal("1")})
+
+    def test_a_refused_reconciliation_releases_nothing(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led)
+        made, held_at = len(led.entries), led.entries[-1]["at"]
+        cases = [([self.row("anthropic", A)], {}, "no rows"),
+                 ([self.row("openai", B, inp=100000, end=led.entries[2]["at"])], {}, "before the ledger's last openai"),
+                 ([self.row("openai", B, inp=100000, start=held_at)], {}, "after the ledger was created"),
+                 ([self.row("openai", B, inp=98999)], {}, "below"),
+                 ([self.row("openai", B, inp=100000)], {"scopes": {"openai": "proj_other"}}, "not the study's")]
+        for rows, kw, message in cases:
+            rows, sha = self.export("bad.csv", rows)
+            with self.assertRaisesRegex(ValueError, message):
+                led.reconcile(rows, sha, **kw)
+            self.assertEqual((len(led.entries), led.reservations[rid]["state"]), (made, "held"), message)
+        self.assertEqual(led.totals()["held"], Decimal("0.5"))
+
+    def test_a_hold_and_its_release_survive_a_restart(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led)
+        chain = list(led.chain)
+        led.close()
+        led = self.ledger()                                                  # between the hold and the reconciliation
+        self.assertEqual(led.chain, chain)
+        self.assertEqual((led.reservations[rid]["state"], led.reservations[rid]["until_reconciled"]), ("held", True))
+        self.assertEqual((led.totals()["held"], led.recover()), (Decimal("0.5"), []))
+        self.assertTrue(self.reconcile(led, 100000)["ok"])
+        chain, totals = list(led.chain), led.totals()
+        led.close()
+        led = self.ledger()                                                  # after the release
+        self.assertEqual((led.chain, led.totals()), (chain, totals))
+        self.assertEqual((led.reservations[rid]["state"], led.reservations[rid]["cost"]), ("settled", Decimal(0)))
+        self.assertEqual(led.last_closed_at("openai"), led.entries[4]["at"])
+        self.assertTrue(self.reconcile(led, 100000, name="v.csv")["ok"])
+        self.assertEqual(self.released(led), [(rid, Decimal(0))])            # released once
+
+    def test_restart_holds_a_recorded_error_until_it_is_reconciled(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = led.reserve(fields("openai", B), Decimal("0.5"))
+        led.close()                                                          # the process stops mid-call
+        led = self.ledger()
+        closed = led.recover(find=lambda entry: ({"http_status": 500}, b""))
+        self.assertEqual([(e["type"], e["id"], e["until_reconciled"]) for e in closed], [("hold", rid, True)])
+        self.assertTrue(self.reconcile(led, 100000)["ok"])
+        self.assertEqual(self.released(led), [(rid, Decimal(0))])
+
+    def test_a_stop_before_a_release_leaves_the_hold_for_the_next_passing_reconciliation(self):
+        led = self.ledger()
+        self.reported(led)
+        first, second = self.error(led), self.error(led)
+        real_append = led._append
+        written = []
+
+        def stop_at_the_second_release(entry):
+            if entry["type"] == "release":
+                written.append(entry)
+                if len(written) == 2:
+                    raise KeyboardInterrupt
+            return real_append(entry)
+
+        with mock.patch.object(led, "_append", stop_at_the_second_release):
+            with self.assertRaises(KeyboardInterrupt):
+                self.reconcile(led, 300000)                                  # $0.60: $0.40 beyond reported
+        led.close()
+        led = self.ledger()
+        self.assertEqual(self.released(led), [(first, Decimal("0.4"))])
+        self.assertEqual(led.totals(), {"settled": Decimal("0.6"), "held": Decimal("0.5"), "open": 0,
+                                        "committed": Decimal("1.1")})
+        self.assertTrue(self.reconcile(led, 300000, name="v.csv")["ok"])
+        self.assertEqual(self.released(led), [(first, Decimal("0.4")), (second, Decimal(0))])
+        self.assertEqual(led.totals()["committed"], Decimal("0.6"))
+
+    def test_an_unreleased_hold_blocks_spending_at_the_cap(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led, CAP - Decimal("0.2"))                          # lands exactly on the cap
+        r = S.reservation(B, 60000, 32000)
+        self.assertEqual(led.totals()["committed"], CAP)
+        with self.assertRaises(S.SpendHalt) as cm:
+            led.reserve(fields("openai", B), r)
+        self.assertEqual(cm.exception.kind, "spend_cap")
+        led.close()
+        led = self.ledger()
+        with self.assertRaises(S.SpendHalt):                                 # still counted after a restart
+            led.reserve(fields("openai", B), r)
+        rows, sha = self.export("bad.csv", [self.row("openai", B, inp=98999)])
+        with self.assertRaises(ValueError):
+            led.reconcile(rows, sha)
+        with self.assertRaises(S.SpendHalt):                                 # and after a refused export
+            led.reserve(fields("openai", B), r)
+        self.assertTrue(self.reconcile(led, 100000)["ok"])
+        self.assertEqual((self.released(led), led.totals()["committed"]), ([(rid, Decimal(0))], Decimal("0.2")))
+        led.close_reservation(led.reserve(fields("openai", B), r), ({"http_status": 200}, b_raw(60000, 3000)))
+        self.assertEqual(led.totals()["committed"], Decimal("0.35"))
+
+    def replay_refuses(self, lines):
+        self.path.write_text("\n".join(lines) + "\n")
+        with self.assertRaisesRegex(S.LedgerError, "a release for"):
+            S.Ledger(self.path, "pilot")
+
+    def test_replay_refuses_a_release_that_answers_no_passing_reconciliation(self):
+        led = self.ledger()
+        self.reported(led)
+        self.assertTrue(self.reconcile(led, 100000)["ok"])                   # a pass before the hold
+        early = led.entries[-1]["seq"]
+        plain = led.reserve(fields("openai", B), Decimal("0.5"))
+        led.close_reservation(plain, None)
+        rid = self.error(led)
+        self.assertTrue(self.reconcile(led, 100000, name="v.csv")["ok"])
+        self.assertEqual(self.released(led), [(rid, Decimal(0))])
+        led.close()
+        lines = self.path.read_text().splitlines()
+        release = json.loads(lines[-1])
+        for change in ({"reconcile_seq": early}, {"reconcile_seq": 1}, {"reconcile_seq": len(lines) + 5},
+                       {"reconcile_seq": "x"}, {"id": plain}, {"id": "r999999"}, {"cost_usd": "0.51"},
+                       {"cost_usd": "-0.01"}):
+            self.replay_refuses(lines[:-1] + [json.dumps(dict(release, **change), sort_keys=True)])
+        again = dict(release, seq=len(lines))
+        self.replay_refuses(lines + [json.dumps(again, sort_keys=True)])     # the same call twice
+        self.path.write_text("\n".join(lines) + "\n")
+        self.ledger().close()                                                # the ledger as written is accepted
+
+    def test_replay_refuses_a_release_while_a_failed_reconciliation_waits_for_a_note(self):
+        led = self.ledger()
+        self.reported(led)
+        rid = self.error(led)
+        failed = self.reconcile(led, 500000)
+        self.assertFalse(failed["ok"])
+        led.close()
+        lines = self.path.read_text().splitlines()
+        forged = {"type": "release", "id": rid, "cost_usd": "0", "reconcile_seq": failed["seq"], "at": "now",
+                  "seq": len(lines)}
+        self.replay_refuses(lines + [json.dumps(forged, sort_keys=True)])    # it names the failed one
+        self.path.write_text("\n".join(lines) + "\n")
+        led = self.ledger()
+        passed = self.reconcile(led, 100000, name="v.csv")
+        self.assertTrue(passed["ok"])
+        led.close()
+        lines = self.path.read_text().splitlines()
+        forged = dict(forged, reconcile_seq=passed["seq"], seq=len(lines))
+        self.replay_refuses(lines + [json.dumps(forged, sort_keys=True)])    # a pass does not answer the failure
 
 
 class TestDailyReconciliation(LedgerCase):

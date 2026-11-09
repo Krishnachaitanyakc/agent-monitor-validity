@@ -335,6 +335,24 @@ class TestOverReservationAndLongContext(RunnerCase):
         self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("request_error", "B1"))
         self.assertEqual(sorted(h["kind"] for h in report["gates"]["halts"]), ["over_reservation", "request_error"])
 
+    def test_a_b_error_response_stays_held_until_a_passing_reconciliation_releases_it(self):
+        led = self.ledger()
+        its = items(1, "a")
+        report, _ = self.stage("P1", its, led, events={(its[0].trace_key, "B1", 1): "http_400"})
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("request_error", "B1"))
+        b1 = next(e for e in reserves(led) if e["slot"] == "B1")
+        r = S.reservation(R.B_MODEL, 60000, 32000)
+        self.assertEqual((led.reservations[b1["id"]]["state"], led.totals()["held"]), ("held", r))
+        self.assertEqual(report["gates"]["spend"]["held"], 1)
+        committed = led.totals()["committed"]
+        entry = self.reconcile(led)                                 # the fake provider billed nothing for it
+        self.assertTrue(entry["ok"])
+        self.assertEqual((led.entries[-1]["type"], led.entries[-1]["id"], led.entries[-1]["reconcile_seq"]),
+                         ("release", b1["id"], entry["seq"]))
+        self.assertEqual((led.reservations[b1["id"]]["state"], led.totals()["held"]), ("settled", 0))
+        self.assertEqual(led.totals()["committed"], committed - r)
+        self.assertTrue(led.reconciled_after_last_call())
+
     def test_a_trajectory_whose_b_count_is_above_272000_tokens_is_refused_before_anything_is_sent(self):
         led = self.ledger()
 

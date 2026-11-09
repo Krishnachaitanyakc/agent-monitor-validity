@@ -53,8 +53,10 @@ the attempt log, which keeps the raw response:
 
 - a complete response settles at the cost of the usage it reports (input, cache write,
   cache read and output tokens), or as the price modifiers above say;
-- a non-2xx error response settles at zero: Anthropic does not bill failed requests;
-  OpenAI's behavior is unverified and covered by reconciliation;
+- a non-2xx error response from Anthropic settles at zero: Anthropic does not bill failed
+  requests;
+- a non-2xx error response from OpenAI, whose billing of failed requests is unverified,
+  holds the whole reservation until a reconciliation establishes its cost (see below);
 - no response, an error body or unrecognized bytes whose status was not kept (a rebuilt
   record), a stream that did not complete, an Anthropic stream whose ``message_delta``
   did not report final usage, usage not reported in full, or a response whose pricing
@@ -91,6 +93,18 @@ appends a note. The note first appends, for each provider, a settled adjustment 
 largest excess of the export over the ledger among the failed reconciliations since the
 last note, so after it committed spend is no longer below what the provider reported.
 Usage within the 1% tolerance passes with no adjustment.
+
+A held reservation counts as spent in these checks and at the cap until it is released.
+A reconciliation that passes, with no failed one waiting for a note, appends a
+``release`` entry for each OpenAI error response still held, which settles that
+reservation at the cost the reconciliation establishes. An export shows one total per
+provider, so that cost is what it bills above the ledger's known usage (what the
+responses reported, adjustments and earlier releases): nothing when that is within the
+1% tolerance, otherwise the whole excess, given to the held calls in order, each up to
+its reservation. A failed or refused reconciliation releases nothing, so usage above the
+ledger goes through ``record_correction`` first and the hold stays until a later one
+passes. Every other hold stays for good. A stop before a release leaves that call held
+for the next passing reconciliation.
 """
 
 import csv
@@ -315,15 +329,22 @@ def priced_usage(provider: str, model: str, summary: dict):
     return tokens, cost, mods, unknown
 
 
+def error_cost_unknown(provider: str, status) -> bool:
+    """Whether ``status`` is an error response whose cost only a reconciliation can establish."""
+    return provider == "openai" and status is not None and not 200 <= status < 300
+
+
 def charge(provider: str, model: str, status, raw: bytes, reserved=Decimal(0)):
     """(SETTLE, cost, tokens, detail) or (HOLD, None, None, reason) for one finished attempt
     whose reservation was ``reserved``."""
     if status is None:
         return HOLD, None, None, "no response arrived; the provider may still bill the request"
+    if error_cost_unknown(provider, status):
+        return HOLD, None, None, (f"HTTP {status} error response: OpenAI's billing of failed requests is unverified, "
+                                  "so it is held until a reconciliation establishes its cost")
     if not 200 <= status < 300:
         return SETTLE, Decimal(0), dict.fromkeys(TOKEN_KINDS, 0), (
-            f"HTTP {status} error response, settled at zero: Anthropic does not bill failed requests; "
-            "OpenAI's behavior is unverified and covered by reconciliation")
+            f"HTTP {status} error response, settled at zero: Anthropic does not bill failed requests")
     s = anthropic_summary(raw) if provider == "anthropic" else openai_summary(raw)
     if not s["complete"]:
         return HOLD, None, None, "the stream did not complete, so its usage is unknown"
@@ -483,7 +504,17 @@ class Ledger:
                 raise LedgerError(f"{self.path}: {t} for {e['id']}, which is not open")
             r.update(state="settled" if t == "settle" else "held",
                      cost=Decimal(e["cost_usd"]) if t == "settle" else None, closed_at=e.get("at"),
-                     response_usd=e.get("response_usd") if t == "settle" else None)
+                     response_usd=e.get("response_usd") if t == "settle" else None,
+                     until_reconciled=bool(e.get("until_reconciled")), closed_seq=e["seq"])
+        elif t == "release":
+            r, seq = self.reservations.get(e["id"]), e["reconcile_seq"]
+            answers = self.entries[seq] if isinstance(seq, int) and 0 <= seq < len(self.entries) else {}
+            if (r is None or r["state"] != "held" or not r["until_reconciled"] or self._blocking is not None
+                    or answers.get("type") != "reconcile" or not answers.get("ok") or seq < r["closed_seq"]
+                    or not 0 <= Decimal(e["cost_usd"]) <= Decimal(r["amount_usd"])):
+                raise LedgerError(f"{self.path}: a release for {e['id']} must answer a passing reconciliation of a "
+                                  "call held until one, at no more than its reservation")
+            r.update(state="settled", cost=Decimal(e["cost_usd"]))
         elif t == "reconcile":
             if not e["ok"]:
                 if self._blocking is None:        # a later passing one does not clear it; a note does
@@ -626,7 +657,8 @@ class Ledger:
             elif record["http_status"] is None and record.get("recovered") and raw:
                 detail = ("bytes that held no recognized response, whose status was not kept; held, since "
                           "the provider may still bill the request")
-            return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock)})
+            return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock),
+                                 "until_reconciled": error_cost_unknown(r["provider"], record["http_status"])})
         reported = charge(r["provider"], r["model"], record["http_status"], raw)[1]   # without the reservation floor
         return self._append({"type": "settle", "id": rid, "cost_usd": usd(cost), "tokens": tokens,
                              "response_usd": usd(reported), "basis": detail, "price_table": PRICE_TABLE_VERSION,
@@ -664,7 +696,8 @@ class Ledger:
     def reconcile(self, rows: list, export_sha256: str, scopes=None) -> dict:
         """Compare a usage export with the ledger; a failure blocks later calls. An export
         that cannot show the ledger's whole life is refused (``ValueError``; see the module
-        docstring). ``scopes`` is the run's {provider: scope}, when known."""
+        docstring), and a passing one releases the calls held until one. ``scopes`` is the
+        run's {provider: scope}, when known."""
         if self.open_reservations():
             raise LedgerError("recover the open reservation before reconciling")
         now = self.clock()
@@ -731,9 +764,33 @@ class Ledger:
             providers[p] = {"export_usd": usd(exported), "ledger_usd": usd(ledgered), "within": within,
                             "responses_usd": usd(reported.get(p, Decimal(0))),
                             "excess_share": (f"{(exported - ledgered) / ledgered:.6f}" if ledgered else None)}
-        return self._append({"type": "reconcile", "ok": ok, "export_sha256": export_sha256,
-                             "export_rows": len(rows), "coverage": coverage, "tolerance": usd(RECONCILE_TOLERANCE),
-                             "providers": providers, "at": _now(self.clock)})
+        entry = self._append({"type": "reconcile", "ok": ok, "export_sha256": export_sha256,
+                              "export_rows": len(rows), "coverage": coverage, "tolerance": usd(RECONCILE_TOLERANCE),
+                              "providers": providers, "at": _now(self.clock)})
+        if self._blocking is None:              # it passed, and no earlier failure waits for a note
+            self._release_held_errors(entry["seq"], by_provider)
+        return entry
+
+    def _release_held_errors(self, reconcile_seq: int, exported: dict) -> None:
+        """Settle each call held until a reconciliation at the cost this passing one
+        establishes (see the module docstring). The period checks above have refused an
+        export that does not cover these calls."""
+        beyond = {}
+        for r in self.reservations.values():
+            if r["state"] != "held" or not r["until_reconciled"]:
+                continue
+            p = r["provider"]
+            if p not in beyond:
+                known = self.adjusted(p) + sum(
+                    (Decimal(s["response_usd"]) if s.get("response_usd") is not None else s["cost"]
+                     for s in self.reservations.values() if s["provider"] == p and s["state"] == "settled"),
+                    Decimal(0))
+                beyond[p] = Decimal(0) if exported[p] <= known * (1 + RECONCILE_TOLERANCE) else exported[p] - known
+            cost = min(beyond[p], Decimal(r["amount_usd"]))
+            beyond[p] -= cost
+            self._append({"type": "release", "id": r["id"], "cost_usd": usd(cost), "reconcile_seq": reconcile_seq,
+                          "basis": "the usage this reconciliation shows beyond the ledger's known usage, up to the "
+                                   "call's reservation", "at": _now(self.clock)})
 
     def record_correction(self, note: str) -> dict:
         """Answer the failed reconciliations since the last note: first a settled adjustment
