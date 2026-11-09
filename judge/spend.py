@@ -55,12 +55,15 @@ the attempt log, which keeps the raw response:
   cache read and output tokens), or as the price modifiers above say;
 - a non-2xx error response from Anthropic settles at zero: Anthropic does not bill failed
   requests;
-- a non-2xx error response from OpenAI, whose billing of failed requests is unverified,
-  holds the whole reservation until a reconciliation establishes its cost (see below);
-- no response, an error body or unrecognized bytes whose status was not kept (a rebuilt
-  record), a stream that did not complete, an Anthropic stream whose ``message_delta``
-  did not report final usage, usage not reported in full, or a response whose pricing
-  raises holds the whole reservation, which then counts as spent for good;
+- an OpenAI error that the response does not settle, since OpenAI's billing of failed
+  requests is unverified, holds the whole reservation until a reconciliation establishes
+  its cost (see below): a non-2xx status, an error event in a stream, a
+  ``response.failed`` that does not report its usage in full, or an error body whose
+  status was not kept (a rebuilt record);
+- no response, an Anthropic error body or unrecognized bytes whose status was not kept (a
+  rebuilt record), any other stream that did not complete, an Anthropic stream whose
+  ``message_delta`` did not report final usage, usage not reported in full, or a response
+  whose pricing raises holds the whole reservation, which then counts as spent for good;
 - no attempt record at all also holds it.
 
 After a restart, an open reservation counts as spent until ``recover`` matches it to its
@@ -96,7 +99,7 @@ Usage within the 1% tolerance passes with no adjustment.
 
 A held reservation counts as spent in these checks and at the cap until it is released.
 A reconciliation that passes, with no failed one waiting for a note, appends a
-``release`` entry for each OpenAI error response still held, which settles that
+``release`` entry for each OpenAI error still held, which settles that
 reservation at the cost the reconciliation establishes. An export shows one total per
 provider, so that cost is what it bills above the ledger's known usage (what the
 responses reported, adjustments and earlier releases): the whole excess, with no
@@ -330,9 +333,11 @@ def priced_usage(provider: str, model: str, summary: dict):
     return tokens, cost, mods, unknown
 
 
-def error_cost_unknown(provider: str, status) -> bool:
-    """Whether ``status`` is an error response whose cost only a reconciliation can establish."""
-    return provider == "openai" and status is not None and not 200 <= status < 300
+def error_cost_unknown(provider: str, status, error=None) -> bool:
+    """Whether an attempt is an OpenAI error whose cost only a reconciliation can establish:
+    an error status, or the ``error`` its record keeps from a stream or from a body whose
+    status was not kept."""
+    return provider == "openai" and (bool(error) or (status is not None and not 200 <= status < 300))
 
 
 def charge(provider: str, model: str, status, raw: bytes, reserved=Decimal(0)):
@@ -659,7 +664,8 @@ class Ledger:
                 detail = ("bytes that held no recognized response, whose status was not kept; held, since "
                           "the provider may still bill the request")
             return self._append({"type": "hold", "id": rid, "reason": detail, "at": _now(self.clock),
-                                 "until_reconciled": error_cost_unknown(r["provider"], record["http_status"])})
+                                 "until_reconciled": error_cost_unknown(r["provider"], record["http_status"],
+                                                                        record.get("error"))})
         reported = charge(r["provider"], r["model"], record["http_status"], raw)[1]   # without the reservation floor
         return self._append({"type": "settle", "id": rid, "cost_usd": usd(cost), "tokens": tokens,
                              "response_usd": usd(reported), "basis": detail, "price_table": PRICE_TABLE_VERSION,

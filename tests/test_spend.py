@@ -24,7 +24,7 @@ from datapath.png import make_png  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import requests as R  # noqa: E402
 from judge import spend as S  # noqa: E402
-from judge.outcomes import TRANSPORT, VALID, Exchange  # noqa: E402
+from judge.outcomes import TRANSPORT, VALID, Exchange, canonical_outcome, error_body_outcome  # noqa: E402
 from judge.storage import AttemptLog  # noqa: E402
 from judge.streams import anthropic_events, openai_events, sse  # noqa: E402
 from test_dispatch import KEY, WS, NO_RESPONSE, a_err  # noqa: E402
@@ -997,20 +997,69 @@ class TestHeldErrors(ReconcileCase):
         self.assertEqual(led.totals(), {"settled": Decimal("0.8"), "held": Decimal("1"), "open": 0,
                                         "committed": Decimal("1.8")})
 
-    def test_only_a_non_2xx_openai_response_can_be_released(self):
+    def test_only_an_openai_error_can_be_released(self):
         led = self.ledger()
         self.reported(led)
         rid = self.error(led, status=503)
         raw = b_raw(60000, 3000)
-        rebuilt = {"http_status": None, "recovered": {"from": "1.raw"}, "error": {"type": "invalid_request_error"}}
-        for found in (None, ({"http_status": None}, b""), ({"http_status": 200}, raw[:len(raw) // 2]),
-                      (rebuilt, b'{"error": {"type": "invalid_request_error"}}')):
+        unrecognized = {"http_status": None, "recovered": {"from": "1.raw"}, "error": None}
+        for found in (None, ({"http_status": None, "error": None}, b""),
+                      ({"http_status": 200, "error": None}, raw[:len(raw) // 2]), (unrecognized, b"unrecognized")):
             led.close_reservation(led.reserve(fields("openai", B), Decimal("0.5")), found)
+            self.assertFalse(led.entries[-1].get("until_reconciled"), found)
         led.close_reservation(led.reserve(fields(), Decimal("0.5")), None)   # an Anthropic hold
+        started = ("message_start", {"type": "message_start", "message": {"id": "m", "model": A, "usage": {}}})
+        in_stream = sse([started, ("error", {"type": "error", "error": {"type": "overloaded_error", "message": "x"}})])
+        error = canonical_outcome("anthropic", Exchange(200, {}, in_stream, None, None))["error"]
+        led.close_reservation(led.reserve(fields(), Decimal("0.5")), ({"http_status": 200, "error": error}, in_stream))
+        self.assertEqual(led.entries[-1]["until_reconciled"], False)         # an Anthropic error in a stream
         rows, sha = self.export("u.csv", [self.row("openai", B, inp=100000), self.row("anthropic", A)])
         self.assertTrue(led.reconcile(rows, sha)["ok"])
         self.assertEqual(self.released(led), [(rid, Decimal(0))])
-        self.assertEqual(led.totals()["held"], Decimal("2.5"))
+        self.assertEqual(led.totals()["held"], Decimal("3"))
+
+    @staticmethod
+    def openai_errors():
+        """(name, attempt record, raw bytes) of each OpenAI error that no status marks as one,
+        recorded as the dispatcher and the rebuild record it."""
+        def in_a_stream(raw):
+            oc = canonical_outcome("openai", Exchange(200, {}, raw, None, None))
+            return {"http_status": 200, "error": oc["error"]}, raw
+
+        created = ("response.created", {"type": "response.created", "response": {"id": "resp_x", "model": B}})
+        error_event = ("error", {"type": "error", "code": "server_error", "message": "x"})
+        failed = openai_events(None, status="failed", error={"code": "server_error", "message": "x"})
+        failed[-1][1]["response"]["usage"] = None
+        body = json.dumps({"error": {"code": "server_error", "type": "server_error", "message": "x",
+                                     "param": None}}).encode()
+        return (("an error event", *in_a_stream(sse([created, error_event]))),
+                ("a stream that opens with one", *in_a_stream(sse([error_event]))),
+                ("a failed response with no usage", *in_a_stream(sse(failed))),
+                ("a rebuilt error body", {"http_status": None, "recovered": {"from": "1.raw"},
+                                          "error": error_body_outcome("openai", body)["error"]}, body))
+
+    def test_an_openai_error_that_no_status_marks_is_held_until_a_passing_reconciliation(self):
+        led = self.ledger()
+        self.reported(led)
+        rids = []
+        for name, record, raw in self.openai_errors():
+            self.assertTrue(record["error"], name)
+            rids.append(led.reserve(fields("openai", B), Decimal("0.5")))
+            led.close_reservation(rids[-1], (record, raw))
+            self.assertEqual((led.entries[-1]["type"], led.entries[-1]["until_reconciled"]), ("hold", True), name)
+        self.assertEqual(led.totals()["held"], Decimal("2"))
+        self.assertTrue(self.reconcile(led, 150000)["ok"])                   # $0.30: $0.10 beyond reported
+        self.assertEqual(self.released(led), [(rids[0], Decimal("0.1"))] + [(r, Decimal(0)) for r in rids[1:]])
+        self.assertEqual(led.totals(), {"settled": Decimal("0.3"), "held": 0, "open": 0, "committed": Decimal("0.3")})
+
+    def test_a_failed_response_that_reports_its_usage_settles_from_it(self):
+        led = self.ledger()
+        raw = sse(openai_events(None, status="failed", error={"code": "server_error", "message": "x"},
+                                usage={"input_tokens": 100000, "output_tokens": 0}))
+        error = canonical_outcome("openai", Exchange(200, {}, raw, None, None))["error"]
+        rid = led.reserve(fields("openai", B), Decimal("0.5"))
+        led.close_reservation(rid, ({"http_status": 200, "error": error}, raw))
+        self.assertEqual((led.entries[-1]["type"], Decimal(led.entries[-1]["cost_usd"])), ("settle", Decimal("0.2")))
 
     def test_earlier_releases_count_as_known_usage(self):
         led = self.ledger()

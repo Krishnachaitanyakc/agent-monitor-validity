@@ -355,6 +355,29 @@ class TestOverReservationAndLongContext(RunnerCase):
         self.assertEqual(led.totals()["committed"], committed - r)
         self.assertTrue(led.reconciled_after_last_call())
 
+    def test_an_error_in_a_b_stream_stays_held_until_a_passing_reconciliation_releases_it(self):
+        class InStream(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                if ref.endswith("_B1_1"):
+                    return Exchange(200, {}, sse([("response.created", {"type": "response.created", "response": {
+                        "id": f"resp_{ref}", "model": request.model}}), ("error", {
+                            "type": "error", "code": "server_error", "message": "x"})]), None, None)
+                return super()._exchange(request, stage, ref, kind)
+
+        led = self.ledger()
+        report, _ = self.stage("P1", items(1, "a"), led, provider=InStream("central"))
+        self.assertTrue(report["complete"], report["stopped"])
+        b1 = [e for e in reserves(led) if e["slot"] == "B1"]
+        self.assertEqual([led.reservations[e["id"]]["state"] for e in b1], ["held", "settled"])
+        self.assertEqual([e["until_reconciled"] for e in led.entries if e["type"] == "hold"], [True])
+        held = led.totals()["held"]
+        committed = led.totals()["committed"]
+        entry = self.reconcile(led)                                 # the fake provider billed nothing for it
+        self.assertTrue(entry["ok"])
+        self.assertEqual((led.entries[-1]["type"], led.entries[-1]["id"], led.entries[-1]["reconcile_seq"]),
+                         ("release", b1[0]["id"], entry["seq"]))
+        self.assertEqual((led.totals()["held"], led.totals()["committed"]), (0, committed - held))
+
     def test_a_trajectory_whose_b_count_is_above_272000_tokens_is_refused_before_anything_is_sent(self):
         led = self.ledger()
 
@@ -820,6 +843,10 @@ class TestRunRecords(RunnerCase):
         self.assertEqual([(r["outcome"], r["halt_kind"], r["http_status"]) for r in b1], [("HALT", "permission", None)])
         self.assertEqual([(h["slot"], h["halt_kind"]) for h in log.halts()], [("B1", "permission")])
         self.assertEqual(D.capability_check(b1, R.B_MODEL)["checks"]["access"], "failed")
+        held = next(e for e in led.entries if e["type"] == "hold")  # its status was lost
+        self.assertEqual((led.reservations[held["id"]]["slot"], held["until_reconciled"]), ("B1", True))
+        entry = self.reconcile(led)
+        self.assertEqual((entry["ok"], led.entries[-1]["type"], led.entries[-1]["id"]), (True, "release", held["id"]))
 
     def test_a_raw_stream_that_opens_with_an_error_event_is_classified_as_the_dispatcher_would(self):
         def stream(judge, err):
