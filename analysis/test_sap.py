@@ -16,6 +16,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sap  # noqa: E402
 
 
+# The population-inference path runs only when asked for explicitly.
+def analyze(*args, **kw):
+    return sap.analyze(*args, path=sap.PATH_POPULATION, **kw)
+
+
+def analyze_panel(*args, **kw):
+    return sap.analyze_panel(*args, path=sap.PATH_POPULATION, **kw)
+
+
+def analyze_with_sensitivities(*args, **kw):
+    return sap.analyze_with_sensitivities(*args, path=sap.PATH_POPULATION, **kw)
+
+
 def labels_for(n_inv=0, n_D1=0, n_U2=0, n_U1=0, n_S=0):
     return ["I"] * n_inv + ["G1"] * n_D1 + ["U2"] * n_U2 + ["U1"] * n_U1 + ["S"] * n_S
 
@@ -83,7 +96,7 @@ class TestBudgetAndRegimes(unittest.TestCase):
             cap = sap.expected_captures(d, {"G1": 7, "U2": mU2, "U1": mU1, "S": mS})
             self.assertEqual(cap["Delta"], 0)
             self.assertEqual(cap["AUG"], 7 + mU2 + mU1 + mS)
-        res = sap.analyze(labels_for(0, 35, 1, 1, 3), [0] * 35 + [1, 0, 1, 0, 0])
+        res = analyze(labels_for(0, 35, 1, 1, 3), [0] * 35 + [1, 0, 1, 0, 0])
         self.assertIsNone(res["existence"])
         self.assertIn("cap binds", sap.report(res))
 
@@ -95,7 +108,7 @@ class TestBudgetAndRegimes(unittest.TestCase):
         self.assertFalse(d.threshold_reachable())
         cap = sap.expected_captures(d, {"G1": 5, "U2": 0, "U1": 0, "S": 12})
         self.assertEqual(cap["Delta"], 0)
-        res = sap.analyze(labels_for(0, 30, 0, 0, 170), E_for(G1=(30, 5), S=(170, 12)))
+        res = analyze(labels_for(0, 30, 0, 0, 170), E_for(G1=(30, 5), S=(170, 12)))
         self.assertIsNone(res["existence"])
         self.assertIn("no instability among agreeing verdicts", sap.report(res))
 
@@ -108,7 +121,7 @@ class TestBudgetAndRegimes(unittest.TestCase):
         self.assertEqual(sap.assign_regime(1, 0, 3), "DEGENERATE-NOSLICE")
         d = sap.Design.simple(3, 0, 1)                                     # N = 3: s_nom = 0
         self.assertEqual((d.s, d.regime), (0, "DEGENERATE-NOSLICE"))
-        res = sap.analyze(["U1", "S", "S"], [1, 0, 0])
+        res = analyze(["U1", "S", "S"], [1, 0, 0])
         self.assertIsNone(res["existence"])
         self.assertIn("s = 0", sap.report(res))
 
@@ -139,7 +152,7 @@ class TestHandCheck(unittest.TestCase):
     def test_hand_check_analysis_and_report(self):
         labels = labels_for(0, 30, 3, 7, 160)
         E = E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10))
-        res = sap.analyze(labels, E, seed=20260929)
+        res = analyze(labels, E, seed=20260929)
         self.assertAlmostEqual(float(res["captures"]["Delta"]), 189 / 68, places=12)
         p = sap.fisher_one_sided(4, 10, 10, 160)
         self.assertAlmostEqual(res["existence"]["p"], p, places=15)
@@ -155,7 +168,7 @@ class TestHandCheck(unittest.TestCase):
         for pol in ("RAND", "DIS", "AUG"):
             self.assertEqual(len(res["draw"]["reviewed"][pol]), 60)
             self.assertEqual(len(set(res["draw"]["reviewed"][pol].tolist())), 60)
-        again = sap.analyze(labels, E, seed=20260929)
+        again = analyze(labels, E, seed=20260929)
         self.assertEqual(res["draw"]["Delta_draw"], again["draw"]["Delta_draw"])
 
 
@@ -248,7 +261,7 @@ class TestInvalidHandling(unittest.TestCase):
         labels = labels_for(5, 20, 2, 3, 100)
         E0 = E_for(n_inv=(5, 0), G1=(20, 6), U2=(2, 1), U1=(3, 1), S=(100, 4))
         E1 = E_for(n_inv=(5, 5), G1=(20, 6), U2=(2, 1), U1=(3, 1), S=(100, 4))
-        r0, r1 = sap.analyze(labels, E0), sap.analyze(labels, E1)
+        r0, r1 = analyze(labels, E0), analyze(labels, E1)
         self.assertEqual(r0["M"], M)
         self.assertEqual(r1["M"], M)
         self.assertEqual(r0["captures"], r1["captures"])
@@ -298,7 +311,7 @@ class TestInvalidHandling(unittest.TestCase):
                 sl["A2"] = sl["A3"] = "REFUSAL"
             slots.append(sl)
             E.append(int(rng.random() < 0.15))
-        outs = sap.analyze_with_sensitivities(slots, E)
+        outs = analyze_with_sensitivities(slots, E)
         self.assertEqual(len(outs), 5)
         self.assertTrue(all(name.startswith("sensitivity") for name, _ in outs[1:]))
         self.assertEqual(outs[1][1]["label_free"]["N"], outs[0][1]["label_free"]["N"])   # B1 -> D = 0 keeps every item
@@ -316,7 +329,7 @@ class TestInvalidHandling(unittest.TestCase):
                  [sl("success", "failure", "success", "success")] * 29 +
                  [sl("success", "success", "success", "success")] * 139)
         E = [0] * 12 + [1] * 6 + [0] * 14 + [1] * 9 + [0] * 20 + [1] * 10 + [0] * 129
-        outs = dict(sap.analyze_with_sensitivities(slots, E))
+        outs = dict(analyze_with_sensitivities(slots, E))
         prim = outs["primary"]
         b1 = outs["sensitivity: B1 INVALID treated as agreement (D = 0) instead of D = 1"]
         self.assertEqual(prim["label_free"]["regime"], "COVERAGE")
@@ -377,7 +390,7 @@ class TestInvalidHandling(unittest.TestCase):
             hits += sum(w[k] * E0[Rp == k].sum() for k in w) >= obs - 1e-12
         se = math.sqrt(p * (1 - p) / B)
         self.assertLess(abs(hits / B - p), 4 * se + 1e-9)
-        res = sap.analyze(labels_for(0, 10, 4, 10, 36),
+        res = analyze(labels_for(0, 10, 4, 10, 36),
                           E_for(G1=(10, 3), U2=(4, 2), U1=(10, 3), S=(36, 3)), boot_B=2000)
         self.assertIn("partial", res["size"])
         self.assertEqual(res["size"]["partial"]["label"], "approximate")
@@ -595,8 +608,8 @@ class TestBergerBoos(unittest.TestCase):
         # 4 of 5 unstable versus 24 of 160 stable agreeing verdicts are discordant.
         labels = ["G1"] * 15 + ["U1"] * 5 + ["S"] * 160
         E = [0] * 15 + [1, 1, 1, 1, 0] + [1] * 24 + [0] * 136
-        full = sap.analyze(labels, E, method="full")
-        bb = sap.analyze(labels, E, method="berger-boos")
+        full = analyze(labels, E, method="full")
+        bb = analyze(labels, E, method="berger-boos")
         self.assertTrue(full["existence"]["reject"])
         self.assertLess(full["size"]["delta_L"], 0.0)           # the full-range interval keeps 0
         self.assertTrue(full["size"]["disagrees_with_existence"])
@@ -638,7 +651,7 @@ class TestReporting(unittest.TestCase):
                for i, t in enumerate(ids) for j, r in sap.SLOT_KEYS]
         res = sap.resolve_panel(log, ids, "cfg-7f3a")
         self.assertEqual(res["slots"], slots)
-        panel = sap.analyze_panel(res["slots"], E, ids=ids, benchmarks=bench, templates=tmpl,
+        panel = analyze_panel(res["slots"], E, ids=ids, benchmarks=bench, templates=tmpl,
                                   provenance=res["provenance"], seed=20260929)
         txt = sap.panel_report(panel)
         for needle in ("A1 is the first complete response of slot (i, A, 1) that passes the per-response checks, under config hash cfg-7f3a",
@@ -653,7 +666,7 @@ class TestReporting(unittest.TestCase):
         self.assertNotIn("a positive gain exists", txt)
 
     def test_partial_report(self):
-        res = sap.analyze(labels_for(0, 10, 4, 10, 36),
+        res = analyze(labels_for(0, 10, 4, 10, 36),
                           E_for(G1=(10, 3), U2=(4, 2), U1=(10, 3), S=(36, 3)), boot_B=2000)
         txt = sap.report(res)
         self.assertNotIn("delta_m =", txt)                                   # coverage-only quantities

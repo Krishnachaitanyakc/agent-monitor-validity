@@ -1,10 +1,20 @@
 """Statistical analysis of the instability-first review study: reference implementation.
 
-This module implements the study's statistical analysis plan, version 3.2,
-except for one piece the plan requires before the freeze. The inference that
-handles the template dependence retained on the one-trajectory-per-task panel,
-and its synthetic validation, are both still to come. Until they exist, the
-primary test and interval assume independent tasks, and the report says so.
+The primary path is descriptive. describe_panel() audits the frozen panel: the
+exact expected capture of each policy over its own random choices, the full A1 and
+B1 validity metrics, invalid outputs, Unsure and missing references and actual
+inference costs. describe_report() prints it. The conclusion applies to these tasks
+and these realized judge calls, with no population claim. analyze_panel() runs this
+path unless told otherwise.
+
+The population inference of the study's statistical analysis plan, version 3.2, is
+outside the primary result and separately scoped. It stays in this module and runs
+only on the explicit argument path="population_inference". Everything below this
+paragraph describes that path unless it says otherwise, and "primary" there means
+the plan's result per 100 panel tasks. One piece of it is still to come. The
+inference that handles the template dependence retained on the
+one-trajectory-per-task panel, and its synthetic validation, do not exist. Until
+they do, the path's test and interval assume independent tasks, and its report says so.
 The method is frozen only at the study freeze; until then "frozen" in this file
 names the rule the plan fixes, not a completed freeze. Comments name the plan's
 sections by topic: units, budget, policies, regimes, the coverage regime, invalid
@@ -119,7 +129,10 @@ INTERVAL_METHODS = ("full", "berger-boos")
 INTERVAL_METHOD = "berger-boos"    # the frozen interval method; "full" is kept for comparison
 BB_GAMMA = 0.001                   # Berger-Boos: 1 - 0.999 Clopper-Pearson set for p0
 FRAGILITY_MAX = 15                 # search depth for the fragility count
-PLAN_VERSION = "v3.2"              # the analysis plan this code implements
+PLAN_VERSION = "v3.2 as amended Nov 8, 2026: the primary path is descriptive"
+POPULATION_PLAN_VERSION = "v3.2"   # the plan the population-inference path implements
+PATH_DESCRIPTIVE = "descriptive"   # the primary path and the default
+PATH_POPULATION = "population_inference"   # outside the primary result, separately scoped
 
 NUISANCE_TEXT = {
     "full": "supremum over the whole admissible range of p0",
@@ -170,6 +183,13 @@ PARTIAL_ASSUMPTION_TEXT = (
     "the template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
+# The two statements the descriptive report prints word for word.
+SCOPE_TEXT = ("Scope: these results apply to these tasks and these realized judge calls, with no "
+              "population confidence or significance claim.")
+PANEL_WORDING = "a retrospective evaluation panel with documented prior exposure"
+# The first line of every population-inference report.
+POPULATION_PATH_TEXT = ("Population inference: this report is outside the primary result and "
+                        "separately scoped. The primary result is the descriptive audit.")
 REFERENCE_NOT_SUPPLIED_TEXT = ("Reference statuses not supplied: every label treated as usable; "
                                "Unsure and missing coverage not assessed")
 G_DEFINITION_TEXT = (
@@ -567,6 +587,22 @@ def join_reference(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[str]
         E.append(e)
         status.append(st)
     return {"E": E, "reference": status}
+
+
+def _require_population_path(path: str, name: str) -> None:
+    """Refuses to run population inference unless it was asked for explicitly."""
+    if path != PATH_POPULATION:
+        raise ValueError(f"{name} runs population inference, which is outside the primary result; "
+                         f"pass path={PATH_POPULATION!r} to run it")
+
+
+def _require_no_contradiction_without_reference(labels: Sequence[str], E: Sequence[int],
+                                                reference: Sequence[str]) -> None:
+    """A task without a usable label cannot be reference-contradicted; invalid A1 is ignored."""
+    for i, (l, e, r) in enumerate(zip(labels, E, reference)):
+        if r != USABLE and l not in ("I", "EXCL") and e != 0:
+            raise ValueError(f"trajectory {i} has no usable reference label ({r}) but E = {e}; "
+                             "a task without a reference is never reference-contradicted")
 
 
 def _reference_list(reference: Optional[Sequence[str]], n: int) -> List[str]:
@@ -1590,8 +1626,11 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
             ids: Optional[Sequence[str]] = None, method: Optional[str] = None,
             fragility: bool = True, reference: Optional[Sequence[str]] = None,
             N_Y_ref: Optional[int] = None,
-            benchmarks: Optional[Sequence[str]] = None) -> dict:
-    """Primary and secondary analysis of one panel [labels]. Returns a result dict for report().
+            benchmarks: Optional[Sequence[str]] = None, path: str = PATH_DESCRIPTIVE) -> dict:
+    """Population inference on one panel [labels]. Returns a result dict for report().
+
+    Runs only with path="population_inference"; any other value is refused, the
+    default included, since this analysis is outside the primary result.
 
     reference gives each trajectory's reference status ('usable', 'unsure' or
     'missing', as join_reference returns it). None means the statuses were not
@@ -1617,16 +1656,14 @@ def analyze(labels: Sequence[str], E: Sequence[int], seed: Optional[int] = None,
     (reference_coverage). N_Y_ref holds the secondary per-100 denominator, as N_ref
     does for the primary; benchmarks only feed the coverage table.
     """
+    _require_population_path(path, "analyze")
     method = INTERVAL_METHOD if method is None else method
     labels = list(labels)
     E = [int(e) for e in E]
     if len(labels) != len(E):
         raise ValueError("labels and E differ in length")
     ref = _reference_list(reference, len(labels))
-    for i, (l, e, r) in enumerate(zip(labels, E, ref)):
-        if r != USABLE and l not in ("I", "EXCL") and e != 0:
-            raise ValueError(f"trajectory {i} has no usable reference label ({r}) but E = {e}; "
-                             "a task without a reference is never reference-contradicted")
+    _require_no_contradiction_without_reference(labels, E, ref)
     if benchmarks is not None and len(benchmarks) != len(labels):
         raise ValueError("benchmarks must give one entry per trajectory")
     keep = [i for i, l in enumerate(labels) if l != "EXCL"]
@@ -1840,7 +1877,7 @@ def _primary_lines(res: dict) -> List[str]:
     lf, cap = res["label_free"], res["captures"]
     reg = lf["regime"]
     out = []
-    out.append(f"Primary analysis, statistical analysis plan {PLAN_VERSION}")
+    out.append(f"Population inference on the panel, statistical analysis plan {POPULATION_PLAN_VERSION}")
     out.append("")
     out.append("Label-free design (committed before the join)")
     out.append(f"  N = {lf['N']}, invalid A1 n_inv = {lf['n_inv']}, valid N_V = {lf['N_V']}")
@@ -2076,16 +2113,23 @@ def _coverage_lines(res: dict) -> List[str]:
     return out
 
 
-def report(res: dict) -> str:
-    """Human-readable report of one analysis: primary, secondary, then label coverage.
-
-    Existence and size are printed separately and never merged into one verdict.
-    """
+def _report_lines(res: dict) -> List[str]:
+    """The population-inference results of one analysis, without the opening line."""
     out = _primary_lines(res)
     for extra in (_secondary_lines(res), _coverage_lines(res)):
         if extra:
             out += [""] + extra
-    return "\n".join(out)
+    return out
+
+
+def report(res: dict) -> str:
+    """Human-readable report of one population-inference analysis.
+
+    It opens with the line saying it is outside the primary result, then gives the
+    plan's primary result, the secondary result and the label coverage. Existence and
+    size are printed separately and never merged into one verdict.
+    """
+    return "\n".join([POPULATION_PATH_TEXT, ""] + _report_lines(res))
 
 
 def print_report(res: dict) -> str:
@@ -2105,8 +2149,10 @@ SENSITIVITY_VARIANTS = [
 
 
 def analyze_with_sensitivities(slots: Sequence[Mapping[str, str]], E: Sequence[int],
-                               **kw) -> List[Tuple[str, dict]]:
-    """Primary analysis plus the labeled sensitivity analyses for invalid responses.
+                               path: str = PATH_DESCRIPTIVE, **kw) -> List[Tuple[str, dict]]:
+    """Population inference plus its labeled sensitivity analyses for invalid responses.
+
+    Runs only with path="population_inference", as analyze() does.
 
     Every sensitivity analysis holds s at its primary value (capped at
     the new n_D0) and the per-100 denominator N at the primary N, so K changes only
@@ -2115,35 +2161,63 @@ def analyze_with_sensitivities(slots: Sequence[Mapping[str, str]], E: Sequence[i
     reference and benchmarks, when given, follow every analysis; the coverage table
     by benchmark is built for the primary analysis only.
     """
+    _require_population_path(path, "analyze_with_sensitivities")
     kw = dict(kw)
     kw.pop("s_override", None)
     kw.pop("N_ref", None)
     kw.pop("N_Y_ref", None)
     benchmarks = kw.pop("benchmarks", None)
     lf0 = derive_label_free(slots)
-    prim = analyze(lf0["stratum"], E, benchmarks=benchmarks, **kw)
+    prim = analyze(lf0["stratum"], E, benchmarks=benchmarks, path=path, **kw)
     s0, N0 = prim["label_free"]["s"], prim["label_free"]["N"]
     NY0 = prim["secondary"]["N_Y"] if prim["secondary"] is not None else None
     out = [("primary", prim)]
     skw = {k: v for k, v in kw.items() if k not in ("seed",)}
     for name, opts in SENSITIVITY_VARIANTS:
         lf = derive_label_free(slots, **opts)
-        out.append((name, analyze(lf["stratum"], E, s_override=s0, N_ref=N0, N_Y_ref=NY0, **skw)))
+        out.append((name, analyze(lf["stratum"], E, s_override=s0, N_ref=N0, N_Y_ref=NY0, path=path, **skw)))
     return out
 
 
-def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
-                  ids: Optional[Sequence[str]] = None,
-                  benchmarks: Optional[Sequence[str]] = None,
-                  templates: Optional[Sequence[str]] = None,
-                  provenance: Optional[dict] = None,
-                  seed: Optional[int] = None, m: float = MATERIAL_M,
-                  method: Optional[str] = None, boot_B: int = 10000, boot_seed: int = 0,
-                  reference: Optional[Sequence[str]] = None,
-                  template_panel: Optional[Sequence[str]] = None) -> dict:
-    """Everything the frozen report needs: primary and secondary results, label
-    coverage, labeled sensitivity analyses, invalid counts, repeat-observation
-    counts, template sensitivity and A1 provenance.
+def _repeat_flags(lf: Mapping[str, np.ndarray]) -> dict:
+    """Label-free counts of agreeing trajectories with an unobserved repeat."""
+    g0 = np.isin(lf["stratum"], ["U2", "U1", "S"])
+    return {"both_repeats_invalid": int(((lf["R_unobserved"] == 1) & g0).sum()),
+            "one_repeat_invalid_no_flip": int(((lf["R_one_missing"] == 1) & (lf["R"] == 0) & g0).sum()),
+            "one_repeat_invalid_flip": int(((lf["R_one_missing"] == 1) & (lf["R"] >= 1) & g0).sum())}
+
+
+def analyze_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]] = None, *,
+                  path: str = PATH_DESCRIPTIVE, **kw) -> dict:
+    """One panel's analysis, on the path asked for.
+
+    path="descriptive", the default, is the primary result: it passes E and the
+    keywords on to describe_panel(). path="population_inference" is outside the
+    primary result and separately scoped: it needs E and takes the keywords of
+    _population_panel(). A keyword of one path is refused on the other, so nothing
+    that was asked for is silently ignored. panel_report() prints either result.
+    """
+    if path == PATH_DESCRIPTIVE:
+        return describe_panel(slots, E, **kw)
+    if path == PATH_POPULATION:
+        if E is None:
+            raise ValueError("the population-inference path needs E")
+        return _population_panel(slots, E, **kw)
+    raise ValueError(f"path must be {PATH_DESCRIPTIVE!r} or {PATH_POPULATION!r}, not {path!r}")
+
+
+def _population_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
+                      ids: Optional[Sequence[str]] = None,
+                      benchmarks: Optional[Sequence[str]] = None,
+                      templates: Optional[Sequence[str]] = None,
+                      provenance: Optional[dict] = None,
+                      seed: Optional[int] = None, m: float = MATERIAL_M,
+                      method: Optional[str] = None, boot_B: int = 10000, boot_seed: int = 0,
+                      reference: Optional[Sequence[str]] = None,
+                      template_panel: Optional[Sequence[str]] = None) -> dict:
+    """Everything the population-inference report needs: the plan's primary and
+    secondary results, label coverage, labeled sensitivity analyses, invalid counts,
+    repeat-observation counts, template sensitivity and A1 provenance.
 
     The panel is the default one: one trajectory per task. reference gives each
     trajectory's reference status (join_reference). templates gives each panel
@@ -2164,15 +2238,13 @@ def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
     if templates is not None and len(templates) != len(slots):
         raise ValueError("templates must give one template id per trajectory")
     kw = dict(m=m, method=method, boot_B=boot_B, boot_seed=boot_seed)
+    kw_population = dict(kw, path=PATH_POPULATION)
     sens = analyze_with_sensitivities(slots, E, seed=seed, ids=ids, reference=reference,
-                                      benchmarks=benchmarks, **kw)
+                                      benchmarks=benchmarks, **kw_population)
     lf = derive_label_free(slots)
-    g0 = np.isin(lf["stratum"], ["U2", "U1", "S"])
-    rep = {"both_repeats_invalid": int(((lf["R_unobserved"] == 1) & g0).sum()),
-           "one_repeat_invalid_no_flip": int(((lf["R_one_missing"] == 1) & (lf["R"] == 0) & g0).sum()),
-           "one_repeat_invalid_flip": int(((lf["R_one_missing"] == 1) & (lf["R"] >= 1) & g0).sum())}
-    out = {"primary": sens[0][1], "sensitivities": sens[1:], "invalid_counts": invalid_counts(slots, benchmarks),
-           "repeat_flags": rep, "provenance": provenance, "templates": None,
+    out = {"path": PATH_POPULATION, "primary": sens[0][1], "sensitivities": sens[1:],
+           "invalid_counts": invalid_counts(slots, benchmarks),
+           "repeat_flags": _repeat_flags(lf), "provenance": provenance, "templates": None,
            "template_multiplicities": None, "template_panel": None,
            "n_trajectories": len(slots)}
     if templates is not None:
@@ -2186,7 +2258,7 @@ def analyze_panel(slots: Sequence[Mapping[str, str]], E: Sequence[int], *,
             ref_t = [ref[i] for i in sub]
         lf_t = derive_label_free([slots[i] for i in sub])
         res_t = analyze(lf_t["stratum"], [E[i] for i in sub], reference=ref_t,
-                        ids=[ids[i] for i in sub], **kw)
+                        ids=[ids[i] for i in sub], **kw_population)
         out["template_panel"] = {"n": len(sub), "result": res_t}
     return out
 
@@ -2223,13 +2295,9 @@ def _brief(name: str, r: dict) -> List[str]:
     return lines
 
 
-def panel_report(panel: dict) -> str:
-    """The frozen report: provenance, primary analysis, sensitivities, invalid counts, templates."""
-    prim = panel["primary"]
-    lf = prim["label_free"]
-    out = []
-    prov = panel.get("provenance")
-    out.append("A1 provenance (plan rule)")
+def _provenance_lines(prov: Optional[dict]) -> List[str]:
+    """Report lines for the A1 rule and the attempt log's counts."""
+    out = ["A1 provenance (plan rule)"]
     if prov is not None:
         a1 = prov["by_slot"]["A1"]
         cats = ", ".join(f"{k.split(':', 1)[1]} {v}" for k, v in sorted(a1.items()) if k.startswith("invalid:"))
@@ -2250,15 +2318,51 @@ def panel_report(panel: dict) -> str:
     else:
         out.append("  Not supplied: resolved slots were passed without the attempt log. The plan's rule "
                    "is that A1 is the first complete response of slot (i, A, 1) that passes the per-response checks, and is never replaced.")
+    return out
+
+
+def _repeat_lines(rf: Mapping[str, int]) -> List[str]:
+    """Report lines for the agreeing trajectories with an unobserved repeat."""
+    return ["Repeat observation (label-free)",
+            f"  agreeing items with both repeats INVALID (R_unobserved, R set to 0): {rf['both_repeats_invalid']}",
+            f"  agreeing items with one repeat INVALID and no observed flip (R = 0 from one repeat): "
+            f"{rf['one_repeat_invalid_no_flip']}",
+            f"  agreeing items with one repeat INVALID and an observed flip: {rf['one_repeat_invalid_flip']}"]
+
+
+def _invalid_lines(inv: Mapping[Tuple[str, str, str], int]) -> List[str]:
+    """Report lines for the invalid counts by judge slot, category and benchmark."""
+    out = ["Invalid counts by judge slot, category and benchmark"]
+    if not inv:
+        out.append("  none")
+    else:
+        out.append("  slot | category | benchmark | count")
+        for (slot, cat, bench), c in sorted(inv.items()):
+            out.append(f"  {slot} | {cat} | {bench} | {c}")
+    return out
+
+
+def panel_report(panel: dict, prior_exposure: Optional[str] = None) -> str:
+    """The report of analyze_panel(), on its path.
+
+    The descriptive path needs prior_exposure and refuses to run without it
+    (describe_report). The population-inference report opens with the line saying it
+    is outside the primary result, and prints the statement when one is given. It
+    covers provenance, the plan's primary analysis, sensitivities, invalid counts and
+    templates.
+    """
+    if panel["path"] == PATH_DESCRIPTIVE:
+        return describe_report(panel, prior_exposure)
+    prim = panel["primary"]
+    lf = prim["label_free"]
+    out = [POPULATION_PATH_TEXT, ""]
+    if prior_exposure is not None:
+        out += [f"Prior exposure statement: {prior_exposure}", ""]
+    out.extend(_provenance_lines(panel.get("provenance")))
     out.append("")
-    out.append(report(prim))
+    out.extend(_report_lines(prim))
     out.append("")
-    rf = panel["repeat_flags"]
-    out.append("Repeat observation (label-free)")
-    out.append(f"  agreeing items with both repeats INVALID (R_unobserved, R set to 0): {rf['both_repeats_invalid']}")
-    out.append(f"  agreeing items with one repeat INVALID and no observed flip (R = 0 from one repeat): "
-               f"{rf['one_repeat_invalid_no_flip']}")
-    out.append(f"  agreeing items with one repeat INVALID and an observed flip: {rf['one_repeat_invalid_flip']}")
+    out.extend(_repeat_lines(panel["repeat_flags"]))
     out.append("")
     if prim.get("secondary") is not None:
         dens = f"denominators N = {lf['N']} and N_Y = {prim['secondary']['N_Y']}"
@@ -2269,14 +2373,7 @@ def panel_report(panel: dict) -> str:
     for name, r in panel["sensitivities"]:
         out.extend(_brief(name, r))
     out.append("")
-    out.append("Invalid counts by judge slot, category and benchmark")
-    inv = panel["invalid_counts"]
-    if not inv:
-        out.append("  none")
-    else:
-        out.append("  slot | category | benchmark | count")
-        for (slot, cat, bench), c in sorted(inv.items()):
-            out.append(f"  {slot} | {cat} | {bench} | {c}")
+    out.extend(_invalid_lines(panel["invalid_counts"]))
     tm = panel.get("templates")
     out.append("")
     out.append("Template sensitivity (labeled)")
@@ -2308,4 +2405,328 @@ def panel_report(panel: dict) -> str:
                        f"{_interval_text(tm['delta_L'], tm['delta_U'])}")
         else:
             out.append(f"  One agreeing item per template leaves n1 = {tm['n1']}, n0 = {tm['n0']}; no test.")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Descriptive path: the primary result
+# ---------------------------------------------------------------------------
+NOT_DEFINED_TEXT = "not defined"
+POLICY_ORDER = ("AUG", "DIS", "RAND")
+REGIME_NOTES = {
+    "DEGENERATE-NONE": ("no instability among agreeing verdicts, so instability-first and "
+                        "disagreement-first review capture the same expected number"),
+    "DEGENERATE-CAP": "the slice covers every agreeing task (s = n_D0), so both policies review all of them",
+    "DEGENERATE-NOSLICE": "the slice is empty (s = 0), so neither policy reviews an agreeing task",
+    "COVERAGE": "the slice reaches every unstable agreeing task",
+    "PARTIAL": "the slice reaches only part of the unstable agreeing tasks",
+}
+
+
+def _rate(num: int, den: int) -> dict:
+    """num/den with its denominator; the value is None, not defined and never zero, when den = 0."""
+    return {"value": Fraction(num, den) if den > 0 else None, "numerator": num, "denominator": den}
+
+
+def _per_100(x: Fraction, den: int) -> Optional[Fraction]:
+    """100 x / den exactly, or None (not defined) when den = 0."""
+    return Fraction(100) * x / den if den > 0 else None
+
+
+def _judge_metrics(pairs: Sequence[Tuple[str, str]], n_usable: int) -> dict:
+    """One judge's validity metrics on one set of tasks, with failure as the positive class.
+
+    pairs holds (verdict, reference verdict) for the tasks of the set, and n_usable
+    is the number of panel tasks with a usable reference. A metric with an empty
+    denominator is not defined (value None). Balanced accuracy needs both a failure
+    and a success reference.
+    """
+    c = Counter(pairs)
+    tp, fp = c[("failure", "failure")], c[("failure", "success")]
+    fn, tn = c[("success", "failure")], c[("success", "success")]
+    n = tp + fp + fn + tn
+    recall, success_recall = _rate(tp, tp + fn), _rate(tn, tn + fp)
+    balanced = None
+    if recall["value"] is not None and success_recall["value"] is not None:
+        balanced = (recall["value"] + success_recall["value"]) / 2
+    return {"confusion": {"TP": tp, "FP": fp, "FN": fn, "TN": tn},
+            "balanced_accuracy": {"value": balanced, "failure_references": tp + fn, "success_references": tn + fp},
+            "failure_precision": _rate(tp, tp + fp),
+            "failure_recall": recall,
+            "valid_prediction_coverage": _rate(n, n_usable),
+            "prevalence": _rate(tp + fn, n)}
+
+
+def validity_metrics(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[str]]) -> dict:
+    """Full A1 and B1 validity metrics against the usable released labels [labels].
+
+    Failure is the positive class. Only tasks whose released primary label is usable
+    count, so an Unsure or missing label is in neither the numerator nor any
+    denominator. Each judge is measured on its own valid set, the usable tasks where
+    its slot is a verdict, and on the shared subset, where both A1 and B1 are verdicts.
+    Valid-prediction coverage is the size of the set over the tasks with a usable
+    reference, n_usable; prevalence is the share of failure references within the set.
+    """
+    usable = []
+    for sl, y in zip(slots, Y):
+        status, verdict = reference_status(y)
+        if status == USABLE:
+            usable.append((sl, verdict))
+    pairs = lambda rows, k: [(canonical_outcome(sl[k]), v) for sl, v in rows if is_valid(sl[k])]
+    shared = [(sl, v) for sl, v in usable if is_valid(sl["A1"]) and is_valid(sl["B1"])]
+    n = len(usable)
+    return {"n_usable": n, "n_shared": len(shared),
+            "own": {k: _judge_metrics(pairs(usable, k), n) for k in ("A1", "B1")},
+            "shared": {k: _judge_metrics(pairs(shared, k), n) for k in ("A1", "B1")}}
+
+
+def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
+    """Actual inference costs in USD, taken from the spending ledger.
+
+    costs has 'total' and 'by_slot', the latter with one amount for each of A1, A2,
+    A3 and B1, as decimal strings the way the ledger writes them or as numbers. The
+    total can exceed the sum over the slots, for example through a reconciliation
+    adjustment, and the rest is reported as not attributed to a slot; it can never be
+    smaller. gain is the expected verdicts instability-first review captures beyond
+    disagreement-first review. The extra cost is that of the repeats A2 and A3, and the
+    extra cost per extra expected verdict is not defined (None) unless the gain is positive.
+    """
+    def amount(name: str, x) -> Fraction:
+        try:
+            v = Fraction(str(x))
+        except (ValueError, ZeroDivisionError):
+            raise ValueError(f"{name} is not an amount: {x!r}") from None
+        if v < 0:
+            raise ValueError(f"{name} is negative: {x!r}")
+        return v
+    if not {"total", "by_slot"} <= set(costs):
+        raise ValueError("costs must give 'total' and 'by_slot'")
+    names = tuple(SLOT_NAMES.values())
+    if set(costs["by_slot"]) != set(names):
+        raise ValueError(f"by_slot must give exactly the slots {names}")
+    total = amount("total", costs["total"])
+    by_slot = {k: amount(k, costs["by_slot"][k]) for k in names}
+    attributed = sum(by_slot.values(), Fraction(0))
+    if attributed > total:
+        raise ValueError("the slot costs add up to more than the total")
+    extra = by_slot["A2"] + by_slot["A3"]
+    return {"total": total, "by_slot": by_slot, "not_attributed": total - attributed,
+            "extra_repeats": extra, "gain": gain,
+            "extra_per_extra_verdict": extra / gain if gain > 0 else None}
+
+
+def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]] = None, *,
+                   Y: Optional[Sequence[Optional[str]]] = None,
+                   reference: Optional[Sequence[str]] = None,
+                   benchmarks: Optional[Sequence[str]] = None,
+                   costs: Optional[Mapping[str, object]] = None,
+                   provenance: Optional[dict] = None) -> dict:
+    """The primary result: a descriptive audit of the frozen panel [labels].
+
+    Give the released primary labels Y, or E with its reference statuses as
+    join_reference returns them. Y is needed for the validity metrics, since E alone
+    cannot give B1's reference where A1 is invalid; with E they are not assessed.
+    Without statuses every label is treated as usable, and the secondary result and
+    the label coverage are not assessed, as in analyze(). costs comes from the
+    spending ledger (inference_costs) and provenance from resolve_panel.
+
+    The conclusions apply to these tasks and these realized judge calls. Every number
+    is computed exactly in the regime at hand, degenerate ones included: the expected
+    capture of each policy over its own random choices at the same K, the share of M
+    each captures, and the gain of instability-first review over disagreement-first
+    and over random review, in verdicts and per 100 panel tasks. The secondary result
+    is the same gain per 100 tasks with a usable label. A rate with an empty
+    denominator is None, not defined and never zero. The observed gain over
+    disagreement-first review is set against the practical reference of 2 per 100
+    panel tasks only as observed at or above it, or below it.
+    """
+    if (E is None) == (Y is None):
+        raise ValueError("give either E or the released labels Y, and not both")
+    if Y is not None and reference is not None:
+        raise ValueError("the released labels Y already give the reference statuses")
+    slots = list(slots)
+    n = len(slots)
+    if benchmarks is not None and len(benchmarks) != n:
+        raise ValueError("benchmarks must give one entry per trajectory")
+    lf = derive_label_free(slots)
+    labels = list(lf["stratum"])
+    if Y is not None:
+        joined = join_reference(slots, Y)
+        E, ref = joined["E"], joined["reference"]
+    else:
+        E = list(E)
+        if len(E) != n or any(e not in (0, 1) for e in E):
+            raise ValueError("E must give 0 or 1 for each trajectory")
+        E = [int(e) for e in E]
+        ref = _reference_list(reference, n)
+        _require_no_contradiction_without_reference(labels, E, ref)
+    design = Design.from_labels(labels)
+    counts = {j: sum(e for l, e in zip(labels, E) if l == j) for j in ("G1", "U2", "U1", "S")}
+    cap = expected_captures(design, counts)
+    M = sum(counts.values())
+    reviews = {pol: expected_reviewed(design, pol) for pol in POLICY_ORDER}
+    over_dis, over_rand = cap["AUG"] - cap["DIS"], cap["AUG"] - cap["RAND"]
+    observed = _per_100(over_dis, design.N)
+    if observed is None:
+        status = None
+    elif observed >= MATERIAL_M:
+        status = "observed at or above the reference"
+    else:
+        status = "observed below the reference"
+    inv = invalid_counts(slots, benchmarks)
+    by_slot_category: Counter = Counter()
+    for (slot, cat, _), c in inv.items():
+        by_slot_category[(slot, cat)] += c
+    statuses_given = Y is not None or reference is not None
+    cov = reference_coverage(labels, ref, design, benchmarks=benchmarks) if statuses_given else None
+    N_Y = cov["groups"]["all"]["usable"] if statuses_given else None
+    return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
+            "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
+            "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
+            "K_by_policy": reviews, "K_equal": all(v == design.K for v in reviews.values()),
+            "R_unobserved": int((lf["R_unobserved"] == 1).sum()), "repeat_flags": _repeat_flags(lf),
+            "invalid_by_slot": {k: sum(c for (slot, _), c in by_slot_category.items() if slot == k)
+                                for k in SLOT_NAMES.values()},
+            "invalid_by_slot_category": dict(by_slot_category),
+            "invalid_counts": inv if benchmarks is not None else None,
+            "reference_supplied": statuses_given, "N_Y": N_Y, "coverage": cov,
+            "M": M, "m1": counts["U2"] + counts["U1"], "m0": counts["S"], "m_counts": counts,
+            "captures": {pol: cap[pol] for pol in POLICY_ORDER},
+            "share_of_M": {pol: cap[pol] / M if M > 0 else None for pol in POLICY_ORDER},
+            "gain": {"over_disagreement": {"verdicts": over_dis, "per_100_panel": observed},
+                     "over_random": {"verdicts": over_rand, "per_100_panel": _per_100(over_rand, design.N)}},
+            "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y),
+                                                   "over_random": _per_100(over_rand, N_Y)},
+            "practical_reference": {"per_100": MATERIAL_M, "status": status},
+            "validity": validity_metrics(slots, Y) if Y is not None else None,
+            "costs": inference_costs(costs, over_dis) if costs is not None else None}
+
+
+def _exact_text(x: Optional[Fraction]) -> str:
+    """An exact fraction with its decimal, or 'not defined'."""
+    return NOT_DEFINED_TEXT if x is None else f"{x} ({_f(x)})"
+
+
+def _rate_text(r: Mapping[str, object], what: str) -> str:
+    return f"{_exact_text(r['value'])}, {r['numerator']} of {r['denominator']} {what}"
+
+
+def _metric_lines(name: str, mt: dict, n_set: int) -> List[str]:
+    c, ba = mt["confusion"], mt["balanced_accuracy"]
+    return [f"  {name} (n = {n_set})",
+            f"    confusion matrix: TP = {c['TP']}, FP = {c['FP']}, FN = {c['FN']}, TN = {c['TN']}",
+            f"    balanced accuracy: {_exact_text(ba['value'])}, denominators "
+            f"{ba['failure_references']} failure references and {ba['success_references']} success references",
+            f"    failure precision: {_rate_text(mt['failure_precision'], 'failure predictions')}",
+            f"    failure recall: {_rate_text(mt['failure_recall'], 'failure references')}",
+            f"    valid-prediction coverage: "
+            f"{_rate_text(mt['valid_prediction_coverage'], 'tasks with a usable reference')}",
+            f"    prevalence of failure references: {_rate_text(mt['prevalence'], 'tasks in this set')}"]
+
+
+def _validity_lines(v: Optional[dict]) -> List[str]:
+    """Report lines of the A1 and B1 validity metrics."""
+    out = ["A1 AND B1 VALIDITY against usable references, with failure as the positive class"]
+    if v is None:
+        out.append("  Not assessed: the released labels were not supplied.")
+        return out
+    out.append(f"  Tasks with a usable reference: {v['n_usable']}; shared subset, where A1 and B1 are "
+               f"both valid: {v['n_shared']}. An Unsure or missing reference counts in neither.")
+    for k in ("A1", "B1"):
+        m = v["own"][k]
+        out += _metric_lines(f"{k} on its own valid set", m, m["valid_prediction_coverage"]["numerator"])
+    for k in ("A1", "B1"):
+        out += _metric_lines(f"{k} on the shared subset", v["shared"][k], v["n_shared"])
+    return out
+
+
+def _cost_lines(c: Optional[dict]) -> List[str]:
+    """Report lines of the actual inference costs."""
+    out = ["ACTUAL INFERENCE COSTS in USD, from the spending ledger"]
+    if c is None:
+        out.append("  Not supplied.")
+        return out
+    out.append(f"  total: {_f(c['total'])}")
+    out.append("  by slot: " + ", ".join(f"{k} {_f(v)}" for k, v in c["by_slot"].items()))
+    out.append(f"  not attributed to a slot: {_f(c['not_attributed'])}")
+    out.append(f"  extra cost of A2 and A3: {_f(c['extra_repeats'])}")
+    if c["extra_per_extra_verdict"] is None:
+        out.append(f"  extra cost per extra expected verdict captured: {NOT_DEFINED_TEXT}, since the gain over "
+                   f"disagreement-first review is not positive ({_exact_text(c['gain'])} verdicts)")
+    else:
+        out.append(f"  extra cost per extra expected verdict captured: {_f(c['extra_per_extra_verdict'])}, "
+                   f"the extra cost over the gain of {_exact_text(c['gain'])} verdicts")
+    return out
+
+
+def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
+    """The primary report of one panel, from describe_panel().
+
+    prior_exposure is the statement of what was exposed before the prediction lock.
+    The report refuses to run without one. It prints the fixed scope sentence and the
+    panel wording, and carries no inferential quantity of any kind.
+    """
+    if not isinstance(prior_exposure, str) or not prior_exposure.strip():
+        raise ValueError("the descriptive report refuses to run without a prior exposure statement")
+    d = desc
+    equal = "equal across the three policies" if d["K_equal"] else "NOT equal across the three policies"
+    out = [f"Primary result: descriptive audit of the frozen panel, statistical analysis plan {PLAN_VERSION}",
+           SCOPE_TEXT,
+           f"Panel: {PANEL_WORDING}.",
+           f"Prior exposure statement: {prior_exposure}",
+           ""]
+    out += _provenance_lines(d["provenance"])
+    out += ["", "Label-free design",
+            f"  N = {d['N']}, invalid A1 n_inv = {d['n_inv']}, valid N_V = {d['N_V']}",
+            f"  disagreeing n_D1 = {d['n_D1']}, agreeing n_D0 = {d['n_D0']}",
+            f"  agreeing groups: U2 = {d['n_U2']}, U1 = {d['n_U1']}, S = {d['n_S']}; "
+            f"R_unobserved = {d['R_unobserved']}",
+            f"  slice s = {d['s']}; review count K = {d['K']}, {equal} ("
+            + ", ".join(f"{POLICY_NAMES[p]} {d['K_by_policy'][p]}" for p in POLICY_ORDER) + ")",
+            f"  regime: {d['regime']}; {REGIME_NOTES[d['regime']]}",
+            ""]
+    out += _repeat_lines(d["repeat_flags"])
+    out += ["", "INVALID OUTPUTS by judge slot and category", "  slot | invalid | categories"]
+    for k, total in d["invalid_by_slot"].items():
+        cats = ", ".join(f"{cat} {c}" for (slot, cat), c in sorted(d["invalid_by_slot_category"].items())
+                         if slot == k)
+        out.append(f"  {k} | {total} | {cats if cats else 'none'}")
+    if d["invalid_counts"] is not None:
+        out += [""] + _invalid_lines(d["invalid_counts"])
+    out.append("")
+    if d["reference_supplied"]:
+        out += _coverage_lines(d)
+    else:
+        out += ["REFERENCE LABEL COVERAGE: Unsure and missing labels", "  " + REFERENCE_NOT_SUPPLIED_TEXT]
+    mc = d["m_counts"]
+    out += ["", "REFERENCE-CONTRADICTED FIRST VERDICTS",
+            f"  M = {d['M']}: disagreement m_G1 = {mc['G1']}; unstable agreeing m1 = {d['m1']} "
+            f"(m_U2 = {mc['U2']}, m_U1 = {mc['U1']}); stable agreeing m0 = {d['m0']}",
+            "", "EXPECTED CAPTURE at the same review count, exact over each policy's random choices",
+            "  policy | expected capture | share of M"]
+    for p in POLICY_ORDER:
+        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {_exact_text(d['share_of_M'][p])}")
+    g = d["gain"]
+    out += ["", "GAIN OF INSTABILITY-FIRST REVIEW, in expected reference-contradicted first verdicts"]
+    for key, name in (("over_disagreement", "disagreement-first"), ("over_random", "random")):
+        out.append(f"  over {name}: {_exact_text(g[key]['verdicts'])} verdicts; "
+                   f"{_exact_text(g[key]['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
+    out.append("")
+    if d["secondary"] is None:
+        out += ["SECONDARY RESULT: the same gain per 100 tasks with a usable label",
+                "  Not assessed: the reference statuses were not supplied."]
+    else:
+        out.append(f"SECONDARY RESULT: the same gain per 100 tasks with a usable label "
+                   f"(N_Y = {d['N_Y']} of N = {d['N']})")
+        out.append(f"  over disagreement-first: {_exact_text(d['secondary']['over_disagreement'])} per 100")
+        out.append(f"  over random: {_exact_text(d['secondary']['over_random'])} per 100")
+    pr = d["practical_reference"]
+    out += ["", f"PRACTICAL REFERENCE: {pr['per_100']} per 100 panel tasks, descriptive only",
+            f"  gain over disagreement-first per 100 panel tasks: "
+            f"{_exact_text(g['over_disagreement']['per_100_panel'])}; "
+            f"{pr['status'] if pr['status'] is not None else 'no comparison is defined'}.",
+            ""]
+    out += _validity_lines(d["validity"])
+    out.append("")
+    out += _cost_lines(d["costs"])
     return "\n".join(out)

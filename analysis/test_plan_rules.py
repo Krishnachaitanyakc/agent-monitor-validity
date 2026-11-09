@@ -16,6 +16,19 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sap  # noqa: E402
 
+
+# The population-inference path runs only when asked for explicitly.
+def analyze(*args, **kw):
+    return sap.analyze(*args, path=sap.PATH_POPULATION, **kw)
+
+
+def analyze_panel(*args, **kw):
+    return sap.analyze_panel(*args, path=sap.PATH_POPULATION, **kw)
+
+
+def analyze_with_sensitivities(*args, **kw):
+    return sap.analyze_with_sensitivities(*args, path=sap.PATH_POPULATION, **kw)
+
 U, UNS, MIS = sap.USABLE, sap.UNSURE, sap.MISSING
 
 
@@ -126,7 +139,7 @@ class TestOutcomeClasses(unittest.TestCase):
             with self.assertRaises(sap.UnfinishedSlot, msg=k):
                 sap.invalid_counts([halted])
             with self.assertRaises(sap.UnfinishedSlot, msg=k):
-                sap.analyze_panel([ok, halted], [0, 0])
+                analyze_panel([ok, halted], [0, 0])
         with self.assertRaises(sap.UnfinishedSlot):
             sap.join_reference([dict(ok, A1=H)], ["Successful"])
         A = sap.Attempt
@@ -177,14 +190,14 @@ class TestReferenceJoin(unittest.TestCase):
         ref = [U] * 55
         E[12], ref[12] = 1, UNS                                  # an Unsure task marked discordant
         with self.assertRaises(ValueError):
-            sap.analyze(labels, E, reference=ref)
+            analyze(labels, E, reference=ref)
         ref[12] = MIS
         with self.assertRaises(ValueError):
-            sap.analyze(labels, E, reference=ref)
+            analyze(labels, E, reference=ref)
         E2, ref2 = [1] + [0] * 54, [UNS] + [U] * 54             # an invalid A1 has no verdict: E is ignored
-        sap.analyze(["I"] + labels[1:], E2, reference=ref2)
+        analyze(["I"] + labels[1:], E2, reference=ref2)
         with self.assertRaises(ValueError):
-            sap.analyze(labels, [0] * 55, reference=["sure"] * 55)
+            analyze(labels, [0] * 55, reference=["sure"] * 55)
 
 
 GOLDEN_ALL_USABLE = {
@@ -227,7 +240,7 @@ class TestAllLabelsUsable(unittest.TestCase):
             labels, E, kw = g["panel"]
             for ref in (None, [U] * len(labels)):
                 with self.subTest(panel=name, reference=ref is not None):
-                    r = sap.analyze(labels, E, reference=ref, **kw)
+                    r = analyze(labels, E, reference=ref, **kw)
                     for k, v in g["captures"].items():
                         self.assertEqual(r["captures"][k], v)
                     self.assertEqual(r["Delta_per100"], g["Delta_per100"])
@@ -275,8 +288,8 @@ class TestAllLabelsUsable(unittest.TestCase):
             slots.append(sl)
             E.append(int(rng.random() < 0.2))
         ids = [f"t{i:03d}" for i in range(150)]
-        a = sap.analyze_panel(slots, E, ids=ids, seed=7, boot_B=500)
-        b = sap.analyze_panel(slots, E, ids=ids, seed=7, boot_B=500, reference=[U] * 150)
+        a = analyze_panel(slots, E, ids=ids, seed=7, boot_B=500)
+        b = analyze_panel(slots, E, ids=ids, seed=7, boot_B=500, reference=[U] * 150)
         for (_, ra), (_, rb) in zip([("p", a["primary"])] + a["sensitivities"],
                                     [("p", b["primary"])] + b["sensitivities"]):
             for key in ("label_free", "m_counts", "captures", "Delta_per100", "existence", "size"):
@@ -295,8 +308,8 @@ class TestReferenceHandling(unittest.TestCase):
     def test_unsure_tasks_stay_in_the_panel_and_review_count(self):
         # 80 of 160 stable agreeing tasks are Unsure.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 10)), block("S", rows(16, 80, 80)))
-        r = sap.analyze(labels, E, reference=ref)
-        bare = sap.analyze(labels, E)                            # same E, statuses not supplied
+        r = analyze(labels, E, reference=ref)
+        bare = analyze(labels, E)                            # same E, statuses not supplied
         lf = r["label_free"]
         self.assertEqual(lf, bare["label_free"])                  # design, s, K and regime fixed on N
         self.assertEqual((lf["N"], lf["N_per100"], lf["n0"], lf["s"], lf["K"], lf["regime"]),
@@ -316,7 +329,7 @@ class TestReferenceHandling(unittest.TestCase):
     def test_unsure_share_differs_between_unstable_and_stable(self):
         # Stable agreeing tasks are half Unsure; usable discordance is 20% in both U and S.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 10)), block("S", rows(16, 80, 80)))
-        r = sap.analyze(labels, E, reference=ref)
+        r = analyze(labels, E, reference=ref)
         sec, lf = r["secondary"], r["label_free"]
         L, Delta = lf["L"], r["captures"]["Delta"]
         self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"]), (110, 10, 80))
@@ -333,7 +346,7 @@ class TestReferenceHandling(unittest.TestCase):
 
         # Reverse: half of the unstable tasks are Unsure.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 5, 5)), block("S", rows(16, 160)))
-        r = sap.analyze(labels, E, reference=ref)
+        r = analyze(labels, E, reference=ref)
         sec = r["secondary"]
         self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"]), (185, 5, 160))
         self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 185)
@@ -345,7 +358,7 @@ class TestReferenceHandling(unittest.TestCase):
         # All stable agreeing tasks Unsure.
         labels, E, ref = panel(block("I", rows(0, 2)), block("G1", rows(5, 20)), block("U1", rows(3, 10)),
                                block("S", rows(0, 0, 160)))
-        r = sap.analyze(labels, E, reference=ref)
+        r = analyze(labels, E, reference=ref)
         self.assertEqual(r["label_free"]["regime"], "COVERAGE")
         self.assertEqual(r["existence"]["p"], sap.fisher_one_sided(3, 10, 0, 160))
         self.assertIsNotNone(r["size"])
@@ -359,12 +372,12 @@ class TestReferenceHandling(unittest.TestCase):
         # All unstable agreeing tasks Unsure: m1 is 0 by construction.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U2", rows(0, 0, 4)), block("U1", rows(0, 0, 6)),
                                block("S", rows(16, 160)))
-        r = sap.analyze(labels, E, reference=ref)
+        r = analyze(labels, E, reference=ref)
         self.assertEqual((r["m1"], r["existence"]["p"]), (0, 1.0))
         # Every label Unsure or missing.
         labels = labels_for(0, 20, 0, 10, 160)
         ref = [UNS] * 100 + [MIS] * 90
-        r = sap.analyze(labels, [0] * 190, reference=ref)
+        r = analyze(labels, [0] * 190, reference=ref)
         self.assertEqual(r["secondary"]["N_Y"], 0)
         self.assertIsNone(r["secondary"]["plan_literal"])
         self.assertEqual(r["secondary"]["not_estimable"], "no panel task has a usable label")
@@ -373,7 +386,7 @@ class TestReferenceHandling(unittest.TestCase):
         # All invalid-first-verdict tasks Unsure: only N_Y moves.
         labels, E, ref = panel(block("I", rows(0, 0, 6)), block("G1", rows(5, 20)), block("U1", rows(2, 10)),
                                block("S", rows(16, 160)))
-        r = sap.analyze(labels, E, reference=ref)
+        r = analyze(labels, E, reference=ref)
         sec = r["secondary"]
         self.assertEqual((sec["N_Y"], sec["n1_Y"], sec["n0_Y"]), (190, 10, 160))
         self.assertEqual(sec["plan_literal"]["G_hat_exact"], 100 * r["captures"]["Delta"] / 190)
@@ -382,7 +395,7 @@ class TestReferenceHandling(unittest.TestCase):
         # N = 26, s = 4 < n1 = 9: partial regime, with Unsure tasks in every agreeing stratum.
         labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(1, 2, 1)), block("U1", rows(1, 4, 2)),
                                block("S", rows(2, 8, 4)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=2000)
+        r = analyze(labels, E, reference=ref, boot_B=2000)
         self.assertEqual(r["label_free"]["regime"], "PARTIAL")
         sec = r["secondary"]
         self.assertEqual(sec["N_Y"], 19)
@@ -412,7 +425,7 @@ class TestReferenceHandling(unittest.TestCase):
             Y.append("Unsure" if i % 9 == 0 else (None if i % 17 == 0 else
                                                    ("Successful" if rng.random() < 0.5 else "Unsuccessful")))
         j = sap.join_reference(slots, Y)
-        outs = sap.analyze_with_sensitivities(slots, j["E"], reference=j["reference"], boot_B=300)
+        outs = analyze_with_sensitivities(slots, j["E"], reference=j["reference"], boot_B=300)
         NY0 = outs[0][1]["secondary"]["N_Y"]
         self.assertEqual(NY0, sum(s == U for s in j["reference"]))
         for _, r in outs[1:]:
@@ -432,7 +445,7 @@ class TestCoverage(unittest.TestCase):
 
     def test_coverage_counts_by_group_and_benchmark(self):
         labels, E, ref, bench = self._panel()
-        r = sap.analyze(labels, E, reference=ref, benchmarks=bench, seed=11)
+        r = analyze(labels, E, reference=ref, benchmarks=bench, seed=11)
         lf = r["label_free"]
         self.assertEqual((lf["N"], lf["s"], lf["K"], lf["n1"], lf["regime"]), (200, 30, 54, 8, "COVERAGE"))
         g = r["coverage"]["groups"]
@@ -450,7 +463,7 @@ class TestCoverage(unittest.TestCase):
 
     def test_policy_selections_of_unknown_labels(self):
         labels, E, ref, bench = self._panel()
-        r = sap.analyze(labels, E, reference=ref, seed=11)
+        r = analyze(labels, E, reference=ref, seed=11)
         sel = r["coverage"]["selected_expected"]
         f_dis, f_aug_S, f_rand = Fraction(30, 176), Fraction(30 - 8, 168), Fraction(54 - 4, 196)
         want = {
@@ -489,9 +502,9 @@ class TestCoverage(unittest.TestCase):
                           "U1": {"A1": a1, "A2": "failure", "A3": a1, "B1": a1},
                           "S": {"A1": a1, "A2": a1, "A3": a1, "B1": a1}}[lab])
         ids = [f"t{i:03d}" for i in range(200)]
-        p = sap.analyze_panel(slots, E, ids=ids, benchmarks=bench, reference=ref, seed=3, boot_B=300)
+        p = analyze_panel(slots, E, ids=ids, benchmarks=bench, reference=ref, seed=3, boot_B=300)
         self.assertEqual(list(p["primary"]["label_free"].values()),
-                         list(sap.analyze_panel(slots, E, ids=ids, seed=3, boot_B=300)["primary"]["label_free"].values()))
+                         list(analyze_panel(slots, E, ids=ids, seed=3, boot_B=300)["primary"]["label_free"].values()))
         txt = sap.panel_report(p)
         for needle in ("REFERENCE LABEL COVERAGE: Unsure and missing labels", "unknown, not correct verdicts",
                        "count as not reference-contradicted", "stable agreeing | 168 | 153 | 10 | 5",
@@ -577,7 +590,7 @@ class TestPanelUnit(unittest.TestCase):
         self.assertEqual(sap.select_panel(runs, 4), ids)
         tp = sap.select_panel(runs, 4, unit="template")
         self.assertEqual(len(tp), 100)
-        out = sap.analyze_panel(slots, E, ids=ids, templates=tmpl, template_panel=tp, seed=4, boot_B=300)
+        out = analyze_panel(slots, E, ids=ids, templates=tmpl, template_panel=tp, seed=4, boot_B=300)
         self.assertEqual(out["primary"]["label_free"]["N"], 200)
         self.assertEqual(out["template_panel"]["n"], 100)
         self.assertEqual(out["template_panel"]["result"]["label_free"]["N"], 100)
@@ -591,9 +604,9 @@ class TestPanelUnit(unittest.TestCase):
                        "One agreeing item per template"):
             self.assertIn(needle, txt, needle)
         with self.assertRaises(ValueError):
-            sap.analyze_panel(slots, E, ids=ids, template_panel=tp + ["task-9999"])
+            analyze_panel(slots, E, ids=ids, template_panel=tp + ["task-9999"])
         with self.assertRaises(ValueError):
-            sap.analyze_panel(slots, E, template_panel=tp)
+            analyze_panel(slots, E, template_panel=tp)
 
 
 def random_slots(n, seed):
@@ -615,7 +628,7 @@ def random_slots(n, seed):
 class TestReferenceNotSupplied(unittest.TestCase):
     def test_report_says_statuses_were_not_supplied(self):
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 10)), block("S", rows(16, 80, 80)))
-        bare = sap.analyze(labels, E)
+        bare = analyze(labels, E)
         self.assertFalse(bare["reference_supplied"])
         self.assertIsNone(bare["secondary"])
         self.assertIsNone(bare["coverage"])
@@ -627,7 +640,7 @@ class TestReferenceNotSupplied(unittest.TestCase):
         for absent in ("SECONDARY RESULT", "REFERENCE LABEL COVERAGE", "Unsure 0", "missing 0", "N_Y",
                        "count as not reference-contradicted", "group | tasks"):
             self.assertNotIn(absent, txt, absent)
-        full = sap.report(sap.analyze(labels, E, reference=ref))
+        full = sap.report(analyze(labels, E, reference=ref))
         self.assertNotIn(sap.REFERENCE_NOT_SUPPLIED_TEXT, full)
         for present in ("SECONDARY RESULT", "REFERENCE LABEL COVERAGE", "(Unsure 80, missing 0)"):
             self.assertIn(present, full, present)
@@ -636,7 +649,7 @@ class TestReferenceNotSupplied(unittest.TestCase):
         slots, E, ids, tmpl = random_slots(120, 8)
         runs = [{"run_id": t, "task_id": t, "template_id": g, "passes": True} for t, g in zip(ids, tmpl)]
         tp = sap.select_panel(runs, 2, unit="template")
-        out = sap.analyze_panel(slots, E, ids=ids, templates=tmpl, template_panel=tp, seed=2, boot_B=200)
+        out = analyze_panel(slots, E, ids=ids, templates=tmpl, template_panel=tp, seed=2, boot_B=200)
         self.assertIsNone(out["primary"]["secondary"])
         self.assertIsNone(out["template_panel"]["result"]["secondary"])
         self.assertTrue(all(r["secondary"] is None for _, r in out["sensitivities"]))
@@ -645,17 +658,17 @@ class TestReferenceNotSupplied(unittest.TestCase):
         for absent in ("N_Y", "SECONDARY RESULT", "REFERENCE LABEL COVERAGE", "secondary (per 100"):
             self.assertNotIn(absent, txt, absent)
         ref = [U] * 120
-        out = sap.analyze_panel(slots, E, ids=ids, templates=tmpl, template_panel=tp, seed=2, boot_B=200,
+        out = analyze_panel(slots, E, ids=ids, templates=tmpl, template_panel=tp, seed=2, boot_B=200,
                                 reference=ref)
         self.assertEqual(out["template_panel"]["result"]["secondary"]["N_Y"], len(tp))
         self.assertIn("N_Y = 120", sap.panel_report(out))
 
     def test_by_benchmark_not_supplied(self):
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(2, 10)), block("S", rows(16, 80, 80)))
-        txt = sap.report(sap.analyze(labels, E, reference=ref))
+        txt = sap.report(analyze(labels, E, reference=ref))
         self.assertIn("  By benchmark: not supplied", txt)
         bench = ["webarena" if i % 3 else "workarena" for i in range(len(labels))]
-        txt = sap.report(sap.analyze(labels, E, reference=ref, benchmarks=bench))
+        txt = sap.report(analyze(labels, E, reference=ref, benchmarks=bench))
         self.assertNotIn("By benchmark: not supplied", txt)
         self.assertIn("benchmark | tasks | usable | Unsure | missing", txt)
 
@@ -684,14 +697,14 @@ class TestSecondaryResult(unittest.TestCase):
 
     def test_no_threshold_claim_in_either_regime(self):
         for (labels, E, ref), regime in zip(self.panels(), ("COVERAGE", "PARTIAL")):
-            r = sap.analyze(labels, E, reference=ref, boot_B=500)
+            r = analyze(labels, E, reference=ref, boot_B=500)
             self.assertEqual(r["label_free"]["regime"], regime)
             self.check_layout(r)
 
     def test_the_usable_only_comparator_is_gone(self):
         # The secondary result is the same policy gain rescaled by usable labels, nothing else.
         for labels, E, ref in self.panels():
-            r = sap.analyze(labels, E, reference=ref, boot_B=500)
+            r = analyze(labels, E, reference=ref, boot_B=500)
             self.assertEqual(set(r["secondary"]), {"N_Y", "N_Y_per100", "n_Y", "n1_Y", "n0_Y", "regime",
                                                    "not_estimable", "plan_literal"})
             text = sap.report(r) + "\n".join(sap._brief("x", r))
@@ -724,7 +737,7 @@ def full_search(d, m, nY):
 class TestFragilityUsableLabels(unittest.TestCase):
     def test_no_usable_label_to_flip(self):
         labels = labels_for(0, 20, 0, 10, 160)
-        r = sap.analyze(labels, [0] * 190, reference=[UNS] * 100 + [MIS] * 90)
+        r = analyze(labels, [0] * 190, reference=[UNS] * 100 + [MIS] * 90)
         ex = r["existence"]
         self.assertFalse(ex["reject"])
         self.assertIsNone(ex["fragility"])
@@ -733,14 +746,14 @@ class TestFragilityUsableLabels(unittest.TestCase):
         self.assertIn(NOT_DEFINED, txt)
         self.assertNotIn("would reverse this decision", txt)
         # The same discordance with every label usable: two flips in U reverse the decision.
-        bare = sap.analyze(labels, [0] * 190)
+        bare = analyze(labels, [0] * 190)
         self.assertEqual((bare["existence"]["fragility"], bare["existence"]["fragility_defined"]), (2, True))
         self.assertIn("Fragility: 2 usable reference-label flips among agreeing tasks", sap.report(bare))
 
     def test_flips_stay_within_usable_labels(self):
         # U1: one discordant and one concordant usable label, 8 Unsure; S: 6 of 160 discordant.
         labels, E, ref = panel(block("G1", rows(5, 20)), block("U1", rows(1, 2, 8)), block("S", rows(6, 160)))
-        r = sap.analyze(labels, E, reference=ref)
+        r = analyze(labels, E, reference=ref)
         lf, ex = r["label_free"], r["existence"]
         self.assertEqual((lf["regime"], lf["n1"], lf["n0"]), ("COVERAGE", 10, 160))
         self.assertFalse(ex["reject"])
@@ -761,7 +774,7 @@ class TestFragilityUsableLabels(unittest.TestCase):
     def test_partial_regime_flips_stay_within_usable_labels(self):
         labels, E, ref = panel(block("G1", rows(2, 5)), block("U2", rows(0, 1, 2)), block("U1", rows(0, 2, 4)),
                                block("S", rows(3, 12)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=200)
+        r = analyze(labels, E, reference=ref, boot_B=200)
         self.assertEqual(r["label_free"]["regime"], "PARTIAL")
         ex, d = r["existence"], sap.Design.from_labels(labels)
         # One usable U2 label and two usable U1 labels, all concordant, cannot carry a rejection.
@@ -779,7 +792,7 @@ class TestFragilityUsableLabels(unittest.TestCase):
         # U2, U1 and S are 2/5, -1/5 and -1/5. Rejection needs fewer discordant U1 tasks.
         labels = labels_for(0, 5, 5, 7, 3)
         E = E_for(G1=(5, 0), U2=(5, 1), U1=(7, 4), S=(3, 1))
-        r = sap.analyze(labels, E, boot_B=50)
+        r = analyze(labels, E, boot_B=50)
         d, ex = sap.Design.from_labels(labels), r["existence"]
         self.assertEqual((d.regime, d.s, d.n_D0), ("PARTIAL", 3, 15))
         self.assertEqual(sap.delta_weights(d), {"U2": Fraction(2, 5), "U1": Fraction(-1, 5), "S": Fraction(-1, 5)})
@@ -801,7 +814,7 @@ class TestFragilityUsableLabels(unittest.TestCase):
         # m1 stays 0 and p stays 1 whatever usable label is flipped.
         labels, E, ref = panel(block("G1", rows(0, 10)), block("U2", rows(0, 0, 3)), block("U1", rows(0, 0, 5)),
                                block("S", rows(5, 80)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=50)
+        r = analyze(labels, E, reference=ref, boot_B=50)
         ex = r["existence"]
         self.assertEqual((r["label_free"]["regime"], r["m1"], r["m0"]), ("COVERAGE", 0, 5))
         self.assertEqual((ex["p"], ex["reject"], ex["fragility"], ex["fragility_defined"]), (1.0, False, None, False))
@@ -811,20 +824,20 @@ class TestFragilityUsableLabels(unittest.TestCase):
         # One usable unstable label: the best reachable table, m1 = 1 of 8 and m0 = 0 of 80,
         # gives p = 1/11, so no set of flips reverses the decision.
         labels, E, ref = panel(block("G1", rows(0, 10)), block("U1", rows(0, 1, 7)), block("S", rows(0, 80)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=50)
+        r = analyze(labels, E, reference=ref, boot_B=50)
         ex = r["existence"]
         self.assertEqual(sap.fisher_one_sided(1, 8, 0, 80, exact=True), Fraction(1, 11))
         self.assertEqual((ex["fragility"], ex["fragility_defined"]), (None, False))
         self.assertIn(NOT_DEFINED, sap.report(r))
         # Every label usable: one unstable task among 31 agreeing tasks gives at best p = 1/31.
-        r = sap.analyze(labels_for(0, 4, 0, 1, 30), [0] * 35)
+        r = analyze(labels_for(0, 4, 0, 1, 30), [0] * 35)
         ex = r["existence"]
         self.assertEqual(r["label_free"]["regime"], "COVERAGE")
         self.assertEqual((ex["fragility"], ex["fragility_defined"]), (None, False))
         self.assertIn(NOT_DEFINED, sap.report(r))
         # Partial regime: every unstable label Unsure, 3 of 10 usable stable labels discordant.
         labels, E, ref = panel(block("G1", rows(0, 13)), block("U2", rows(0, 0, 10)), block("S", rows(3, 10)))
-        r = sap.analyze(labels, E, reference=ref, boot_B=50)
+        r = analyze(labels, E, reference=ref, boot_B=50)
         ex = r["existence"]
         self.assertEqual(r["label_free"]["regime"], "PARTIAL")
         self.assertEqual((ex["reject"], ex["fragility"], ex["fragility_defined"]), (False, None, False))
@@ -833,7 +846,7 @@ class TestFragilityUsableLabels(unittest.TestCase):
     def test_more_than_the_search_depth_only_when_reversible(self):
         # All 20 unstable tasks discordant, no stable one: more than 15 flips are needed.
         labels = labels_for(0, 10, 0, 20, 150)
-        r = sap.analyze(labels, E_for(U1=(20, 20), S=(150, 0), G1=(10, 0)), boot_B=50)
+        r = analyze(labels, E_for(U1=(20, 20), S=(150, 0), G1=(10, 0)), boot_B=50)
         ex = r["existence"]
         self.assertEqual(r["label_free"]["regime"], "COVERAGE")
         self.assertEqual((ex["reject"], ex["fragility"], ex["fragility_defined"]), (True, None, True))
