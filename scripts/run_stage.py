@@ -25,7 +25,9 @@ only under the model it started with. In the evaluation, a trajectory does not s
 with a reconcile_due halt, once the oldest call that no passing reconciliation follows
 is more than 23 hours old (a single call is refused at 24 hours), and EVAL's report is
 complete only after a passing reconciliation that follows its last call: reconcile, then
-run the same command again to write it.
+run the same command again to write it. A pilot stage records an ineligible case and goes
+on. Eligibility is settled before the panel is frozen, so in EVAL an ineligible task halts
+the stage, is not counted as ended and does not change N, and a note does not drop it.
 
 **Transport.** With none of --paid, --confirm-paid-calls and --approval-note, only the
 fake transport runs: every socket connection is refused, no API key is read, and
@@ -134,6 +136,9 @@ RESUME_RULES = {
     "orphan_attempt": "nothing was sent; leave the raw response where it is, since the next start rebuilds its "
                       "attempt record from it, then note this halt and resume",
     "over_reservation": "check the token count behind the reservation before resuming",
+    "ineligible_frozen_task": "nothing of the trajectory was sent; eligibility was settled before the panel was "
+                              "frozen, so a note does not drop the task or change N, and the gate is applied again "
+                              "on resume",
 }
 FAKE_TRANSPORT = "fake transport with scripted provider-shaped streams"
 
@@ -822,6 +827,15 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         prep = R.prepare(item.pack, read_images(item.entries), b_model=b_model, caching=spec.caching)
         if not prep["eligible"]:
             rows.append({"trace_key": item.trace_key, "eligible": False, "reasons": prep["reasons"]})
+            if spec.name == "EVAL":                 # eligibility was settled before the panel was frozen
+                halt_id = log.write_halt({
+                    "trace_key": item.trace_key, "config_sha256": config_hash, "slot": None, "attempt": None,
+                    "halt_kind": "ineligible_frozen_task", "failed_checks": [], "error": None, "http_status": None,
+                    "detail": "a task of the frozen panel is ineligible: " + "; ".join(prep["reasons"]),
+                    "at": _now(clock), "resume_rule": RESUME_RULES["ineligible_frozen_task"]})
+                stopped = {"halt_id": halt_id, "kind": "ineligible_frozen_task", "trace_key": item.trace_key,
+                           "slot": None}
+                break
             continue
         reqs, inputs = prep["requests"], {}
         for j in "AB":
@@ -913,7 +927,7 @@ def stage_report(spec, run, items, log, ledger, config_hash, mode, b_model, rebu
                 finals[f"{j}{r}"].append(recs[-1])
             else:
                 done = False
-        ended += done or item.trace_key in ineligible
+        ended += done or (spec.name != "EVAL" and item.trace_key in ineligible)
 
     invalid = {}
     for s, fs in finals.items():

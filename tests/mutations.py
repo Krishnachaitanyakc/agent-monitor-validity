@@ -390,6 +390,20 @@ MUTATIONS = [
     ("describe a rebuild that raised as no response", "judge/dispatch.py",
      '                                      if fields["halt_kind"] == CLASSIFICATION_ERROR else\n',
      "                                      if False else\n"),
+    ("record an ineligible frozen task and go on", "scripts/run_stage.py",
+     '            if spec.name == "EVAL":                 # eligibility was settled before the panel was frozen\n',
+     "            if False:\n"),
+    ("halt a pilot stage on an ineligible case", "scripts/run_stage.py",
+     '            if spec.name == "EVAL":                 # eligibility was settled before the panel was frozen\n',
+     "            if True:\n"),
+    ("count an ineligible frozen task as ended", "scripts/run_stage.py",
+     '        ended += done or (spec.name != "EVAL" and item.trace_key in ineligible)\n',
+     "        ended += done or item.trace_key in ineligible\n"),
+    ("stop counting an ineligible pilot case as ended", "scripts/run_stage.py",
+     '        ended += done or (spec.name != "EVAL" and item.trace_key in ineligible)\n', "        ended += done\n"),
+    ("start the next frozen task after an ineligible one halts", "scripts/run_stage.py",
+     '                           "slot": None}\n                break\n            continue\n',
+     '                           "slot": None}\n            continue\n'),
 ]
 
 

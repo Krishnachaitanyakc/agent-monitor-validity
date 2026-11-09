@@ -13,6 +13,8 @@
 
 A stage starts only after the previous stage's complete `report.json`, in the same mode, and a passing reconciliation after that stage's last call. P3 and EVAL also refuse a rubric whose status is not `frozen`. EVAL needs `--panel-manifest`, its recorded `--panel-sha256` and `--freeze-tag`: the manifest must match the hash, name the tag and config hash, and list the given packs in order, with the code at the tag and a clean tree. `--b-model` picks judge B's model, `gpt-6-sol` or its first fallback `gpt-6.1-sol`; the model is part of the configuration hash, so a fallback is a configuration change, not a code edit. `run.json` fixes the run's mode, study workspace and OpenAI project at its first stage, and every later stage must give the same ones. A resumed stage also keeps its packs, configuration and ledger; a finished one never reruns.
 
+A pilot stage records an ineligible case with its reasons and goes on. Eligibility is settled before the panel is frozen, so in EVAL an ineligible task is an unexpected failure: it writes an `ineligible_frozen_task` halt and the stage stops. The task does not count as ended and N stays the manifest's, so the report cannot be complete without its judgments. A note does not drop the task, and the gate is applied again on resume.
+
 The dispatcher takes all four slots or, for prompt development, A1 and B1 only; any other set is refused. `run_stage` runs only the fake transport in fake mode and only the HTTPS transport in paid mode, on a ledger of the same mode.
 
 ## Gates

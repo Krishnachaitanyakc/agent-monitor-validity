@@ -49,6 +49,12 @@ def items(n, tag):
     return out
 
 
+def ineligible_item(tag):
+    """An item whose 601 images are above judge A's limit, even after the shared fallback."""
+    pack = synthetic_pack(600, goal=f"Find the cheapest mug, case {tag}.")
+    return RS.Item(f"t{tag}{0:015d}"[:17], pack, P.sha256_text(P.serialize(pack)), images_for(pack), [])
+
+
 def reserves(led):
     return [e for e in led.entries if e["type"] == "reserve"]
 
@@ -253,6 +259,15 @@ class TestPilot(RunnerCase):
         self.assertEqual([(e["attempt"], led.reservations[e["id"]]["state"]) for e in a2],
                          [(1, "held"), (1, "settled")])
         self.assertEqual(led.totals()["held"], r)
+
+    def test_an_ineligible_pilot_case_is_recorded_and_the_stage_goes_on(self):
+        led = self.ledger()
+        bad = ineligible_item("x")
+        report, provider = self.stage("P1", [bad, *items(1, "a")], led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual(report["cases"], {"planned": 5, "given": 2, "ended": 2, "ineligible": [bad.trace_key]})
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B"])
+        self.assertEqual(report["gates"]["halts"], [])
 
     def test_a_call_that_costs_more_than_its_reservation_halts_once_its_trajectory_finishes(self):
         led = self.ledger()
@@ -981,6 +996,47 @@ class TestEval(RunnerCase):
                          ("evaluation", "285", True))
         self.assertEqual(report["panel"]["freeze_tag"], "freeze-1")
         self.assertEqual(report["settings"]["fence_profile"], "pre_join")
+
+    def test_an_ineligible_frozen_task_halts_and_does_not_change_n(self):
+        bad = ineligible_item("x")
+        self.panel_items = [bad, *items(1, "e")]
+        panel = self.write_manifest()
+        report, provider = self.eval(panel)
+        self.assertEqual(provider.sent, [])                                 # the next task is not started
+        self.assertEqual((report["complete"], report["stopped"]["kind"], report["stopped"]["trace_key"]),
+                         (False, "ineligible_frozen_task", bad.trace_key))
+        self.assertIsNone(report["stopped"]["slot"])
+        n = {"planned": 2, "given": 2, "ended": 0, "ineligible": [bad.trace_key]}
+        self.assertEqual(report["cases"], n)
+        self.assertFalse((self.root / "EVAL" / "report.json").exists())
+        log = AttemptLog(self.root / "EVAL" / "attempt_log")
+        halt = log.halts()[0]
+        self.assertEqual(halt["detail"], "a task of the frozen panel is ineligible: A: 601 images, above 600")
+        self.assertIn("does not drop the task", halt["resume_rule"])
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.eval(panel)
+        log.record_correction(halt["halt_id"], "Checked the panel.", R.config_sha256(), at="now")
+        report, provider = self.eval(panel)                                 # a note does not drop the task
+        self.assertEqual(provider.sent, [])
+        self.assertEqual((report["complete"], report["stopped"]["kind"]), (False, "ineligible_frozen_task"))
+        self.assertEqual(report["cases"], n)
+        self.assertEqual(len(log.halts()), 2)
+
+    def test_an_ineligible_frozen_task_is_not_ended_so_the_stage_never_completes_without_its_judgments(self):
+        bad = ineligible_item("x")
+        self.panel_items = [*items(1, "e"), bad]
+        panel = self.write_manifest()
+        report, provider = self.eval(panel)
+        self.assertEqual(len(provider.sent), 4)
+        self.assertEqual((report["stopped"]["kind"], report["cases"]["ended"]), ("ineligible_frozen_task", 1))
+        with self.eval_ledger() as led:
+            self.assertTrue(self.reconcile(led)["ok"])
+        AttemptLog(self.root / "EVAL" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Checked the panel.", R.config_sha256(), at="now")
+        report, provider = self.eval(panel)
+        self.assertEqual(provider.sent, [])
+        self.assertEqual((report["complete"], report["awaiting"], report["cases"]["ended"]), (False, None, 1))
+        self.assertFalse((self.root / "EVAL" / "report.json").exists())
 
     def test_eval_needs_the_pilot_ledger_reconciled(self):
         with S.Ledger(RS.ledger_path(self.ledgers, "pilot"), "pilot") as pilot:
