@@ -30,7 +30,7 @@ If a python.org install on macOS fails with `CERTIFICATE_VERIFY_FAILED`, run its
 
 > **Never open `<data-root>/raw/data/annotations.csv` directly.** It is ARB's full label file and holds the test-split labels, which must stay unseen until the predictions are locked. The split guard lives in the loader, not in the file: read labels only through `datapath.labels.load_labels`.
 
-Tests use a synthetic fixture and need no network. The second command applies three hundred twenty-seven deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
+Tests use a synthetic fixture and need no network. The second command applies four hundred thirteen deliberate breaks, one at a time, to a temporary copy and checks that the tests catch each:
 
 ```bash
 python3 -m unittest discover -s tests

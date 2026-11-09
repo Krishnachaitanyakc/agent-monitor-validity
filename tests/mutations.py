@@ -282,6 +282,12 @@ MUTATIONS = [
      'DA.verify_allocation(json.loads(Path(args.allocation).expanduser().read_bytes()))', 'json.loads(Path(args.allocation).expanduser().read_bytes())'),
     ("let unreadable counts files stop with a traceback", "scripts/build_dev_table.py",
      "    except (ValueError, KeyError, TypeError) as e:  # a file", "    except ZeroDivisionError as e:  # a file"),
+    ("drop a frozen-pass task from the known-use record", "docs/ALLOCATION_RECORD.md",
+     "| `webarena.430` | p3 |", "| `webarena.431` | p3 |"),
+    ("say a task quoted in the walkthrough was not read", "docs/ALLOCATION_RECORD.md",
+     "| `visualwebarena.419` | p3 | Yes. Its goal", "| `visualwebarena.419` | p3 | No record of it being read. Its goal"),
+    ("list a frozen-pass task under another stage in the known-use record", "docs/ALLOCATION_RECORD.md",
+     "galaxy-note20-l2` | p3 |", "galaxy-note20-l2` | p2_new |"),
     ("start a stage before the previous one is reconciled", "scripts/run_stage.py",
      "    if not reconciled:", "    if False:"),
     ("remove the guard install from the stage runner", "scripts/run_stage.py",
@@ -956,7 +962,7 @@ def main() -> int:
     missed = 0
     for name, rel, old, new in MUTATIONS:
         with tempfile.TemporaryDirectory() as tmp:
-            for part in ("datapath", "judge", "scripts", "tests"):
+            for part in ("datapath", "docs", "judge", "scripts", "tests"):
                 shutil.copytree(REPO / part, Path(tmp) / part,
                                 ignore=shutil.ignore_patterns("__pycache__"))
             target = Path(tmp) / rel

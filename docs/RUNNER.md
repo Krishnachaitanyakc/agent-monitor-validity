@@ -19,6 +19,8 @@ The dispatcher takes all four slots or, for prompt development, A1 and B1 only; 
 
 ## Development allocation
 
+[ALLOCATION_RECORD.md](ALLOCATION_RECORD.md) holds the study's real draw, with its inputs and hashes, and the record of which of its tasks were used before the draw.
+
 `scripts/build_dev_table.py table` writes the table from two label-free counts files, the task mapping and the eligible panel, leaving out AssistantBench and image-goal tasks. A task's template overlaps the panel when it holds a WebArena or VisualWebArena panel task. The command prints counts only, and a refusal names no panel task.
 
 `scripts/draw_allocation.py` fixes which development tasks each pilot stage may use. It takes a JSON table of development tasks with exactly the fields `task_id`, `benchmark`, `template_overlaps_panel` and `family`, P1's five task IDs and a seed, and it reads no label. The rule, in order:
