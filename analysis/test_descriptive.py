@@ -224,6 +224,34 @@ class TestDesignAndReviewCount(unittest.TestCase):
                           "  agreeing items with one repeat INVALID and no observed flip (R = 0 from one repeat): 1",
                           "  agreeing items with one repeat INVALID and an observed flip: 1"])
 
+    def test_each_printed_count_is_the_one_its_name_says(self):
+        # N = 40, n_inv = 2, N_V = 38, n_D1 = 5, n_D0 = 33, s = 6 and K = 13: no two alike.
+        d = describe(labels_for(2, 5, 1, 2, 30), [0] * 40)
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        for line in ("  N = 40, invalid A1 n_inv = 2, valid N_V = 38",
+                     "  disagreeing n_D1 = 5, agreeing n_D0 = 33",
+                     "  slice s = 6; review count K = 13, K/N = 13/40 (0.3250), equal across the three policies "
+                     "(Instability-first 13, Disagreement-first 13, Random 13)",
+                     "  over disagreement-first: 0 (0.0000) verdicts; 0 (0.0000) per 100 panel tasks (N = 40)",
+                     "  over random: 0 (0.0000) verdicts; 0 (0.0000) per 100 panel tasks (N = 40)",
+                     "  check, disagreement-first minus random: 0 (0.0000) verdicts; 0 (0.0000) per 100 panel tasks (N = 40)"):
+            self.assertIn(line, lines)
+
+    def test_the_three_repeat_counts_are_kept_apart(self):
+        both = dict(slot("S"), A2="REFUSAL", A3="MALFORMED")
+        no_flip = dict(slot("S"), A2="ABSTAIN")
+        flip = dict(slot("S"), A2="ABSTAIN", A3="failure")
+        disagreeing = dict(slot("G1"), A2="ABSTAIN")                # in none of the three: not an agreeing task
+        slots = [both] * 3 + [no_flip] * 2 + [flip] * 5 + [disagreeing] * 7 + [slot("S")] * 4
+        d = describe_panel(slots, Y=["Successful"] * len(slots))
+        self.assertEqual(d["repeat_flags"], {"both_repeats_invalid": 3, "one_repeat_invalid_no_flip": 2, "one_repeat_invalid_flip": 5})
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = lines.index("Repeat observation (label-free)")
+        self.assertEqual(lines[start + 1:start + 4],
+                         ["  agreeing items with both repeats INVALID (R set to 0): 3",
+                          "  agreeing items with one repeat INVALID and no observed flip (R = 0 from one repeat): 2",
+                          "  agreeing items with one repeat INVALID and an observed flip: 5"])
+
     def test_R_unobserved_counts_every_valid_first_verdict(self):
         both = {"A2": "REFUSAL", "A3": "MALFORMED"}
         slots = [dict(slot("S"), **both), dict(slot("G1"), **both), dict(slot("S"))]
@@ -847,6 +875,20 @@ class TestGainsAndReference(unittest.TestCase):
                 self.assertNotIn("practical", block)
                 self.assertNotIn("2 per 100", block)
 
+    def test_a_denominator_of_one_is_defined(self):
+        # One usable label on a task that is contradicted: N_Y = 1 and M = 1. N = 20, s = 3, K = 5.
+        labels = labels_for(0, 2, 0, 2, 16)
+        slots, _ = build(labels, [0] * 20)
+        Y = ["Unsure"] * 20
+        Y[2] = "Unsuccessful"                                       # a U1 task whose A1 is success
+        d = describe_panel(slots, Y=Y)
+        self.assertEqual((d["N_Y"], d["M"]), (1, 1))
+        self.assertEqual(d["secondary"], {"over_disagreement": Fraction(250, 3)})
+        self.assertEqual(d["share_of_M"], {"AUG": Fraction(1), "DIS": Fraction(1, 6), "RAND": Fraction(1, 4)})
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  over disagreement-first: 250/3 (83.3333) per 100", lines)
+        self.assertIn("  Disagreement-first | 1/6 (0.1667) | 5 | 1/4 (0.2500) | 1/6 (0.1667)", lines)
+
     def test_empty_panel_rates_are_not_defined(self):
         d = describe_panel([], Y=[])
         self.assertIsNone(d["gain"]["over_disagreement"]["per_100_panel"])
@@ -1068,6 +1110,15 @@ class TestJudgeContradiction(unittest.TestCase):
         self.assertIn("  A1: 1/2 (0.5000), 1 of 2 tasks with a valid A1 and a reference, every label treated as usable; "
                       "invalid outputs among tasks with a reference: 1",
                       sap.describe_report(d, EXPOSURE).split("\n"))
+
+    def test_each_judge_prints_its_own_invalid_count(self):
+        slots, Y = from_rows([("REFUSAL", "failure", "Successful", 2), ("failure", "MALFORMED", "Successful", 1),
+                              ("success", "success", "Successful", 3)])
+        lines = sap.describe_report(describe_panel(slots, Y=Y), EXPOSURE).split("\n")
+        self.assertIn("  A1: 1/4 (0.2500), 1 of 4 tasks with a valid A1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 2", lines)
+        self.assertIn("  B1: 2/5 (0.4000), 2 of 5 tasks with a valid B1 and a usable reference; "
+                      "invalid outputs among tasks with a usable reference: 1", lines)
 
     def test_an_empty_set_is_not_defined(self):
         slots, Y = from_rows([("REFUSAL", "MALFORMED", "Successful", 2)])
