@@ -31,8 +31,8 @@ given. B: the model string equals the first recorded; ``service_tier`` is ``defa
 ``cached_tokens`` and ``cache_write_tokens`` are 0; ``input_tokens`` is at most 272,000,
 above which the provider prices the call at its long-context rate; an ``openai-project``
 header, when a response carries one, is the study project when one is given. A field that
-is not reported fails, apart from that header, which OpenAI's documentation does not list
-among its common response headers.
+is not reported, or a model that is not a string, fails, apart from that header, which
+OpenAI's documentation does not list among its common response headers.
 
 **Recovery.** A stop after the raw response is written leaves it without its record.
 ``recover_attempt`` rebuilds that record from the bytes as the dispatcher would have
@@ -268,8 +268,11 @@ class HttpsTokenCounter:
 def response_checks(provider: str, summary: dict, headers: dict, first_model, workspace, project=None) -> list:
     """Failed per-response checks for one complete response (see the module docstring)."""
     fails = []
-    if first_model is not None and summary.get("model") != first_model:
-        fails.append(f"model {summary.get('model')!r} is not the first recorded {first_model!r}")
+    model = summary.get("model")
+    if not isinstance(model, str):
+        fails.append(f"model {model!r} is not a string")
+    elif first_model is not None and model != first_model:
+        fails.append(f"model {model!r} is not the first recorded {first_model!r}")
     u = summary.get("usage") or {}
     if provider == "anthropic":
         if u.get("service_tier") != "standard":
@@ -529,7 +532,7 @@ def capability_check(records: list, model: str) -> dict:
             access = "failed"
         if code in IMAGE_ERROR_CODES:
             images = "failed"
-        if r.get("response_model"):
+        if isinstance(r.get("response_model"), str) and r["response_model"]:
             models.append(r["response_model"])
             if access == "unknown":
                 access = "ok"

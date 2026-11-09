@@ -589,6 +589,20 @@ class TestDispatch(LogCase):
         self.assertEqual((rec["outcome"], rec["halt_kind"], rec["detail"], rec["usage"]),
                          (MALFORMED, CLASSIFICATION_ERROR, "classification raised ValueError", {}))
 
+    def test_a_model_that_is_not_a_string_halts_and_is_never_recorded_as_the_first(self):
+        for n, model in enumerate((["gpt-6-sol"], {"id": "gpt-6-sol"}, 5, None)):
+            self.log = AttemptLog(self.tmp / f"log-{n}")
+            events = openai_events(answer(), resp_id=f"resp_{n}")
+            for _, obj in events:
+                if "response" in obj:
+                    obj["response"]["model"] = model
+            result, _ = self.run_slots(self.f.a(), self.f.a(), self.f.a(), Exchange(200, {}, sse(events), None, None))
+            self.assertTrue(result["halted"], model)
+            rec = self.records("B1")[0]
+            self.assertEqual((rec["outcome"], rec["halt_kind"], rec["failed_checks"]),
+                             (HALT, "response_check", [f"model {model!r} is not a string"]), model)
+            self.assertIsNone(self.log.first_model(self.config, "B"), model)
+
     def test_a_lone_surrogate_in_the_answer_is_stored_and_the_verdict_kept(self):
         text = answer_with_literal("rationale", r'"caf\u00e9 \ud83d end"', verdict="failure")
         result, _ = self.run_slots(self.f.a(text=text), self.f.a(), self.f.a(), self.f.b())
@@ -663,6 +677,16 @@ class TestCapability(LogCase):
         changed = dict(recs[0], response_model="gpt-6-sol-b")
         out = D.capability_check(recs + [changed], R.B_MODEL)
         self.assertEqual(out["checks"]["stable_model_string"], "failed")
+
+    def test_a_model_that_is_not_a_string_shows_nothing_about_the_judge(self):
+        for model in (["gpt-6-sol"], {"id": "gpt-6-sol"}, 5):
+            recs = self.b_records(self.f.b(model=model))
+            self.assertEqual((recs[0]["outcome"], recs[0]["response_model"]), (HALT, model), model)
+            out = D.capability_check(recs, R.B_MODEL)
+            self.assertEqual((out["models_seen"], out["checks"]["stable_model_string"], out["failed"]),
+                             ([], "unknown", []), model)
+            out = D.capability_check(recs + self.b_records(self.f.b()), R.B_MODEL)
+            self.assertEqual((out["models_seen"], out["checks"]["stable_model_string"]), ([R.B_MODEL], "ok"), model)
 
     def test_an_unclassified_response_is_not_a_capability_failure(self):
         real = D.canonical_outcome
@@ -886,6 +910,13 @@ class TestHttpsTokenCounter(unittest.TestCase):
         self.assert_raises_once("A", error_answer(429, "rate_limit_error", "You have reached your API usage limits"))
         self.assert_raises_once("B", error_answer(429, "insufficient_quota", code="insufficient_quota"))
         self.assert_raises_once("B", error_answer(400, "invalid_request_error", code="content_filter"))
+
+    def test_a_count_that_raises_while_it_is_read_records_only_the_exception_s_type(self):
+        with mock.patch.object(D.HttpsTokenCounter, "_read", side_effect=ValueError("the reply was: quoted text")):
+            error, sent = self.counted(self.reqs["A"], self.A_OK, self.A_OK)
+        self.assertIsInstance(error, D.TokenCountError)
+        self.assertEqual((str(error), len(sent)),
+                         ("the anthropic token count failed: reading the response raised ValueError", 1))
 
     def test_a_transport_failure_is_asked_again_under_the_dispatcher_s_rule(self):
         for failure in (urllib.error.URLError("down"), error_answer(429, "rate_limit_error"),

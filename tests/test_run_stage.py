@@ -564,6 +564,27 @@ class TestRunRecords(RunnerCase):
         halt = AttemptLog(root / "P2" / "attempt_log").halts()[0]
         self.assertIn("was seen before", halt["failed_checks"][0])
 
+    def test_a_b_response_whose_model_is_not_a_string_halts_and_the_report_is_still_written(self):
+        class ListModel(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                ex = super()._exchange(request, stage, ref, kind)
+                if request.judge == "B":
+                    return ex._replace(raw=ex.raw.replace(b'"model": "gpt-6-sol"', b'"model": ["gpt-6-sol"]'))
+                return ex
+
+        led = self.ledger()
+        its = items(1, "a")
+        report, _ = self.stage("P1", its, led, provider=ListModel("central"))
+        self.assertEqual((report["stopped"]["kind"], report["stopped"]["slot"]), ("response_check", "B1"))
+        self.assertEqual(report["gates"]["capability_check_b"]["models_seen"], [])
+        self.assertTrue((self.root / "P1" / "progress.json").is_file())
+        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Read the raw response.", R.config_sha256(), at="now")
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["B"])
+        self.assertEqual(report["gates"]["capability_check_b"]["models_seen"], [R.B_MODEL])
+
     def stop_between_writes(self, slot, cut=False):
         """complete_attempt that, for ``slot``, leaves the raw response (or half of it) on disk
         and stops before the record."""
