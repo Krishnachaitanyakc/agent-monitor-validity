@@ -518,89 +518,408 @@ class TestJudgeContradiction(unittest.TestCase):
         self.assertIsNone(sap.describe_panel(slots, Y=Y)["contradiction"]["A1"]["value"])
 
 
-CONTRADICTED = "contradicted: caught with these probabilities, missed with the rest"
-NOTHING_TO_CATCH = "not contradicted: nothing to catch"
-UNKNOWN = "unknown, not correct"
+SHOWS = {"A": "Reached by instability, and by disagreement-first only by chance",
+         "B": "Flagged by instability, the reference agrees with A1",
+         "C": "Caught by both main policies",
+         "D": "Mostly missed by both main policies",
+         "E": "Control matched to the first D case on benchmark and A1 verdict, falling back to A1 verdict alone",
+         "F": "The unknown tasks",
+         "second control": "a second control matched to the second D case"}
+USABLE, UNSURE, MISSING = "usable", "unsure", "missing"
+
+
+def case_panel(rows):
+    """Slots, E, statuses, benchmarks and ids from (group, E, status, benchmark, A1 verdict) rows.
+
+    The group 'G1x' is a disagreement by an invalid B1.
+    """
+    slots = [dict(slot("G1", r[4]), B1="MALFORMED") if r[0] == "G1x" else slot(r[0], r[4]) for r in rows]
+    return (slots, [r[1] for r in rows], [r[2] for r in rows], [r[3] for r in rows],
+            [f"t{i:03d}" for i in range(len(rows))])
+
+
+def picks(rows, seed=0, benchmarks=True):
+    slots, E, status, bench, ids = case_panel(rows)
+    chosen = sap.select_cases(slots, E, status, benchmarks=bench if benchmarks else None, ids=ids, seed=seed)
+    return [(c["cell"], c["index"]) for c in chosen]
+
+
+def rule_written_out(rows, ids, seed, benchmarks=True):
+    """Plan section 11 written out on its own, for comparison with select_cases."""
+    n = len(rows)
+    group, e, status, bench, a1 = zip(*rows) if rows else ((), (), (), (), ())
+
+    def cell(index, test):
+        members = sorted((i for i in range(n) if test(i)), key=lambda i: ids[i])
+        rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(6, index)))
+        return [members[j] for j in rng.permutation(len(members))]
+
+    def is_u(i):
+        return group[i] in ("U2", "U1")
+
+    A = cell(0, lambda i: is_u(i) and e[i] == 1)
+    B = cell(1, lambda i: is_u(i) and status[i] == USABLE and e[i] == 0)
+    C = cell(2, lambda i: group[i] == "G1" and e[i] == 1)
+    D = cell(3, lambda i: group[i] == "S" and e[i] == 1)
+    E = cell(4, lambda i: group[i] == "S" and status[i] == USABLE and e[i] == 0)
+    F = cell(5, lambda i: group[i] != "I" and status[i] != USABLE)
+
+    def control(d, used):
+        for test in ((lambda i: benchmarks and bench[i] == bench[d] and a1[i] == a1[d]), (lambda i: a1[i] == a1[d])):
+            for i in E:
+                if i not in used and test(i):
+                    return i
+        return None
+
+    u2 = [i for i in A if group[i] == "U2"]
+    u1 = [i for i in A if group[i] == "U1"]
+    out = [("A", i) for i in ([u2[0], u1[0]] if u2 and u1 else A[:2])]
+    out += [("B", i) for i in B[:1]] + [("C", i) for i in C[:1]] + [("D", i) for i in D[:2]]
+    first = control(D[0], ()) if D else (E[0] if E else None)
+    if first is not None:
+        out.append(("E", first))
+    if F:
+        out.append(("F", F[0]))
+    elif len(D) > 1:
+        second = control(D[1], (first,))
+        if second is not None:
+            out.append(("F", second))
+    return out
+
+
+class TestCaseRule(unittest.TestCase):
+    OK = (USABLE, "wa", "success")
+
+    def row(self, group, e, status=USABLE, bench="wa", a1="success"):
+        return (group, e, status, bench, a1)
+
+    def test_each_cell_holds_what_the_plan_defines(self):
+        r = self.row
+        for one, cell in ((r("U2", 1), "A"), (r("U1", 1), "A"), (r("U2", 0), "B"), (r("U1", 0), "B"),
+                          (r("G1", 1), "C"), (r("S", 1), "D"), (r("S", 0), "E"),
+                          (r("U2", 0, UNSURE), "F"), (r("U1", 0, MISSING), "F"), (r("G1", 0, UNSURE), "F"),
+                          (r("G1x", 0, MISSING), "F"), (r("S", 0, MISSING), "F")):
+            self.assertEqual(picks([one]), [(cell, 0)], one)
+
+    def test_no_cell_takes_these_tasks(self):
+        r = self.row
+        for one in (r("I", 0), r("I", 0, UNSURE), r("I", 0, MISSING), r("G1", 0), r("G1x", 1), r("G1x", 0)):
+            self.assertEqual(picks([one]), [], one)
+
+    def test_cell_A_takes_one_of_each_group_when_both_exist(self):
+        rows = [self.row("U2", 1)] * 6 + [self.row("U1", 1)] * 6
+        for seed in range(20):
+            got = picks(rows, seed)
+            self.assertEqual([c for c, _ in got], ["A", "A"], seed)
+            self.assertEqual([rows[i][0] for _, i in got], ["U2", "U1"], seed)
+
+    def test_cell_A_with_one_group_takes_up_to_two_from_it(self):
+        for group in ("U2", "U1"):
+            got = picks([self.row(group, 1)] * 5)
+            self.assertEqual([c for c, _ in got], ["A", "A"], group)
+            self.assertEqual(len({i for _, i in got}), 2, group)
+            self.assertEqual(picks([self.row(group, 1)]), [("A", 0)], group)
+        got = picks([self.row("U2", 1)] + [self.row("U1", 1)])       # one of each, both taken
+        self.assertEqual(got, [("A", 0), ("A", 1)])
+
+    def test_cells_take_their_numbers_and_a_short_cell_is_not_backfilled(self):
+        r = self.row
+        rows = [r("U2", 1)] * 3 + [r("U1", 1)] * 3 + [r("U1", 0)] * 3 + [r("G1", 1)] * 3 + [r("S", 1)] * 3 + \
+               [r("S", 0)] * 3 + [r("U1", 0, UNSURE)] * 3
+        self.assertEqual(Counter(c for c, _ in picks(rows)), {"A": 2, "B": 1, "C": 1, "D": 2, "E": 1, "F": 1})
+        # One task in cell D: cell D gives one, and no other cell makes up for it.
+        rows = [r("S", 1)] + [r("U1", 0)] * 3 + [r("S", 0)] * 3 + [r("U1", 0, UNSURE)] * 2
+        self.assertEqual(Counter(c for c, _ in picks(rows)), {"B": 1, "D": 1, "E": 1, "F": 1})
+        # Nothing contradicted among the agreeing tasks: cells A and D stay empty.
+        rows = [r("U1", 0)] * 4 + [r("S", 0)] * 4 + [r("G1", 1)] * 4
+        self.assertEqual(Counter(c for c, _ in picks(rows)), {"B": 1, "C": 1, "E": 1})
+
+    def test_rows_come_in_cell_order_without_repeats_and_never_above_eight(self):
+        rng = np.random.default_rng(404)
+        groups = ("I", "G1", "G1x", "U2", "U1", "S")
+        for seed in range(150):
+            rows = []
+            for _ in range(int(rng.integers(0, 60))):
+                status = str(rng.choice([USABLE, USABLE, UNSURE, MISSING]))
+                group = str(rng.choice(groups))
+                e = int(group != "I" and status == USABLE and rng.random() < 0.5)
+                rows.append((group, e, status, str(rng.choice(["wa", "vwa", "work"])), str(rng.choice(["success", "failure"]))))
+            got = picks(rows, seed)
+            self.assertLessEqual(len(got), 8)
+            cells = [c for c, _ in got]
+            self.assertEqual(cells, sorted(cells))
+            self.assertEqual(len({i for _, i in got}), len(got))
+            self.assertTrue(all(rows[i][0] != "I" for _, i in got))
+
+    def test_the_rule_written_out_on_random_panels(self):
+        rng = np.random.default_rng(1109)
+        groups = ("I", "G1", "G1x", "U2", "U1", "S")
+        seen = set()
+        for seed in range(250):
+            rows = []
+            for _ in range(int(rng.integers(0, 45))):
+                status = str(rng.choice([USABLE, USABLE, USABLE, UNSURE, MISSING] if seed % 2 else [USABLE]))
+                group = str(rng.choice(groups))
+                e = int(group != "I" and status == USABLE and rng.random() < 0.5)
+                rows.append((group, e, status, str(rng.choice(["wa", "vwa", "work"])), str(rng.choice(["success", "failure"]))))
+            ids = [f"task-{(7919 * i) % 1009:04d}" for i in range(len(rows))]
+            slots, E, status, bench, _ = case_panel(rows)
+            for with_bench in (True, False):
+                got = sap.select_cases(slots, E, status, benchmarks=bench if with_bench else None, ids=ids, seed=seed)
+                got = [(c["cell"], c["index"]) for c in got]
+                self.assertEqual(got, rule_written_out(rows, ids, seed, with_bench), (seed, with_bench))
+                seen |= {c for c, _ in got}
+        self.assertEqual(seen, set("ABCDEF"))
+
+    def test_the_control_matches_on_benchmark_and_verdict_first(self):
+        r = self.row
+        both = r("S", 0, USABLE, "wa", "success")
+        verdict = r("S", 0, USABLE, "work", "success")
+        benchmark = r("S", 0, USABLE, "wa", "failure")
+        D = r("S", 1, USABLE, "wa", "success")
+        for seed in range(10):
+            self.assertEqual(picks([D, verdict, benchmark, both, verdict], seed), [("D", 0), ("E", 3)], seed)
+            got = picks([D, verdict, benchmark], seed)
+            self.assertEqual(got, [("D", 0), ("E", 1)], seed)
+        # A benchmark match of the other verdict is never a control, and with no verdict match there is none.
+        self.assertEqual(picks([D, benchmark]), [("D", 0)])
+
+    def test_the_control_of_a_panel_without_benchmarks_matches_on_the_verdict_alone(self):
+        rows = [self.row("S", 1, USABLE, "wa", "failure")] + [self.row("S", 0, USABLE, "work", "failure")] * 5 + \
+               [self.row("S", 0, USABLE, "wa", "success")] * 5
+        slots, E, status, _, ids = case_panel(rows)
+        chosen = {c["cell"]: c for c in sap.select_cases(slots, E, status, ids=ids)}
+        self.assertEqual(rows[chosen["E"]["index"]][4], "failure")
+        self.assertEqual(chosen["E"]["matched_on"], "A1 verdict alone")
+
+    def test_the_control_answers_to_the_first_D_case(self):
+        rows = [self.row("S", 1, USABLE, "wa", "success"), self.row("S", 1, USABLE, "work", "failure")]
+        rows += [self.row("S", 0, USABLE, "wa", "success")] * 3 + [self.row("S", 0, USABLE, "work", "failure")] * 3
+        seen = set()
+        for seed in range(30):
+            got = dict(zip(("D1", "D2", "E", "F"), picks(rows, seed)))
+            first = rows[got["D1"][1]]
+            self.assertEqual(rows[got["E"][1]][3:], first[3:], seed)
+            second = rows[got["D2"][1]]
+            self.assertEqual(got["F"][0], "F", seed)
+            self.assertEqual(rows[got["F"][1]][3:], second[3:], seed)      # the second control, to the second D case
+            seen.add(got["D1"][1])
+        self.assertEqual(seen, {0, 1})
+
+    def test_with_no_D_case_cell_E_takes_the_first_of_its_order(self):
+        rows = [self.row("S", 0, USABLE, "wa", "success")] * 7
+        ids = [f"t{i:03d}" for i in range(7)]
+        seen = set()
+        for seed in range(25):
+            rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(6, 4)))
+            want = [int(i) for i in rng.permutation(7)]
+            self.assertEqual(picks(rows, seed), [("E", want[0])], seed)
+            seen.add(want[0])
+            slots, E, status, bench, _ = case_panel(rows)
+            self.assertEqual(sap.select_cases(slots, E, status, benchmarks=bench, ids=ids, seed=seed)[0]["matched_on"],
+                             "no D case, so the first of the cell's order")
+        self.assertGreater(len(seen), 1)
+
+    def test_the_F_rule(self):
+        r = self.row
+        D = r("S", 1, USABLE, "wa", "success")
+        control = r("S", 0, USABLE, "wa", "success")
+        # A task with an Unsure reference fills cell F and no second control is taken.
+        got = picks([D, D, control, control, r("U1", 0, UNSURE)])
+        self.assertEqual([c for c, _ in got], ["D", "D", "E", "F"])
+        self.assertEqual(got[-1], ("F", 4))
+        # Cell F empty and two D cases: a second control that differs from the first.
+        for seed in range(20):
+            got = picks([D, D, control, control, control], seed)
+            self.assertEqual([c for c, _ in got], ["D", "D", "E", "F"], seed)
+            self.assertNotEqual(got[2][1], got[3][1], seed)
+            self.assertIn(got[3][1], (2, 3, 4), seed)
+        # Only one control there is: it serves the first D case and the second goes without.
+        self.assertEqual([c for c, _ in picks([D, D, control])], ["D", "D", "E"])
+        # One D case: no second control.
+        self.assertEqual([c for c, _ in picks([D, control, control])], ["D", "E"])
+        # No D case: none either.
+        self.assertEqual([c for c, _ in picks([control, control])], ["E"])
+
+    def test_an_unmatched_first_D_case_leaves_the_control_open_to_the_second(self):
+        r = self.row
+        rows = [r("S", 1, USABLE, "wa", "failure"), r("S", 1, USABLE, "wa", "success"), r("S", 0, USABLE, "wa", "success")]
+        seen = set()
+        for seed in range(30):
+            got = picks(rows, seed)
+            if got[0][1] == 0:                  # the first D case has no control of its verdict
+                self.assertEqual(got[2:], [("F", 2)], seed)
+            else:
+                self.assertEqual(got[2:], [("E", 2)], seed)
+            seen.add(got[0][1])
+        self.assertEqual(seen, {0, 1})
+
+    def test_each_cell_has_its_own_generator(self):
+        r = self.row
+        base = [r("U1", 0)] * 8 + [r("S", 0)] * 8
+        grown = base + [r("S", 1)] * 4 + [r("G1", 1)] * 9
+        for seed in range(10):
+            a = dict(picks(base, seed))
+            b = dict(picks(grown, seed))
+            self.assertEqual(a["B"], b["B"], seed)
+
+    def test_the_seed_decides_the_choice_and_is_reported(self):
+        rows = [self.row("U1", 0)] * 40
+        self.assertEqual(picks(rows, 3), picks(rows, 3))
+        self.assertGreater(len({tuple(picks(rows, s)) for s in range(10)}), 1)
+
+    def test_the_choice_follows_the_ids_not_the_stored_order(self):
+        rng = np.random.default_rng(11)
+        rows = [("U2", 1, USABLE, "wa", "success")] * 4 + [("U1", 1, USABLE, "wa", "failure")] * 4 + \
+               [("S", 1, USABLE, "work", "success")] * 5 + [("S", 0, USABLE, "work", "success")] * 5 + \
+               [("U1", 0, UNSURE, "vwa", "failure")] * 3 + [("G1", 1, USABLE, "wa", "failure")] * 3
+        slots, E, status, bench, ids = case_panel(rows)
+        order = [int(i) for i in rng.permutation(len(rows))]
+        moved = lambda x: [x[i] for i in order]
+        a = sap.select_cases(slots, E, status, benchmarks=bench, ids=ids, seed=5)
+        b = sap.select_cases(moved(slots), moved(E), moved(status), benchmarks=moved(bench), ids=moved(ids), seed=5)
+        self.assertEqual([(c["cell"], ids[c["index"]]) for c in a], [(c["cell"], moved(ids)[c["index"]]) for c in b])
+
+    def test_input_is_checked(self):
+        ok = slot("S")
+        with self.assertRaises(ValueError):
+            sap.select_cases([ok], [0, 0], [USABLE])
+        with self.assertRaises(ValueError):
+            sap.select_cases([ok], [0], [USABLE, USABLE])
+        with self.assertRaises(ValueError):
+            sap.select_cases([ok], [0], [USABLE], benchmarks=["a", "b"])
+        with self.assertRaises(ValueError):
+            sap.select_cases([ok, ok], [0, 0], [USABLE] * 2, ids=["a", "a"])
 
 
 class TestCases(unittest.TestCase):
     IDS = [f"t{i}" for i in range(10)]
+    # Plan section 11, word for word, with seed 9 in the place the plan leaves for it.
+    RULE = ["A few cases, chosen by this recorded rule, explain what the policies caught and missed. They are a "
+            "selected qualitative sample by one reviewer, not an estimate of how common anything is.",
+            "Selection. At most 8 cases, on valid A1 only, chosen after the sealed join by a script with a seed in "
+            "the freeze list. Seed: 9.",
+            "Cell | Definition | Cases | What it shows",
+            "A | Unstable agreeing, E = 1 | 2, one U2 and one U1 when both exist | Reached by instability, and by "
+            "disagreement-first only by chance",
+            "B | Unstable agreeing, usable label, E = 0 | 1 | Flagged by instability, the reference agrees with A1",
+            "C | Disagreement with valid B1, E = 1 | 1 | Caught by both main policies",
+            "D | Stable agreeing, E = 1 | 2 | Mostly missed by both main policies",
+            "E | Stable agreeing, usable label, E = 0 | 1 | Control matched to the first D case on benchmark and A1 "
+            "verdict, falling back to A1 verdict alone",
+            "F | Unsure or missing label | 1 | The unknown tasks. If none exist, a second control matched to the "
+            "second D case",
+            "Within a cell, tasks are sorted by normalized task ID and permuted by a generator derived from the "
+            "frozen seed and the cell. A short cell takes all it has. Nothing is backfilled except by the F rule. "
+            "A recognized case is never replaced.",
+            "Generator of a cell: SeedSequence(9, spawn_key=(6, cell index)), with cells A to F at index 0 to 5. "
+            "A cell A with only U2 or only U1 takes up to 2 from that group. With no D case, cell E takes the first "
+            "of its order. The control in cell F is distinct from the first control, and there is none without a "
+            "second D case."]
 
     def mixed(self, **kw):
         slots, Y, _ = mixed_panel()
         return sap.describe_panel(slots, Y=Y, ids=self.IDS, **kw)
 
-    def test_the_rule_as_written_out(self):
-        labels = labels_for(2, 3, 4, 5, 6)
-        ids = [f"task-{20 - i:02d}" for i in range(len(labels))]
-        for seed in (0, 1, 17):
-            rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(6,)))
-            want = []
-            for group in ("G1", "U2", "U1", "S"):
-                members = sorted((i for i, lab in enumerate(labels) if lab == group), key=lambda i: ids[i])
-                want += [int(i) for i in rng.permutation(np.array(members, dtype=int))[:2]]
-            self.assertEqual(sap.select_cases(labels, ids, seed), want, seed)
-
-    def test_two_of_each_group_and_never_an_invalid_first_verdict(self):
-        labels = labels_for(3, 4, 4, 4, 4)
-        chosen = sap.select_cases(labels)
-        self.assertEqual(Counter(labels[i] for i in chosen), {"G1": 2, "U2": 2, "U1": 2, "S": 2})
-        self.assertEqual(len(set(chosen)), 8)
-        labels = labels_for(1, 1, 0, 3, 1)                          # a small group gives all it has
-        self.assertEqual(sorted(labels[i] for i in sap.select_cases(labels)), ["G1", "S", "U1", "U1"])
-
-    def test_the_choice_is_blind_to_the_labels(self):
-        labels = labels_for(1, 4, 3, 3, 6)
-        rng = np.random.default_rng(3)
-        slots, _ = build(labels, [0] * len(labels))
-        seen = set()
-        for _ in range(30):
-            E = [int(rng.random() < 0.5) for _ in labels]
-            _, Y = build(labels, E)
-            Y = ["Unsure" if rng.random() < 0.2 else y for y in Y]
-            d = sap.describe_panel(slots, Y=Y)
-            e = sap.describe_panel(slots, E)
-            seen.add(tuple(t["task"] for t in d["cases"]["tasks"]))
-            seen.add(tuple(t["task"] for t in e["cases"]["tasks"]))
-        self.assertEqual(len(seen), 1)
-
-    def test_the_choice_follows_the_ids_not_the_stored_order(self):
-        labels = labels_for(1, 4, 3, 3, 6)
-        ids = [f"t{i:02d}" for i in range(len(labels))]
-        order = [int(i) for i in np.random.default_rng(11).permutation(len(labels))]
-        moved, moved_ids = [labels[i] for i in order], [ids[i] for i in order]
-        self.assertEqual([ids[i] for i in sap.select_cases(labels, ids, 5)],
-                         [moved_ids[i] for i in sap.select_cases(moved, moved_ids, 5)])
-
-    def test_the_seed_decides_the_choice_and_is_reported(self):
-        labels = labels_for(0, 30, 30, 30, 30)
-        self.assertEqual(sap.select_cases(labels, seed=3), sap.select_cases(labels, seed=3))
-        self.assertGreater(len({tuple(sap.select_cases(labels, seed=s)) for s in range(10)}), 1)
+    def test_the_rule_prints_word_for_word_with_the_seed(self):
         d = self.mixed(case_seed=9)
-        self.assertEqual((d["cases"]["seed"], d["cases"]["per_group"], d["cases"]["sort_key"]), (9, 2, "ids"))
-        txt = sap.describe_report(d, EXPOSURE)
-        rule = sap.CASE_RULE_TEXT.format(sort_key="ids", seed=9, per_group=2)
-        self.assertIn("  " + rule, txt.split("\n"))
-        for needle in ("blind to E and the released labels", "SeedSequence(9, spawn_key=(6,))",
-                       "take the first 2", "has no verdict to catch and is left out"):
-            self.assertIn(needle, rule)
+        self.assertEqual((d["cases"]["seed"], d["cases"]["sort_key"]), (9, "ids"))
+        self.assertEqual(d["cases"]["rule"], self.RULE)
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = lines.index("CASES: what each policy caught and missed")
+        self.assertEqual(lines[start + 1:start + 1 + len(self.RULE)], ["  " + x for x in self.RULE])
+        self.assertEqual(lines[start + 1 + len(self.RULE)],
+                         "  E is 1 when the released reference contradicts the first verdict. Each probability is "
+                         "that policy's exact chance of reviewing the task, over its own random choices. A "
+                         "contradicted task is caught with that probability and missed with the rest.")
+        self.assertEqual(lines[start + 2 + len(self.RULE)],
+                         "  cell | task | group | A1, A2, A3, B1 | reference | E | "
+                         "Instability-first | Disagreement-first | Random | what the cell shows")
+
+    def test_no_claim_of_blindness_is_left(self):
+        for d in report_panels():
+            self.assertNotIn("blind", sap.describe_report(d, EXPOSURE))
+
+    def test_each_row_gives_cell_task_slots_reference_E_probabilities_and_what_the_cell_shows(self):
+        slots, Y, _ = mixed_panel()
+        j = sap.join_reference(slots, Y)
+        d = self.mixed()
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        rows = [t for t in d["cases"]["tasks"]]
+        self.assertEqual([t["cell"] for t in rows], ["A", "B", "D", "E", "F"])   # no valid B1 with E = 1 in G1
+        for row in ("A | t4 | U2 | success, failure, failure, success | usable | 1 | 1 (1.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["A"],
+                    "B | t8 | U1 | success, ABSTAIN, failure, success | usable | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["B"],
+                    "D | t7 | S | success, ABSTAIN, success, success | usable | 1 | 0 (0.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + SHOWS["D"]):
+            self.assertIn("  " + row, lines, row)
+        ending = {"E": "Control matched to the first D case on benchmark and A1 verdict, falling back to A1 verdict alone (matched here: A1 verdict alone)",
+                  "F": "The unknown tasks"}
+        for t in rows:
+            i = self.IDS.index(t["task"])
+            self.assertEqual((t["E"], t["reference"]), (j["E"][i], j["reference"][i]), t["task"])
+            if t["cell"] in ending:
+                self.assertTrue(any(x.startswith(f"  {t['cell']} | {t['task']} | ") and x.endswith(ending[t["cell"]]) for x in lines), t)
+
+    def test_a_row_says_how_a_control_was_matched(self):
+        rows = [("S", 1, USABLE, "wa", "success"), ("S", 0, USABLE, "wa", "success"), ("S", 1, USABLE, "work", "failure"),
+                ("S", 0, USABLE, "wa", "failure")]
+        slots, E, status, bench, ids = case_panel(rows)
+        Y = [LABEL[OTHER[r[4]]] if r[1] else LABEL[r[4]] for r in rows]
+        d = sap.describe_panel(slots, Y=Y, benchmarks=bench, ids=ids)
+        by_cell = {t["cell"]: t for t in d["cases"]["tasks"]}
+        self.assertEqual(by_cell["E"]["matched_on"], "benchmark and A1 verdict" if by_cell["E"]["task"] == "t001" else "A1 verdict alone")
+        self.assertTrue(by_cell["E"]["shows"].startswith(SHOWS["E"] + " (matched here: "))
+        self.assertTrue(by_cell["F"]["shows"].startswith(SHOWS["second control"] + " (matched here: "), by_cell["F"])
+        self.assertEqual(by_cell["F"]["reference"], USABLE)
+        d = sap.describe_panel([slot("S")], Y=["Successful"], ids=["only"])
+        self.assertEqual(d["cases"]["tasks"][0]["shows"], SHOWS["E"] + " (matched here: no D case, so the first of the cell's order)")
+        for bench, how in ((("wa", "wa"), "benchmark and A1 verdict"), (("wa", "work"), "A1 verdict alone")):
+            d = sap.describe_panel([slot("S"), slot("S")], Y=["Unsuccessful", "Successful"], benchmarks=bench, ids=["d", "e"])
+            self.assertEqual(d["cases"]["tasks"][1]["matched_on"], how)
+            self.assertEqual(d["cases"]["tasks"][1]["shows"], f"{SHOWS['E']} (matched here: {how})")
 
     def test_the_case_seed_reaches_the_choice(self):
         labels = labels_for(0, 6, 6, 6, 6)
         ids = [f"t{i:02d}" for i in range(len(labels))]
         slots, Y = build(labels, [0] * len(labels))
+        status = [USABLE] * len(labels)
         names = lambda d: [t["task"] for t in d["cases"]["tasks"]]
+        seen = set()
         for seed in range(6):
             d = sap.describe_panel(slots, Y=Y, ids=ids, case_seed=seed)
-            self.assertEqual(names(d), [ids[i] for i in sap.select_cases(labels, ids, seed)], seed)
+            want = [ids[c["index"]] for c in sap.select_cases(slots, [0] * len(labels), status, ids=ids, seed=seed)]
+            self.assertEqual(names(d), want, seed)
+            seen.add(tuple(want))
+        self.assertGreater(len(seen), 1)
         default = sap.describe_panel(slots, Y=Y, ids=ids)
         self.assertEqual(default["cases"]["seed"], 0)
-        self.assertEqual(names(default), [ids[i] for i in sap.select_cases(labels, ids, 0)])
+        self.assertEqual(names(default), [ids[c["index"]] for c in sap.select_cases(slots, [0] * len(labels), status, ids=ids, seed=0)])
+
+    def test_the_benchmarks_reach_the_choice(self):
+        rows = [("S", 1, USABLE, "wa", "success")] + [("S", 0, USABLE, "work", "success")] * 6 + [("S", 0, USABLE, "wa", "success")]
+        slots, _, _, bench, ids = case_panel(rows)
+        Y = ["Unsuccessful"] + ["Successful"] * 7
+        for seed in range(8):
+            d = sap.describe_panel(slots, Y=Y, ids=ids, benchmarks=bench, case_seed=seed)
+            self.assertEqual({t["cell"]: t["task"] for t in d["cases"]["tasks"]}["E"], "t007", seed)
+
+    def test_the_cases_depend_on_E_and_the_references(self):
+        labels = labels_for(0, 2, 3, 3, 8)
+        slots, Y = build(labels, [0] * len(labels))
+        none = sap.describe_panel(slots, Y=Y, ids=[f"t{i:02d}" for i in range(16)])
+        self.assertEqual({t["cell"] for t in none["cases"]["tasks"]}, {"B", "E"})
+        E = [1] * 16
+        slots, Y = build(labels, E)
+        d = sap.describe_panel(slots, Y=Y, ids=[f"t{i:02d}" for i in range(16)])
+        self.assertEqual([t["cell"] for t in d["cases"]["tasks"]], ["A", "A", "C", "D", "D"])
+        self.assertEqual({t["E"] for t in d["cases"]["tasks"]}, {1})
+        unknown = sap.describe_panel(slots, Y=["Unsure"] * 16, ids=[f"t{i:02d}" for i in range(16)])
+        self.assertEqual([t["cell"] for t in unknown["cases"]["tasks"]], ["F"])
 
     def test_review_probabilities_match_every_draw(self):
         for sizes in ((1, 2, 0, 1, 5), (0, 2, 3, 1, 3), (0, 1, 1, 3, 5), (0, 7, 0, 1, 0), (0, 0, 1, 1, 1), (1, 2, 0, 0, 5)):
             labels = labels_for(*sizes)
-            d = describe(labels, [0] * len(labels))
+            d = describe(labels, [i % 2 for i in range(len(labels))])
+            self.assertTrue(d["cases"]["tasks"], sizes)
             for pol in POLICIES:
                 sets = list(draws(labels, pol, d["K"]))
                 want = [Fraction(sum(i in s for s in sets), len(sets)) for i in range(len(labels))]
@@ -608,53 +927,34 @@ class TestCases(unittest.TestCase):
                 for t in d["cases"]["tasks"]:
                     self.assertEqual(t["review_probability"][pol], want[t["task"]], (sizes, pol))
 
-    def test_each_row_states_the_probabilities_E_and_the_reference(self):
-        d = self.mixed()
-        lines = sap.describe_report(d, EXPOSURE).split("\n")
-        start = lines.index("CASES: what each policy caught and missed")
-        self.assertEqual(lines[start + 1], "  " + sap.CASE_RULE_TEXT.format(sort_key="ids", seed=0, per_group=2))
-        self.assertEqual(lines[start + 2], "  E is 1 when the released reference contradicts the first verdict. Each "
-                                           "probability is that policy's exact chance of reviewing the task, over its "
-                                           "own random choices. A contradicted task is caught with that probability "
-                                           "and missed with the rest.")
-        self.assertEqual(lines[start + 3], "  task | group | A1, A2, A3, B1 | reference | E | "
-                                           "Instability-first | Disagreement-first | Random | reading")
-        for row in ("t2 | G1 | success, success, success, MALFORMED | usable | 1 | 1 (1.0000) | 1 (1.0000) | 1/2 (0.5000) | " + CONTRADICTED,
-                    "t3 | G1 | failure, failure, failure, success | unsure | 0 | 1 (1.0000) | 1 (1.0000) | 1/2 (0.5000) | " + UNKNOWN,
-                    "t4 | U2 | success, failure, failure, success | usable | 1 | 1 (1.0000) | 1/3 (0.3333) | 1/2 (0.5000) | " + CONTRADICTED,
-                    "t5 | U1 | success, failure, success, success | missing | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + UNKNOWN,
-                    "t8 | U1 | success, ABSTAIN, failure, success | usable | 0 | 1/2 (0.5000) | 1/3 (0.3333) | 1/2 (0.5000) | " + NOTHING_TO_CATCH):
-            self.assertIn("  " + row, lines, row)
-        slots, Y, _ = mixed_panel()
-        j = sap.join_reference(slots, Y)
-        self.assertEqual(len(d["cases"]["tasks"]), 7)               # G1 2, U2 1, U1 2, S 2 of 3
-        for t in d["cases"]["tasks"]:
-            i = self.IDS.index(t["task"])
-            self.assertEqual((t["E"], t["reference"]), (j["E"][i], j["reference"][i]), t["task"])
-
     def test_the_slots_print_in_canonical_spelling(self):
         slots = [{"A1": "SUCCESS", "A2": "Failure", "A3": "success", "B1": "sUcCeSs"}]
-        self.assertIn("  0 | U1 | success, failure, success, success | usable | 0 ",
+        self.assertIn("  B | 0 | U1 | success, failure, success, success | usable | 0 ",
                       sap.describe_report(sap.describe_panel(slots, Y=["Successful"]), EXPOSURE))
 
     def test_without_ids_the_tasks_are_named_by_position(self):
         d = sap.describe_panel([slot("S")] * 4, [0, 1, 0, 0])
         self.assertEqual(d["cases"]["sort_key"], "stored order")
         lines = sap.describe_report(d, EXPOSURE).split("\n")
-        self.assertIn("  position from 0 | group | A1, A2, A3, B1 | reference | E | "
-                      "Instability-first | Disagreement-first | Random | reading", lines)
+        self.assertIn("  cell | position from 0 | group | A1, A2, A3, B1 | reference | E | "
+                      "Instability-first | Disagreement-first | Random | what the cell shows", lines)
+        self.assertIn("  Task IDs were not supplied, so the tasks are sorted by their stored position here. "
+                      "The real run must supply them.", lines)
         rows = [x for x in lines if " | S | " in x]
         self.assertEqual(len(rows), 2)
         for row in rows:
-            position = int(row.split(" | ")[0])
+            position = int(row.split(" | ")[1])
             self.assertIn(" | not assessed | ", row)                # no statuses were supplied
             self.assertIn(f" | {[0, 1, 0, 0][position]} | ", row)
-            self.assertTrue(row.endswith(CONTRADICTED if position == 1 else NOTHING_TO_CATCH), row)
+        d = self.mixed()
+        self.assertNotIn("Task IDs were not supplied", sap.describe_report(d, EXPOSURE))
 
-    def test_a_panel_without_a_valid_first_verdict_has_no_case(self):
-        for d in (sap.describe_panel([slot("I")] * 3, Y=["Successful"] * 3), sap.describe_panel([], Y=[])):
+    def test_a_panel_with_nothing_in_any_cell_has_no_case(self):
+        G1_E0 = [slot("G1")] * 2
+        for d in (sap.describe_panel([slot("I")] * 3, Y=["Successful"] * 3), sap.describe_panel([], Y=[]),
+                  sap.describe_panel(G1_E0, Y=["Successful"] * 2)):
             self.assertEqual(d["cases"]["tasks"], [])
-            self.assertIn("  None: no task has a valid first verdict.", sap.describe_report(d, EXPOSURE).split("\n"))
+            self.assertIn("  None: no task falls in a cell.", sap.describe_report(d, EXPOSURE).split("\n"))
 
     def test_bad_ids_are_refused(self):
         ok = slot("S")

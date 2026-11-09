@@ -2433,14 +2433,41 @@ REGIME_NOTES = {
     "COVERAGE": "the slice reaches every unstable agreeing task",
     "PARTIAL": "the slice reaches only part of the unstable agreeing tasks",
 }
-CASES_PER_GROUP = 2
-CASE_GROUPS = ("G1", "U2", "U1", "S")   # an invalid first verdict has no verdict to catch
-# The rule the report prints with its cases, word for word, with the seed and counts filled in.
-CASE_RULE_TEXT = ("Rule, blind to E and the released labels: for G1, U2, U1 and S in "
-                  "turn, sort the tasks by {sort_key}, shuffle them with one default_rng from "
-                  "SeedSequence({seed}, spawn_key=(6,)) and take the first {per_group}; a group with "
-                  "fewer gives all of its tasks. A task with an invalid first verdict has no verdict to "
-                  "catch and is left out.")
+UNSTABLE_GROUPS = ("U2", "U1")
+# The review cases of plan section 11. The cells in their fixed order, each with the plan's
+# definition, number of cases and what the cell shows; a cell's position names its generator.
+CASE_CELL_ROWS = (
+    ("A", "Unstable agreeing, E = 1", "2, one U2 and one U1 when both exist",
+     "Reached by instability, and by disagreement-first only by chance"),
+    ("B", "Unstable agreeing, usable label, E = 0", "1",
+     "Flagged by instability, the reference agrees with A1"),
+    ("C", "Disagreement with valid B1, E = 1", "1", "Caught by both main policies"),
+    ("D", "Stable agreeing, E = 1", "2", "Mostly missed by both main policies"),
+    ("E", "Stable agreeing, usable label, E = 0", "1",
+     "Control matched to the first D case on benchmark and A1 verdict, falling back to A1 verdict alone"),
+    ("F", "Unsure or missing label", "1",
+     "The unknown tasks. If none exist, a second control matched to the second D case"),
+)
+CASE_CELLS = tuple(row[0] for row in CASE_CELL_ROWS)
+CASE_SPAWN_KEY = 6                     # the stream of the cases, apart from the other streams
+CASE_MATCH_BOTH = "benchmark and A1 verdict"
+CASE_MATCH_VERDICT = "A1 verdict alone"
+CASE_MATCH_NO_D = "no D case, so the first of the cell's order"
+# What the report prints with its cases. The plan's text is word for word.
+CASE_INTRO_TEXT = ("A few cases, chosen by this recorded rule, explain what the policies caught and missed. "
+                   "They are a selected qualitative sample by one reviewer, not an estimate of how common "
+                   "anything is.")
+CASE_SELECTION_TEXT = ("Selection. At most 8 cases, on valid A1 only, chosen after the sealed join by a script "
+                       "with a seed in the freeze list. Seed: {seed}.")
+CASE_WITHIN_CELL_TEXT = ("Within a cell, tasks are sorted by normalized task ID and permuted by a generator "
+                         "derived from the frozen seed and the cell. A short cell takes all it has. Nothing is "
+                         "backfilled except by the F rule. A recognized case is never replaced.")
+CASE_GENERATOR_TEXT = ("Generator of a cell: SeedSequence({seed}, spawn_key=(6, cell index)), with cells A to F "
+                       "at index 0 to 5. A cell A with only U2 or only U1 takes up to 2 from that group. With no "
+                       "D case, cell E takes the first of its order. The control in cell F is distinct from the "
+                       "first control, and there is none without a second D case.")
+CASE_NO_IDS_TEXT = ("Task IDs were not supplied, so the tasks are sorted by their stored position here. The real "
+                    "run must supply them.")
 CASE_READING_TEXT = ("E is 1 when the released reference contradicts the first verdict. Each probability "
                      "is that policy's exact chance of reviewing the task, over its own random choices. "
                      "A contradicted task is caught with that probability and missed with the rest.")
@@ -2506,28 +2533,99 @@ def validity_metrics(slots: Sequence[Mapping[str, str]], Y: Sequence[Optional[st
             "shared": {k: _judge_metrics(pairs(shared, k), n) for k in ("A1", "B1")}}
 
 
-def select_cases(labels: Sequence[str], ids: Optional[Sequence[str]] = None, seed: int = 0) -> List[int]:
-    """The tasks the report explains, chosen label-free by the recorded rule.
+def select_cases(slots: Sequence[Mapping[str, str]], E: Sequence[int], reference: Sequence[str], *,
+                 benchmarks: Optional[Sequence[str]] = None, ids: Optional[Sequence[str]] = None,
+                 seed: int = 0) -> List[dict]:
+    """The review cases of plan section 11, chosen after the join by the recorded rule [labels].
 
-    Within each of the groups G1, U2, U1 and S, tasks are ordered by the sort key (ids,
-    else stored order, which the real run must not use), shuffled with one generator
-    from SeedSequence(seed, spawn_key=(6,)), independent of the other streams, and the
-    first CASES_PER_GROUP are taken. E and the released labels are not inputs, so the
-    choice can be fixed before the join and a drawn case can turn out not contradicted.
+    On valid A1 only, at most 8 cases, in the cell order A to F:
+      A  U2 or U1 with E = 1: 2 cases, one U2 and one U1 when both exist; if only one
+         of them has any, up to 2 from it.
+      B  U2 or U1, usable reference, E = 0: 1 case.
+      C  G1 whose B1 is a valid verdict, E = 1: 1 case.
+      D  S with E = 1: 2 cases.
+      E  S, usable reference, E = 0: 1 control matched to the first D case on benchmark
+         and A1 verdict, falling back to A1 verdict alone; with no D case, the first of
+         the cell's order.
+      F  Reference Unsure or missing: 1 case. If F is empty, a second control from cell
+         E, matched to the second D case by the same rule and distinct from the first
+         control; with no second D case, none.
+    Within a cell, tasks are sorted by ids (normalized task IDs; without them, by stored
+    position, which the real run must not use), permuted with a generator from
+    SeedSequence(seed, spawn_key=(6, cell index)) and the first cases are taken. A short
+    cell takes all it has, and nothing is backfilled except by the F rule.
+
+    Without benchmarks the controls match on the A1 verdict alone. Implementation choice:
+    the plan names no further fallback, so a D case with no control of the same A1
+    verdict gets no control.
+
+    Returns one dict per case, in cell order: 'cell', 'index' (position in the panel)
+    and 'matched_on' (how a control was matched, None for any other case).
     """
-    labels = list(labels)
+    slots, E, reference = list(slots), list(E), list(reference)
+    n = len(slots)
+    if len(E) != n or len(reference) != n:
+        raise ValueError("E and reference must give one entry per trajectory")
+    if benchmarks is not None and len(benchmarks) != n:
+        raise ValueError("benchmarks must give one entry per trajectory")
     if ids is None:
-        keys = list(range(len(labels)))
+        keys = list(range(n))
     else:
         keys = list(ids)
-        if len(keys) != len(labels) or len(set(keys)) != len(keys):
+        if len(keys) != n or len(set(keys)) != len(keys):
             raise ValueError("ids must be unique and one per trajectory")
-    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(6,)))
-    chosen: List[int] = []
-    for group in CASE_GROUPS:
-        members = _sorted_by_key([i for i, l in enumerate(labels) if l == group], keys)
-        chosen += [int(i) for i in rng.permutation(members)[:CASES_PER_GROUP]]
+    labels = list(derive_label_free(slots)["stratum"])
+    a1 = [canonical_outcome(sl["A1"]) for sl in slots]
+    members = {"A": [i for i in range(n) if labels[i] in UNSTABLE_GROUPS and E[i] == 1],
+               "B": [i for i in range(n) if labels[i] in UNSTABLE_GROUPS and reference[i] == USABLE and E[i] == 0],
+               "C": [i for i in range(n) if labels[i] == "G1" and is_valid(slots[i]["B1"]) and E[i] == 1],
+               "D": [i for i in range(n) if labels[i] == "S" and E[i] == 1],
+               "E": [i for i in range(n) if labels[i] == "S" and reference[i] == USABLE and E[i] == 0],
+               "F": [i for i in range(n) if labels[i] != "I" and reference[i] in (UNSURE, MISSING)]}
+    order = {}
+    for index, cell in enumerate(CASE_CELLS):
+        rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(CASE_SPAWN_KEY, index)))
+        order[cell] = [int(i) for i in rng.permutation(_sorted_by_key(members[cell], keys))]
+
+    def control(d_case: int, used: Sequence[int]) -> Tuple[Optional[int], str]:
+        """The first task of cell E's order, not yet used, that matches this D case."""
+        pool = [i for i in order["E"] if i not in used and a1[i] == a1[d_case]]
+        if benchmarks is not None:
+            for i in pool:
+                if benchmarks[i] == benchmarks[d_case]:
+                    return i, CASE_MATCH_BOTH
+        return (pool[0] if pool else None), CASE_MATCH_VERDICT
+
+    first_u2 = [i for i in order["A"] if labels[i] == "U2"][:1]
+    first_u1 = [i for i in order["A"] if labels[i] == "U1"][:1]
+    cell_a = first_u2 + first_u1 if first_u2 and first_u1 else order["A"][:2]
+    d_cases = order["D"][:2]
+    chosen = [{"cell": "A", "index": i, "matched_on": None} for i in cell_a]
+    chosen += [{"cell": "B", "index": i, "matched_on": None} for i in order["B"][:1]]
+    chosen += [{"cell": "C", "index": i, "matched_on": None} for i in order["C"][:1]]
+    chosen += [{"cell": "D", "index": i, "matched_on": None} for i in d_cases]
+    if d_cases:
+        first_control, how = control(d_cases[0], [])
+    else:
+        first_control, how = (order["E"] + [None])[0], CASE_MATCH_NO_D
+    if first_control is not None:
+        chosen.append({"cell": "E", "index": first_control, "matched_on": how})
+    if order["F"]:
+        chosen.append({"cell": "F", "index": order["F"][0], "matched_on": None})
+    elif len(d_cases) == 2:
+        second_control, how = control(d_cases[1], [first_control])
+        if second_control is not None:
+            chosen.append({"cell": "F", "index": second_control, "matched_on": how})
     return chosen
+
+
+def _case_shows(cell: str, matched_on: Optional[str]) -> str:
+    """What a case's cell shows, in the plan's words, with how a control was matched."""
+    shows = {row[0]: row[3] for row in CASE_CELL_ROWS}[cell]
+    if cell == "F":
+        unknown, second_control = shows.split(". If none exist, ")
+        shows = unknown if matched_on is None else second_control
+    return shows if matched_on is None else f"{shows} (matched here: {matched_on})"
 
 
 def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
@@ -2580,7 +2678,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     Without statuses every label is treated as usable, and the secondary result and
     the label coverage are not assessed, as in analyze(). costs comes from the
     spending ledger (inference_costs) and provenance from resolve_panel. ids names
-    the tasks, and it and case_seed fix the label-free choice of cases (select_cases).
+    the tasks, and it, the benchmarks and case_seed fix the cases (select_cases).
 
     The conclusions apply to these tasks and these realized judge calls. Every number
     is computed exactly in the regime at hand, degenerate ones included: the expected
@@ -2638,11 +2736,13 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     validity = validity_metrics(slots, Y) if Y is not None else None
     n_a1_usable = sum(1 for l, r in zip(labels, ref) if l != "I" and r == USABLE)
     probs = selection_probabilities(design, labels)
-    cases = [{"task": i if ids is None else ids[i], "group": labels[i],
-              "slots": {k: canonical_outcome(slots[i][k]) for k in SLOT_NAMES.values()},
-              "E": E[i], "reference": ref[i] if statuses_given else None,
-              "review_probability": {pol: probs[pol][i] for pol in POLICY_ORDER}}
-             for i in select_cases(labels, ids=ids, seed=case_seed)]
+    cases = [{"cell": c["cell"], "task": c["index"] if ids is None else ids[c["index"]],
+              "group": labels[c["index"]],
+              "slots": {k: canonical_outcome(slots[c["index"]][k]) for k in SLOT_NAMES.values()},
+              "E": E[c["index"]], "reference": ref[c["index"]] if statuses_given else None,
+              "review_probability": {pol: probs[pol][c["index"]] for pol in POLICY_ORDER},
+              "shows": _case_shows(c["cell"], c["matched_on"]), "matched_on": c["matched_on"]}
+             for c in select_cases(slots, E, ref, benchmarks=benchmarks, ids=ids, seed=case_seed)]
     return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
@@ -2664,10 +2764,18 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
             "contradiction": {"A1": _rate(M, n_a1_usable),
                               "B1": validity["own"]["B1"]["contradiction"] if validity is not None else None},
             "review_probability": {pol: probs[pol] for pol in POLICY_ORDER},
-            "cases": {"seed": case_seed, "per_group": CASES_PER_GROUP,
+            "cases": {"seed": case_seed, "rule": _case_rule_lines(case_seed, ids is not None),
                       "sort_key": "ids" if ids is not None else "stored order", "tasks": cases},
             "validity": validity,
             "costs": inference_costs(costs, over_dis) if costs is not None else None}
+
+
+def _case_rule_lines(seed: int, ids_given: bool) -> List[str]:
+    """The recorded rule of the cases, in the plan's words, with the seed."""
+    lines = [CASE_INTRO_TEXT, CASE_SELECTION_TEXT.format(seed=seed), "Cell | Definition | Cases | What it shows"]
+    lines += [" | ".join(row) for row in CASE_CELL_ROWS]
+    lines += [CASE_WITHIN_CELL_TEXT, CASE_GENERATOR_TEXT.format(seed=seed)]
+    return lines + ([] if ids_given else [CASE_NO_IDS_TEXT])
 
 
 def _exact_text(x: Optional[Fraction]) -> str:
@@ -2722,31 +2830,22 @@ def _contradiction_lines(c: Mapping[str, Optional[dict]], statuses_given: bool) 
     return out
 
 
-def _case_reading(case: Mapping[str, object]) -> str:
-    """What one case shows: contradicted, nothing to catch, or unknown."""
-    if case["E"] == 1:
-        return "contradicted: caught with these probabilities, missed with the rest"
-    if case["reference"] in (UNSURE, MISSING):
-        return "unknown, not correct"
-    return "not contradicted: nothing to catch"
-
-
 def _case_lines(c: dict) -> List[str]:
     """Report lines of the cases chosen by the recorded rule."""
-    out = ["CASES: what each policy caught and missed",
-           "  " + CASE_RULE_TEXT.format(sort_key=c["sort_key"], seed=c["seed"], per_group=c["per_group"]),
-           "  " + CASE_READING_TEXT]
+    out = ["CASES: what each policy caught and missed"]
+    out += ["  " + line for line in c["rule"]]
+    out.append("  " + CASE_READING_TEXT)
     if not c["tasks"]:
-        out.append("  None: no task has a valid first verdict.")
+        out.append("  None: no task falls in a cell.")
         return out
     name = "task" if c["sort_key"] == "ids" else "position from 0"
-    out.append(f"  {name} | group | A1, A2, A3, B1 | reference | E | "
-               + " | ".join(POLICY_NAMES[p] for p in POLICY_ORDER) + " | reading")
+    out.append(f"  cell | {name} | group | A1, A2, A3, B1 | reference | E | "
+               + " | ".join(POLICY_NAMES[p] for p in POLICY_ORDER) + " | what the cell shows")
     for t in c["tasks"]:
         outcomes = ", ".join(t["slots"][k] for k in SLOT_NAMES.values())
         reference = "not assessed" if t["reference"] is None else t["reference"]
         probs = " | ".join(_exact_text(t["review_probability"][p]) for p in POLICY_ORDER)
-        out.append(f"  {t['task']} | {t['group']} | {outcomes} | {reference} | {t['E']} | {probs} | {_case_reading(t)}")
+        out.append(f"  {t['cell']} | {t['task']} | {t['group']} | {outcomes} | {reference} | {t['E']} | {probs} | {t['shows']}")
     return out
 
 
