@@ -23,7 +23,7 @@ from judge.outcomes import (ABSTAIN, FILTERED, HALT, MALFORMED, REFUSAL, TRANSPO
 from judge.storage import AttemptLog, WriteOnceError, write_once  # noqa: E402
 from judge.streams import (anthropic_events, anthropic_summary, openai_events,  # noqa: E402
                            openai_summary, parse_sse, sse)
-from test_requests import answer, images_for, synthetic_pack  # noqa: E402
+from test_requests import answer, answer_with_literal, images_for, synthetic_pack  # noqa: E402
 
 KEY = "t0123456789abcdef"
 WS = "wrkspc_test"
@@ -128,6 +128,14 @@ class TestOutcomes(unittest.TestCase):
         oc = self.a(self.f.a(text=answer(verdict="Failure", p_failure=3)))
         self.assertEqual((oc["outcome"], oc["parse"]["verdict"], oc["parse"]["fields"]["p_failure"]),
                          (VALID, "failure", None))
+
+    def test_a_long_integer_in_a_covariate_keeps_the_verdict(self):
+        for digits in (400, 5000):
+            for field, value in (("p_failure", "9" * digits), ("evidence_step_ids", "[" + "9" * digits + "]")):
+                text = answer_with_literal(field, value, verdict="Failure")
+                for oc in (self.a(self.f.a(text=text)), self.b(self.f.b(text=text))):
+                    self.assertEqual((oc["outcome"], oc["parse"]["verdict"], oc["parse"]["fields"][field]),
+                                     (VALID, "failure", None), (field, digits))
 
     def test_openai_terminal_outcomes(self):
         cases = [(self.f.b(), VALID), (self.f.b(text=None, refusal="I can't help."), REFUSAL),

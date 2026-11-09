@@ -107,6 +107,11 @@ def answer(**kw):
     return json.dumps(obj)
 
 
+def answer_with_literal(field, literal, **kw):
+    """An answer whose field holds this raw JSON text, for numbers json.dumps cannot write."""
+    return answer(**{field: "@"}, **kw).replace('"@"', literal)
+
+
 class TestParser(unittest.TestCase):
     def test_valid(self):
         r = schema.parse(answer())
@@ -114,6 +119,8 @@ class TestParser(unittest.TestCase):
         self.assertEqual(r["fields"], {"verdict": "success", "p_failure": 0.25, "evidence_sufficient": "yes",
                                        "evidence_step_ids": [1, 3], "rationale": "The final page shows the order."})
         self.assertEqual(r["parser_version"], schema.PARSER_VERSION)
+        # Pinned: any change to what the parser accepts must update this on purpose.
+        self.assertEqual(schema.PARSER_VERSION, "parser-v1")
 
     def test_enums_ignore_case(self):
         r = schema.parse(answer(verdict="FAILURE", evidence_sufficient="No"))
@@ -142,6 +149,58 @@ class TestParser(unittest.TestCase):
             self.assertEqual(schema.parse(answer(p_failure=value))["fields"]["p_failure"], value)
         hundred = " ".join(["word"] * 100)
         self.assertEqual(schema.parse(answer(rationale=hundred))["fields"]["rationale"], hundred)
+
+    def test_a_long_integer_voids_only_that_field(self):
+        for digits in (19, 308, 309, 310, 640, 641, 4300, 4301, 5000, 100000):
+            for sign in ("", "-"):
+                literal = sign + "9" * digits
+                cases = [("p_failure", literal), ("evidence_step_ids", f"[{literal}]"),
+                         ("evidence_step_ids", f"[1, {literal}, 3]"),
+                         ("evidence_sufficient", literal), ("rationale", literal)]
+                for field, value in cases:
+                    r = schema.parse(answer_with_literal(field, value, verdict="failure"))
+                    self.assertEqual((r["status"], r["verdict"]), ("parsed", "failure"), (field, sign, digits))
+                    self.assertIsNone(r["fields"][field], (field, sign, digits))
+                    self.assertEqual(list(r["voided"]), [field], (field, sign, digits))
+
+    def test_a_number_too_large_for_a_float_voids_p_failure(self):
+        for literal in ("1e999", "-1e999", "9" * 5000 + ".5", "9" * 5000 + "e0"):
+            r = schema.parse(answer_with_literal("p_failure", literal, verdict="failure"))
+            self.assertEqual((r["status"], r["verdict"], r["fields"]["p_failure"]), ("parsed", "failure", None), literal[:9])
+            self.assertEqual(list(r["voided"]), ["p_failure"], literal[:9])
+
+    def test_integer_length_boundary(self):
+        self.assertEqual(schema.INTEGER_MAX_DIGITS, 18)
+        longest = "9" * 18
+        r = schema.parse(answer_with_literal("evidence_step_ids", f"[{longest}, -{longest}]"))
+        self.assertEqual((r["fields"]["evidence_step_ids"], r["voided"]), ([int(longest), -int(longest)], {}))
+        for one_more in ("1" + "0" * 18, "-1" + "0" * 18):
+            r = schema.parse(answer_with_literal("evidence_step_ids", f"[{one_more}]"))
+            self.assertEqual((r["status"], list(r["voided"])), ("parsed", ["evidence_step_ids"]), one_more)
+
+    def test_range_check_handles_an_integer_too_big_for_a_float(self):
+        # The hook stops these first, so raise its cap to reach the check on its own.
+        with mock.patch.object(schema, "INTEGER_MAX_DIGITS", 4300):
+            for digits in (308, 309, 310, 4300):
+                r = schema.parse(answer_with_literal("p_failure", "9" * digits, verdict="failure"))
+                self.assertEqual((r["status"], r["verdict"], r["fields"]["p_failure"]), ("parsed", "failure", None), digits)
+
+    def test_results_do_not_depend_on_the_interpreter_digit_limit(self):
+        self.addCleanup(sys.set_int_max_str_digits, sys.get_int_max_str_digits())
+        for limit in (640, 4300, 0):
+            sys.set_int_max_str_digits(limit)
+            for digits in (18, 19, 641, 4301):
+                literal = "9" * digits
+                r = schema.parse(answer_with_literal("evidence_step_ids", f"[{literal}]", verdict="failure"))
+                self.assertEqual((r["status"], r["verdict"]), ("parsed", "failure"), (limit, digits))
+                self.assertEqual(r["fields"]["evidence_step_ids"], [int(literal)] if digits == 18 else None, (limit, digits))
+
+    def test_a_long_integer_does_not_rescue_a_malformed_answer(self):
+        huge = "9" * 5000
+        extra = answer()[:-1] + f', "confidence": {huge}}}'
+        for text in (huge, f"[{huge}]", answer_with_literal("verdict", huge), answer() + huge, extra):
+            r = schema.parse(text)
+            self.assertEqual((r["status"], r["verdict"]), ("malformed", None), text[:40])
 
     def test_inadmissible_verdict_abstains(self):
         for v in ("unsure", "", " success", "success.", "partial"):
@@ -337,6 +396,7 @@ class TestRequests(unittest.TestCase):
         base = R.config_sha256()
         for patch in ({"OUTPUT_CAP": 16000}, {"FALLBACK_LONG_EDGE": 768}, {"MAX_RETRIES": 2},
                       {"RUBRIC_TEXT": rubric.RUBRIC_TEXT + " "}, {"PACK_KEYS": frozenset()},
+                      {"PARSER_VERSION": "parser-v0"},
                       {"A_HEADERS": (("anthropic-version", "2023-06-01"), ("content-type", "application/json"))}):
             with mock.patch.multiple(R, **patch):
                 if "PACK_KEYS" in patch:

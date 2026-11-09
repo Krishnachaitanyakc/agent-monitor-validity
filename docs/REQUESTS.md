@@ -5,7 +5,7 @@ The request layer turns one pack and its screenshots into the exact bytes each j
 ## Modules
 
 - [rubric.py](../judge/rubric.py): rubric v0, a **draft** with its own version and SHA-256: ARB's success question, the five rules and the instruction to answer only in schema S.
-- [schema.py](../judge/schema.py): schema S and the parser. Enums ignore case, and the verdict matches in ASCII letters only; an out-of-range `p_failure`, a rationale over 100 words or another bad covariate voids that field only.
+- [schema.py](../judge/schema.py): schema S and the parser. Enums ignore case, and the verdict matches in ASCII letters only; an out-of-range `p_failure`, an integer over 18 digits, a rationale over 100 words or another bad covariate voids that field only.
 - [images.py](../judge/images.py): the shared 1,024 px fallback, byte-identical on any Python or zlib.
 - [requests.py](../judge/requests.py): bodies from the setup note's field table, fit check, hashes, leak checks, examples.
 - [streams.py](../judge/streams.py), [outcomes.py](../judge/outcomes.py): stream parsing for both providers and the outcome table.
