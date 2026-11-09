@@ -107,8 +107,8 @@ tolerance, given to the held calls in order, each up to its reservation, and not
 the export shows no more than that usage. The 1% tolerance decides only whether a
 reconciliation passes. A failed or refused reconciliation releases nothing, so usage
 above the ledger goes through ``record_correction`` first and the hold stays until a
-later one passes. Every other hold stays for good. A stop before a release leaves that call held
-for the next passing reconciliation.
+later one passes. Every other hold stays for good. A stop before a release leaves that
+call held for the next passing reconciliation.
 """
 
 import csv

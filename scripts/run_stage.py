@@ -628,7 +628,8 @@ def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: 
     the usual rule. Each must have its reservation in the ledger, which then closes from
     the rebuilt record. A stop during a send closes that attempt's reservation with no
     record and the next start reserves the attempt again, so the last reservation is the
-    one the raw response answers; the ledger keeps only one open, so the others are closed."""
+    one the raw response answers; the ledger keeps only one open, so the others are
+    closed."""
     rebuilt = []
     for item in items:
         for j, r in slots:
