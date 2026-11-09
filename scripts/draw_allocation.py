@@ -45,6 +45,7 @@ from datapath.ids import normalize_task_id  # noqa: E402
 
 QUOTA = {"webarena": 8, "visualwebarena": 1, "workarena": 6}
 P1_TASKS, P2_NEW_TASKS, P3_TASKS = 5, 15, 20
+STUDY_SEED = 169
 FIELDS = ("task_id", "benchmark", "template_overlaps_panel", "family")
 LISTS = ("p1", "p2", "p2_new", "p3")
 DEVELOPMENT = "development"
@@ -200,6 +201,27 @@ def verify_allocation(allocation) -> dict:
     undrawn = sorted((p2 | p3) - set(allocation[DEVELOPMENT]))
     if undrawn:
         raise DrawRefused(f"the development list leaves out these tasks of p2 or p3: {undrawn}")
+    return allocation
+
+
+def verify_study_draw(allocation: dict) -> dict:
+    """The allocation, once it passes the checks paid mode adds to ``verify_allocation``:
+    the study's seed and rule, P1 apart from the 15, the rule's sizes and quotas, the
+    quotas counted from the task IDs as well as from the file's own counts."""
+    if allocation.get("seed") != STUDY_SEED:
+        raise DrawRefused(f"the study's draw has seed {STUDY_SEED}, not {allocation.get('seed')!r}")
+    if allocation.get("rule") != RULE:
+        raise DrawRefused("the file does not state the study's rule")
+    repeated = sorted(set(allocation["p1"]) & set(allocation["p2_new"]))
+    if repeated:
+        raise DrawRefused(f"p2_new repeats P1's tasks: {repeated}")
+    counts = allocation.get("counts_by_benchmark")
+    if not isinstance(counts, dict) or "p2_new" not in counts:
+        raise DrawRefused("the file states no counts by benchmark")
+    check_totals(allocation)
+    drawn = dict(Counter(t.split(".", 1)[0] for t in allocation["p2_new"]))
+    if drawn != QUOTA:
+        raise DrawRefused(f"the 15 by task ID are {drawn}, not {QUOTA}")
     return allocation
 
 

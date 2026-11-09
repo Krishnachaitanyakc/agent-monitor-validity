@@ -39,6 +39,7 @@ from judge.outcomes import HALT, Exchange, canonical_outcome, error_body_outcome
 from judge.storage import AttemptLog  # noqa: E402
 from judge.streams import sse  # noqa: E402
 from test_pack import FixtureCase  # noqa: E402
+from test_draw_allocation import P1 as DRAW_P1, table as draw_table  # noqa: E402
 from test_requests import images_for, synthetic_pack  # noqa: E402
 
 CAP = S.CAPS["pilot"]
@@ -75,6 +76,14 @@ def allocation_file(folder, p1=(), p2_new=(), p3=(), name="allocation.json", und
     path = Path(folder) / name
     path.write_text(json.dumps(record))
     return path
+
+
+def study_allocation(folder, name="study.json"):
+    """A draw of the synthetic table under the study's seed, as paid mode requires, and its hash."""
+    record = DA.draw(draw_table(), DRAW_P1, DA.STUDY_SEED)
+    path = Path(folder) / name
+    path.write_bytes(DA.allocation_bytes(record))
+    return path, record["sha256"]
 
 
 def reserves(led):
@@ -444,11 +453,11 @@ class TestGating(RunnerCase):
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             self.stage("P1", its[:1], led)
         paid, https = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid"), StandInHttps()
+        allocation, sha256 = study_allocation(self.tmp)
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
-            RS.run_stage("P1", self.root, its, mode="paid", transport=https, ledger=paid,
-                         read_images=lambda e: e, workspace="w", openai_project="p",
-                         counter=D.HttpsTokenCounter(https, "w"),
-                         allocation=allocation_file(self.tmp, p1=task_ids(its)))
+            RS.run_stage("P1", self.root, [i._replace(task_id=t) for i, t in zip(its, DRAW_P1)], mode="paid",
+                         transport=https, ledger=paid, read_images=lambda e: e, workspace="w", openai_project="p",
+                         counter=D.HttpsTokenCounter(https, "w"), allocation=allocation, allocation_sha256=sha256)
         provider = RS.ScriptedProvider()
         with self.assertRaisesRegex(RS.StageRefused, "same ones"):
             RS.run_stage("P1", self.root, its, mode="fake", transport=provider, ledger=led, read_images=lambda e: e,
@@ -684,6 +693,62 @@ class TestAllocation(RunnerCase):
                              counter=D.HttpsTokenCounter(https, "w"))
             self.assertEqual(https.sent, [])
         self.assertFalse(self.root.exists())
+
+    def paid_stage(self, allocation, sha256, its=None):
+        https = StandInHttps()
+        led = self.ledger(self.tmp / "paid" / "ledger-pilot.jsonl", mode="paid")
+        try:
+            RS.run_stage("P1", self.root, its or [self.p1[0]._replace(task_id=DRAW_P1[0])], mode="paid", transport=https,
+                         ledger=led, read_images=lambda e: e, workspace="w", openai_project="p",
+                         counter=D.HttpsTokenCounter(https, "w"), allocation=allocation, allocation_sha256=sha256)
+        finally:
+            led.close()
+            self.assertEqual(https.sent, [])
+
+    def test_paid_mode_needs_the_allocation_s_recorded_hash(self):
+        path, sha256 = study_allocation(self.tmp)
+        with self.assertRaisesRegex(RS.StageRefused, "needs --allocation-sha256"):
+            self.paid_stage(path, None)
+        with self.assertRaisesRegex(RS.StageRefused, "not the recorded"):
+            self.paid_stage(path, "0" * 64)
+        self.assertFalse(self.root.exists())
+
+    def test_paid_mode_refuses_a_self_consistent_file_that_is_not_the_study_s_draw(self):
+        record = DA.draw(draw_table(), DRAW_P1, 170)
+        path = self.tmp / "other-seed.json"
+        path.write_bytes(DA.allocation_bytes(record))
+        with self.assertRaisesRegex(RS.StageRefused, "the allocation is refused: the study's draw has seed 169"):
+            self.paid_stage(path, record["sha256"])
+        self.assertFalse(self.root.exists())
+
+    def test_a_recorded_hash_is_compared_in_fake_mode_too_and_needs_an_allocation(self):
+        with self.assertRaisesRegex(RS.StageRefused, "not the recorded"):
+            self.stage("P1", self.p1, self.led, allocation=self.allocation, allocation_sha256="0" * 64)
+        with self.assertRaisesRegex(RS.StageRefused, "no --allocation was given"):
+            self.stage("P1", self.p1, self.led, allocation_sha256=self.sha256)
+        report, _ = self.stage("P1", self.p1, self.led, allocation=self.allocation, allocation_sha256=self.sha256)
+        self.assertTrue(report["complete"])
+
+    def test_a_fresh_run_root_cannot_use_another_allocation(self):
+        led = self.led
+        self.stage("P1", self.p1, led, allocation=self.allocation)
+        self.reconcile(led)
+        other = allocation_file(self.tmp, task_ids(self.p1), task_ids(self.p3), task_ids(self.p2), name="swapped.json")
+        fresh, provider = self.tmp / "fresh", RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "every stage of a run uses the same one"):
+            self.stage("P1", self.p1, led, root=fresh, provider=provider, allocation=other)
+        self.assertEqual(provider.sent, [])
+        self.assertFalse((fresh / "P1").exists())
+        report, _ = self.stage("P1", self.p1, led, root=self.tmp / "same", allocation=self.allocation)
+        self.assertTrue(report["complete"])
+
+    def test_a_fake_rehearsal_under_another_allocation_does_not_bind_a_paid_run(self):
+        beside = self.tmp / "rehearsal"
+        (beside / "P1").mkdir(parents=True)
+        (beside / "run.json").write_text("{}")
+        (beside / "P1" / "stage.json").write_text(json.dumps({"mode": "paid", "allocation": "0" * 64}))
+        report, _ = self.stage("P1", self.p1, self.led, allocation=self.allocation)
+        self.assertTrue(report["complete"])
 
     def test_fake_mode_takes_no_allocation_and_records_none(self):
         report, _ = self.stage("P1", self.p1, self.led)
@@ -1254,6 +1319,10 @@ class TestEval(RunnerCase):
         self.panel_items = items(2, "e")
         self.write_manifest()
 
+    def under(self, allocation, **change):
+        """A manifest frozen under the given allocation file."""
+        return self.write_manifest(allocation_sha256=json.loads(Path(allocation).read_text())["sha256"], **change)
+
     def write_manifest(self, **change):
         m = {"kind": "panel-manifest", "frozen": True, "freeze_tag": "freeze-1", "config_sha256": R.config_sha256(),
              "n": 2, "tasks": [{"trace_key": i.trace_key, "pack_sha256": i.pack_sha256} for i in self.panel_items]}
@@ -1289,7 +1358,7 @@ class TestEval(RunnerCase):
 
     def test_eval_with_an_allocation_that_names_no_panel_task_runs_and_records_it(self):
         allocation = allocation_file(self.tmp, ["task.a0"], ["task.b0"], ["task.c0"])
-        report, provider = self.eval(self.write_manifest(), allocation=allocation)
+        report, provider = self.eval(self.under(allocation), allocation=allocation)
         self.assertEqual((report["stopped"], len(provider.sent)), (None, 8))
         self.assertEqual(json.loads((self.root / "EVAL" / "stage.json").read_text())["allocation"],
                          json.loads(allocation.read_text())["sha256"])
@@ -1303,7 +1372,17 @@ class TestEval(RunnerCase):
         record = json.loads((self.root / "P3" / "stage.json").read_text())
         (self.root / "P3" / "stage.json").write_text(json.dumps(dict(record, allocation="0" * 64)))
         with self.assertRaisesRegex(RS.StageRefused, "every stage of a run uses the same one"):
-            self.eval(self.write_manifest(), allocation=allocation_file(self.tmp, ["task.a0"]))
+            allocation = allocation_file(self.tmp, ["task.a0"])
+            self.eval(self.under(allocation), allocation=allocation)
+        self.assertFalse((self.root / "EVAL").exists())
+
+    def test_the_frozen_manifest_must_name_the_allocation_in_use(self):
+        allocation = allocation_file(self.tmp, ["task.a0"])
+        for change in ({}, {"allocation_sha256": "0" * 64}):
+            provider = RS.ScriptedProvider()
+            with self.assertRaisesRegex(RS.StageRefused, "frozen under allocation"):
+                self.eval(self.write_manifest(**change), provider=provider, allocation=allocation)
+            self.assertEqual(provider.sent, [])
         self.assertFalse((self.root / "EVAL").exists())
 
     def fallback(self):
@@ -1348,6 +1427,7 @@ class TestEval(RunnerCase):
 
     def test_the_configuration_check_also_applies_in_paid_mode(self):
         https, root = StandInHttps(), self.tmp / "paid-run"
+        allocation, sha256 = study_allocation(self.tmp)
         (root / "P3").mkdir(parents=True)
         (root / "P3" / "stage.json").write_text(json.dumps({"config_sha256": "0" * 64}))
         led = self.ledger(self.tmp / "paid" / "ledger-evaluation.jsonl", budget="evaluation", mode="paid")
@@ -1356,7 +1436,7 @@ class TestEval(RunnerCase):
                 self.assertRaisesRegex(RS.StageRefused, "not the one P3 ran under"):
             RS.run_stage("EVAL", root, self.panel_items, mode="paid", transport=https, ledger=led,
                          read_images=lambda e: e, workspace="w", openai_project="p",
-                         counter=D.HttpsTokenCounter(https, "w"), allocation=allocation_file(self.tmp, ["task.a0"]))
+                         counter=D.HttpsTokenCounter(https, "w"), allocation=allocation, allocation_sha256=sha256)
         self.assertEqual(https.sent, [])
         self.assertFalse((root / "EVAL").exists())
 
@@ -1607,8 +1687,8 @@ class TestPaidTokenCounts(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.fresh("first")
-        self.its = items(1, "a")
-        self.allocation = allocation_file(self.tmp, task_ids(self.its))
+        self.its = [items(1, "a")[0]._replace(task_id=DRAW_P1[0])]
+        self.allocation, self.allocation_sha256 = study_allocation(self.tmp)
 
     def fresh(self, name):
         """A new run folder, a new paid ledger, and a transport and counter bound to the study."""
@@ -1626,7 +1706,8 @@ class TestPaidTokenCounts(unittest.TestCase):
         with mock.patch.dict(os.environ, keys), mock.patch.object(D.urllib.request, "urlopen", http):
             return RS.run_stage("P1", self.root, self.its, mode="paid", transport=self.transport, ledger=self.led,
                                 read_images=lambda e: e, workspace=self.WORKSPACE, openai_project=self.PROJECT,
-                                counter=counter or self.counter, allocation=self.allocation)
+                                counter=counter or self.counter, allocation=self.allocation,
+                                allocation_sha256=self.allocation_sha256)
 
     def test_a_paid_trajectory_is_counted_before_its_first_send_and_reserved_at_the_provider_s_count(self):
         http = self.http()
@@ -1749,10 +1830,12 @@ class TestPaidTokenCounts(unittest.TestCase):
 
     def test_the_stage_command_passes_on_the_allocation_and_the_configuration_note(self):
         note = self.tmp / "change.txt"
-        kw = self.command("--allocation", str(self.allocation), "--config-change-note", str(note), stage="EVAL")
-        self.assertEqual((kw["allocation"], kw["config_change_note"]), (str(self.allocation), str(note)))
+        kw = self.command("--allocation", str(self.allocation), "--allocation-sha256", "a" * 64,
+                          "--config-change-note", str(note), stage="EVAL")
+        self.assertEqual((kw["allocation"], kw["allocation_sha256"], kw["config_change_note"]),
+                         (str(self.allocation), "a" * 64, str(note)))
         kw = self.command()
-        self.assertEqual((kw["allocation"], kw["config_change_note"]), (None, None))
+        self.assertEqual((kw["allocation"], kw["allocation_sha256"], kw["config_change_note"]), (None, None, None))
 
     def test_a_paid_evaluation_loads_only_test_split_records_and_a_rehearsal_any(self):
         note = self.tmp / "approval.txt"

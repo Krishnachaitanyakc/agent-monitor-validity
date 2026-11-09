@@ -320,6 +320,51 @@ class TestVerifyAllocation(unittest.TestCase):
                 DA.verify_allocation(without)
 
 
+class TestStudyDraw(unittest.TestCase):
+    def setUp(self):
+        self.good = DA.draw(table(), P1, DA.STUDY_SEED)
+
+    def refused(self, message, **change):
+        forged = {k: v for k, v in dict(self.good, **change).items() if v is not ...}
+        with self.assertRaisesRegex(DA.DrawRefused, message):
+            DA.verify_study_draw(forged)
+
+    def test_the_study_s_draw_passes(self):
+        self.assertEqual(DA.STUDY_SEED, 169)
+        self.assertEqual(DA.verify_study_draw(self.good), self.good)
+
+    def test_another_seed_or_none(self):
+        self.refused("seed 169", seed=1)
+        self.refused("seed 169", seed=...)
+        self.refused("seed 169", **DA.draw(table(), P1, 170))
+
+    def test_another_rule_or_none(self):
+        self.refused("study's rule", rule="another rule")
+        self.refused("study's rule", rule=...)
+
+    def test_p2_new_that_repeats_p1(self):
+        self.refused("repeats P1", p2_new=sorted({*self.good["p2_new"], self.good["p1"][0]}))
+
+    def test_no_counts_by_benchmark(self):
+        self.refused("no counts by benchmark", counts_by_benchmark=...)
+        self.refused("no counts by benchmark", counts_by_benchmark=[])
+        self.refused("no counts by benchmark", counts_by_benchmark={})
+
+    def test_sizes_other_than_five_fifteen_and_twenty(self):
+        g = self.good
+        self.refused("do not total", p3=[])
+        self.refused("do not total", p3=g["p3"][1:])
+        self.refused("do not total", p2_new=[], p2=g["p1"])
+        self.refused("do not total", p1=g["p1"][1:], p2=g["p2"][1:])
+
+    def test_quotas_are_counted_from_the_task_ids_as_well_as_the_file_s_counts(self):
+        g = self.good
+        swapped = [t for t in g["p2_new"] if not t.startswith("visualwebarena.")] + ["webarena.other"]
+        self.refused("the 15 by task ID", p2_new=sorted(swapped))
+        counts = dict(g["counts_by_benchmark"], p2_new={"webarena": 9, "visualwebarena": 0, "workarena": 6})
+        self.refused("do not total", counts_by_benchmark=counts)
+
+
 class TestCommand(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
