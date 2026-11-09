@@ -99,11 +99,12 @@ A reconciliation that passes, with no failed one waiting for a note, appends a
 ``release`` entry for each OpenAI error response still held, which settles that
 reservation at the cost the reconciliation establishes. An export shows one total per
 provider, so that cost is what it bills above the ledger's known usage (what the
-responses reported, adjustments and earlier releases): nothing when that is within the
-1% tolerance, otherwise the whole excess, given to the held calls in order, each up to
-its reservation. A failed or refused reconciliation releases nothing, so usage above the
-ledger goes through ``record_correction`` first and the hold stays until a later one
-passes. Every other hold stays for good. A stop before a release leaves that call held
+responses reported, adjustments and earlier releases): the whole excess, with no
+tolerance, given to the held calls in order, each up to its reservation, and nothing when
+the export shows no more than that usage. The 1% tolerance decides only whether a
+reconciliation passes. A failed or refused reconciliation releases nothing, so usage
+above the ledger goes through ``record_correction`` first and the hold stays until a
+later one passes. Every other hold stays for good. A stop before a release leaves that call held
 for the next passing reconciliation.
 """
 
@@ -785,7 +786,7 @@ class Ledger:
                     (Decimal(s["response_usd"]) if s.get("response_usd") is not None else s["cost"]
                      for s in self.reservations.values() if s["provider"] == p and s["state"] == "settled"),
                     Decimal(0))
-                beyond[p] = Decimal(0) if exported[p] <= known * (1 + RECONCILE_TOLERANCE) else exported[p] - known
+                beyond[p] = max(Decimal(0), exported[p] - known)
             cost = min(beyond[p], Decimal(r["amount_usd"]))
             beyond[p] -= cost
             self._append({"type": "release", "id": r["id"], "cost_usd": usd(cost), "reconcile_seq": reconcile_seq,

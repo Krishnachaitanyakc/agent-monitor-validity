@@ -927,7 +927,7 @@ class TestHeldErrors(ReconcileCase):
         self.assertEqual(led.totals()["committed"], Decimal("0.5"))
 
     def test_a_passing_reconciliation_releases_at_zero_when_nothing_is_billed_beyond_reported_usage(self):
-        for inp in (100000, 101000):                                         # exactly, and at the 1% tolerance
+        for inp in (100000, 99500):                                          # exactly, and below it inside the 1%
             led = S.Ledger(self.tmp / f"{inp}.jsonl", "pilot", clock=self.tick)
             self.addCleanup(led.close)
             self.reported(led)
@@ -951,13 +951,40 @@ class TestHeldErrors(ReconcileCase):
         self.assertEqual(self.released(led), [(rid, Decimal(0))])
         self.assertEqual(led.totals()["committed"], 0)
 
-    def test_usage_just_past_the_tolerance_is_established_in_full(self):
+    def test_usage_above_reported_is_established_in_full_inside_the_tolerance_too(self):
+        for inp, excess in ((100001, "0.000002"), (101000, "0.002"), (101001, "0.002002")):
+            led = S.Ledger(self.tmp / f"{inp}.jsonl", "pilot", clock=self.tick)
+            self.addCleanup(led.close)
+            self.reported(led)
+            rid = self.error(led)
+            self.assertTrue(self.reconcile(led, inp)["ok"])                  # the tolerance decides only this
+            self.assertEqual(self.released(led), [(rid, Decimal(excess))], inp)
+            self.assertEqual(led.totals()["committed"], Decimal("0.2") + Decimal(excess), inp)
+
+    def test_a_cost_established_inside_the_tolerance_counts_at_the_cap(self):
         led = self.ledger()
-        self.reported(led)
+        led.close_reservation(led.reserve(fields("openai", B), Decimal("94")), ({"http_status": 200}, b_raw(0, 9400000)))
+        rid = self.error(led, "0.6")
+        rows, sha = self.export("u.csv", [self.row("openai", B, out=9400000), self.row("openai", B, cost="0.50")])
+        self.assertTrue(led.reconcile(rows, sha)["ok"])                      # $94.50 is within 1% of the $94.00 reported
+        self.assertEqual(self.released(led), [(rid, Decimal("0.5"))])
+        self.assertEqual(led.totals()["committed"], Decimal("94.5"))
+        with self.assertRaises(S.SpendHalt) as cm:
+            led.reserve(fields("openai", B), Decimal("0.99"))
+        self.assertEqual(cm.exception.kind, "spend_cap")
+        led.reserve(fields("openai", B), Decimal("0.5"))                     # lands exactly on the cap
+
+    def test_known_usage_is_what_a_response_reported_and_not_its_reservation_floor(self):
+        led = self.ledger()
+        floored = led.reserve(fields("openai", B), Decimal("0.5"))
+        led.close_reservation(floored, ({"http_status": 200}, b_raw(100000, 0, tier="flex")))
+        self.assertEqual((led.reservations[floored]["cost"], Decimal(led.entries[-1]["response_usd"])),
+                         (Decimal("0.5"), Decimal("0.1")))                   # flex halves $0.20; the floor is $0.50
         rid = self.error(led)
-        self.assertTrue(self.reconcile(led, 101001)["ok"])                   # $0.202002 on $0.20 reported
-        self.assertEqual(self.released(led), [(rid, Decimal("0.002002"))])
-        self.assertEqual(led.totals()["committed"], Decimal("0.202002"))
+        rows, sha = self.export("u.csv", [self.row("openai", B, cost="0.40")])
+        self.assertTrue(led.reconcile(rows, sha)["ok"])
+        self.assertEqual(self.released(led), [(rid, Decimal("0.3"))])        # $0.40 less the $0.10 reported
+        self.assertEqual(led.totals()["committed"], Decimal("0.8"))
 
     def test_usage_beyond_reported_is_given_to_the_held_calls_in_order_up_to_each_reservation(self):
         led = self.ledger()
