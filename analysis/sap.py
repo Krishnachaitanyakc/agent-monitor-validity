@@ -2434,6 +2434,20 @@ REGIME_NOTES = {
     "COVERAGE": "the slice reaches every unstable agreeing task",
     "PARTIAL": "the slice reaches only part of the unstable agreeing tasks",
 }
+# The sentences of the result, plan section 8, word for word.
+RESULT_DEGENERATE_TEXT = {
+    "DEGENERATE-NONE": "No agreeing verdict was unstable on this panel, so instability added no review candidates.",
+    "DEGENERATE-CAP": "The budget reached every agreeing verdict, so the two policies reviewed the same tasks.",
+    "DEGENERATE-NOSLICE": "The budget left no added review slots, so the two policies reviewed the same tasks.",
+}
+RESULT_NOT_MORE_TEXT = ("On this panel instability-first did not select more reference-contradicted first verdicts "
+                        "than disagreement-first, in expectation over each policy's random choices.")
+RESULT_MORE_TEXT = ("On this panel instability-first selected {g} more reference-contradicted first verdicts per "
+                    "100 panel tasks, in expectation over each policy's random choices, {side} the practical "
+                    "reference of 2 per 100.")
+RESULT_ONE_TASK_TEXT = "One unstable task changes this number by {x} per 100."
+RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge calls and carries no population "
+                       "confidence or significance claim.")
 UNSTABLE_GROUPS = ("U2", "U1")
 # The review cases of plan section 11. The cells in their fixed order, each with the plan's
 # definition, number of cases and what the cell shows; a cell's position names its generator.
@@ -2702,6 +2716,24 @@ def lock_quantities(design: Design) -> dict:
             "x_per_100": per_100 * max(weight[j] for j in UNSTABLE_GROUPS if size[j] > 0)}
 
 
+def result_sentences(regime: str, g_hat: Optional[Fraction], x: Fraction) -> List[str]:
+    """The sentences of plan section 8 for one result, word for word.
+
+    g_hat is the gain per 100 panel tasks and x the change in it from one unstable
+    task (lock_quantities). Both are printed as decimals. A degenerate regime has its
+    own sentence; otherwise the sentence follows g_hat, compared exactly with 0 and with
+    the practical reference of 2 per 100, and is followed by the sentence on x. Every
+    case ends with the closing sentence.
+    """
+    if regime in RESULT_DEGENERATE_TEXT:
+        return [RESULT_DEGENERATE_TEXT[regime], RESULT_CLOSING_TEXT]
+    if g_hat <= 0:
+        first = RESULT_NOT_MORE_TEXT
+    else:
+        first = RESULT_MORE_TEXT.format(g=_f(g_hat), side="at or above" if g_hat >= MATERIAL_M else "below")
+    return [first, RESULT_ONE_TASK_TEXT.format(x=_f(x)), RESULT_CLOSING_TEXT]
+
+
 def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]] = None, *,
                    Y: Optional[Sequence[Optional[str]]] = None,
                    reference: Optional[Sequence[str]] = None,
@@ -2727,7 +2759,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     disagreement-first minus random on the same two scales. The secondary result
     is the same gain per 100 tasks with a usable label. A rate with an empty
     denominator is None, not defined and never zero. lock holds the label-free
-    quantities committed at the prediction lock (lock_quantities). The observed gain over
+    quantities committed at the prediction lock (lock_quantities), and result_sentences
+    the plan's sentences for this result (result_sentences). The observed gain over
     disagreement-first review is set against the practical reference of 2 per 100
     panel tasks only as observed at or above it, or below it. contradiction gives how
     often each judge contradicts the references on its own valid tasks with a usable
@@ -2756,6 +2789,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
         ref = _reference_list(reference, n)
         _require_no_contradiction_without_reference(labels, E, ref)
     design = Design.from_labels(labels)
+    lock = lock_quantities(design)
     counts = {j: sum(e for l, e in zip(labels, E) if l == j) for j in ("G1", "U2", "U1", "S")}
     cap = expected_captures(design, counts)
     M = sum(counts.values())
@@ -2790,7 +2824,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     return {"path": PATH_DESCRIPTIVE, "provenance": provenance, "N": design.N, "n_inv": design.n_inv,
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
-            "lock": lock_quantities(design),
+            "lock": lock, "result_sentences": result_sentences(design.regime, observed, lock["x_per_100"]),
             "K_by_policy": reviews, "K_equal": all(v == design.K for v in reviews.values()),
             "R_unobserved": int((lf["R_unobserved"] == 1).sum()), "repeat_flags": _repeat_flags(lf),
             "invalid_by_slot": {k: sum(c for (slot, _), c in by_slot_category.items() if slot == k)
@@ -2937,7 +2971,10 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
            SCOPE_TEXT,
            f"Panel: {PANEL_WORDING}.",
            f"Prior exposure statement: {prior_exposure}",
-           ""]
+           "",
+           "RESULT"]
+    out += ["  " + sentence for sentence in d["result_sentences"]]
+    out.append("")
     out += _provenance_lines(d["provenance"])
     out += ["", "Label-free design",
             f"  N = {d['N']}, invalid A1 n_inv = {d['n_inv']}, valid N_V = {d['N_V']}",

@@ -332,6 +332,100 @@ class TestLockQuantities(unittest.TestCase):
         self.assertIn("  2 per 100 reachable on this panel: no", sap.describe_report(d, EXPOSURE).split("\n"))
 
 
+CLOSING = ("This describes these tasks and these realized judge calls and carries no population confidence or "
+           "significance claim.")
+
+
+class TestResultSentences(unittest.TestCase):
+    def test_every_case_of_the_plan_table_as_an_exact_string(self):
+        F = Fraction
+        cases = [
+            ("DEGENERATE-NONE", F(0), F(0),
+             ["No agreeing verdict was unstable on this panel, so instability added no review candidates.", CLOSING]),
+            ("DEGENERATE-CAP", F(0), F(0),
+             ["The budget reached every agreeing verdict, so the two policies reviewed the same tasks.", CLOSING]),
+            ("DEGENERATE-NOSLICE", F(0), F(0),
+             ["The budget left no added review slots, so the two policies reviewed the same tasks.", CLOSING]),
+            ("COVERAGE", F(0), F(1, 2),
+             ["On this panel instability-first did not select more reference-contradicted first verdicts than "
+              "disagreement-first, in expectation over each policy's random choices.",
+              "One unstable task changes this number by 0.5000 per 100.", CLOSING]),
+            ("PARTIAL", F(-3, 2), F(7, 17),
+             ["On this panel instability-first did not select more reference-contradicted first verdicts than "
+              "disagreement-first, in expectation over each policy's random choices.",
+              "One unstable task changes this number by 0.4118 per 100.", CLOSING]),
+            ("COVERAGE", F(189, 136), F(7, 17),
+             ["On this panel instability-first selected 1.3897 more reference-contradicted first verdicts per 100 "
+              "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
+              "per 100.",
+              "One unstable task changes this number by 0.4118 per 100.", CLOSING]),
+            ("PARTIAL", F(199, 100), F(1, 3),
+             ["On this panel instability-first selected 1.9900 more reference-contradicted first verdicts per 100 "
+              "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
+              "per 100.",
+              "One unstable task changes this number by 0.3333 per 100.", CLOSING]),
+            ("COVERAGE", F(2), F(4, 5),
+             ["On this panel instability-first selected 2.0000 more reference-contradicted first verdicts per 100 "
+              "panel tasks, in expectation over each policy's random choices, at or above the practical reference "
+              "of 2 per 100.",
+              "One unstable task changes this number by 0.8000 per 100.", CLOSING]),
+            ("PARTIAL", F(54, 5), F(41, 30),
+             ["On this panel instability-first selected 10.8000 more reference-contradicted first verdicts per 100 "
+              "panel tasks, in expectation over each policy's random choices, at or above the practical reference "
+              "of 2 per 100.",
+              "One unstable task changes this number by 1.3667 per 100.", CLOSING]),
+        ]
+        for regime, g, x, want in cases:
+            self.assertEqual(sap.result_sentences(regime, g, x), want, (regime, g))
+
+    def test_a_degenerate_panel_uses_its_own_sentence_whatever_the_gain(self):
+        self.assertEqual(sap.result_sentences("DEGENERATE-CAP", None, Fraction(0))[0],
+                         "The budget reached every agreeing verdict, so the two policies reviewed the same tasks.")
+
+    def report_block(self, sizes, E):
+        d = describe(labels_for(*sizes), E)
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertEqual(lines[4:6], ["", "RESULT"])
+        end = lines.index("", 6)
+        return d, lines[6:end]
+
+    def test_the_report_opens_with_the_block_in_every_case(self):
+        n = lambda t: "  " + t
+        cases = (((1, 3, 0, 0, 16), [1, 0] * 10,
+                  [n("No agreeing verdict was unstable on this panel, so instability added no review candidates."), n(CLOSING)]),
+                 ((0, 7, 0, 1, 0), [0, 1] * 4,
+                  [n("The budget reached every agreeing verdict, so the two policies reviewed the same tasks."), n(CLOSING)]),
+                 ((0, 0, 1, 1, 1), [1, 0, 1],
+                  [n("The budget left no added review slots, so the two policies reviewed the same tasks."), n(CLOSING)]),
+                 ((0, 2, 0, 2, 16), E_for(G1=(2, 0), U1=(2, 0), S=(16, 6)),
+                  [n("On this panel instability-first did not select more reference-contradicted first verdicts than "
+                     "disagreement-first, in expectation over each policy's random choices."),
+                   n("One unstable task changes this number by 4.1667 per 100."), n(CLOSING)]),
+                 ((0, 30, 3, 7, 160), E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10)),
+                  [n("On this panel instability-first selected 1.3897 more reference-contradicted first verdicts per 100 "
+                     "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
+                     "per 100."),
+                   n("One unstable task changes this number by 0.4118 per 100."), n(CLOSING)]),
+                 ((0, 25, 0, 5, 70), E_for(G1=(25, 0), U1=(5, 5), S=(70, 35)),
+                  [n("On this panel instability-first selected 2.0000 more reference-contradicted first verdicts per 100 "
+                     "panel tasks, in expectation over each policy's random choices, at or above the practical reference "
+                     "of 2 per 100."),
+                   n("One unstable task changes this number by 0.8000 per 100."), n(CLOSING)]))
+        for sizes, E, want in cases:
+            d, block = self.report_block(sizes, E)
+            self.assertEqual(block, want, sizes)
+            self.assertEqual(d["result_sentences"], [x.strip() for x in want], sizes)
+
+    def test_the_gain_of_zero_on_a_regular_panel_is_not_more(self):
+        d, block = self.report_block((0, 2, 0, 2, 16), [0] * 20)
+        self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], 0)
+        self.assertIn("did not select more", block[0])
+
+    def test_an_empty_panel_has_a_degenerate_sentence(self):
+        d = sap.describe_panel([], Y=[])
+        self.assertEqual(d["result_sentences"][0], "No agreeing verdict was unstable on this panel, so instability added no review candidates.")
+
+
 class TestGainsAndReference(unittest.TestCase):
     def test_hand_computed_panel(self):
         # K = 60. Random: 60/200 of M = 25. Disagreement-first: 11 + 30/170 of 14.
@@ -1314,6 +1408,9 @@ class TestDescriptiveReport(unittest.TestCase):
             txt = sap.describe_report(d, EXPOSURE)
             self.assertEqual(txt.count(sap.SCOPE_TEXT), 1)
             body = txt.replace(sap.SCOPE_TEXT, "").replace("observed below the reference", "")
+            for sentence in d["result_sentences"]:          # the plan's fixed sentences
+                self.assertEqual(body.count(sentence), 1)
+                body = body.replace(sentence, "")
             for pattern in FORBIDDEN:
                 self.assertIsNone(re.search(pattern, body, re.IGNORECASE), (pattern, d["regime"]))
         self.assertEqual(seen, REGIMES)
