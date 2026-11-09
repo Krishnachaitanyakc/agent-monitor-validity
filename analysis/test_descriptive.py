@@ -1819,6 +1819,21 @@ class TestCosts(unittest.TestCase):
                       "disagreement-first review is not positive (-5/8 (-0.6250) verdicts)",
                       sap.describe_report(d, EXPOSURE))
 
+    def test_the_repeats_are_A2_and_A3_each_counted_once(self):
+        costs = {"total": "9", "by_slot": {"A1": "3", "A2": "2", "A3": "1.25", "B1": "2.75"}}
+        c = sap.inference_costs(costs, Fraction(2))
+        self.assertEqual(c["extra_repeats"], Fraction(13, 4))
+        self.assertEqual(c["extra_per_extra_verdict"], Fraction(13, 8))
+
+    def test_the_cost_per_extra_verdict_is_defined_for_a_gain_below_one(self):
+        # N = 20, s = 3: instability-first reviews one contradicted U1 task for sure, disagreement-first with chance 1/6.
+        labels = labels_for(0, 2, 0, 2, 16)
+        d = describe(labels, E_for(G1=(2, 0), U1=(2, 1), S=(16, 0)), costs=self.COSTS)
+        self.assertEqual(d["gain"]["over_disagreement"]["verdicts"], Fraction(5, 6))
+        self.assertEqual(d["costs"]["extra_per_extra_verdict"], 6)
+        self.assertIn("extra cost per extra expected verdict captured: 6.0000, the extra cost over the gain of 5/6 (0.8333) verdicts",
+                      sap.describe_report(d, EXPOSURE))
+
     def test_costs_not_supplied_are_stated_never_zero(self):
         txt = sap.describe_report(self.panel(), EXPOSURE)
         self.assertIn("ACTUAL INFERENCE COSTS in USD, from the spending ledger\n  Not supplied.", txt)
@@ -1971,6 +1986,35 @@ class TestDescriptiveReport(unittest.TestCase):
         self.assertIn("under config hash cfg-1", txt)
         self.assertIn("A1 INVALID: 2 (REFUSAL 1, TRANSPORT_EXHAUSTED 1)", txt)
         self.assertIn("Not supplied: resolved slots", sap.describe_report(describe_panel(slots, Y=Y), EXPOSURE))
+
+    def test_the_provenance_lines_as_exact_strings(self):
+        # Eight trajectories whose counts all differ, in the A1 line and in the line for all slots.
+        A, T, H = sap.Attempt, sap.TRANSPORT, sap.HALT
+        special = {("t0", "A", 1): [T, T, "success"], ("t1", "A", 1): [H, "success"], ("t2", "A", 1): [T] * 4,
+                   ("t3", "A", 1): ["REFUSAL"], ("t4", "A", 1): ["MALFORMED"], ("t5", "A", 1): [T, "success"],
+                   ("t7", "A", 1): ["ABSTAIN"], ("t0", "A", 2): [H, H, H, "success"], ("t1", "A", 3): [T, "success"],
+                   ("t2", "B", 1): [T] * 4, ("t3", "B", 1): [T] * 4}
+        without_id = {("t6", "A", 2), ("t6", "A", 3)}
+        ids = [f"t{i}" for i in range(8)]
+        log = []
+        for t in ids:
+            for j, r in sap.SLOT_KEYS:
+                for k, outcome in enumerate(special.get((t, j, r), ["success"]), 1):
+                    complete = outcome not in (T, H) and (t, j, r) not in without_id
+                    log.append(A(t, j, r, "cfg-1", k, outcome, f"{t}-{j}{r}" if complete else None))
+        lines = sap._provenance_lines(sap.resolve_panel(log, ids, "cfg-1")["provenance"])
+        self.assertEqual(lines[2:], [
+            "  A1 slots: 8; slots that needed transport retries: 3 (6 retries in total); halts logged: 1; "
+            "A1 INVALID: 4 (ABSTAIN 1, MALFORMED 1, REFUSAL 1, TRANSPORT_EXHAUSTED 1).",
+            "  All slots: 13 transport retries, 4 halts, 3 slots exhausted; response ids checked on 27 of 29 complete "
+            "responses, none repeated (a payload-keyed response cache would repeat them)."])
+
+    def test_a_count_absent_from_the_log_summary_prints_as_zero(self):
+        sparse = {"config_hash": "c", "by_slot": {k: {} for k in ("A1", "A2", "A3", "B1")}}
+        self.assertEqual(sap._provenance_lines(sparse)[2:], [
+            "  A1 slots: 0; slots that needed transport retries: 0 (0 retries in total); halts logged: 0; A1 INVALID: 0.",
+            "  All slots: 0 transport retries, 0 halts, 0 slots exhausted; response ids checked on 0 of 0 complete "
+            "responses, none repeated (a payload-keyed response cache would repeat them)."])
 
     def test_each_regime_is_named(self):
         for d in report_panels():
