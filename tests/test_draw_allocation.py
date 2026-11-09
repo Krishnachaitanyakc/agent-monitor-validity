@@ -68,7 +68,14 @@ class TestDraw(unittest.TestCase):
         self.assertEqual((a["seed"], a["rule"]), (169, DA.RULE))
         for name in DA.LISTS:
             self.assertEqual(a[name], sorted(a[name]), name)
-        self.assertEqual(sorted(a), sorted([*DA.LISTS, "seed", "rule", "counts_by_benchmark", "sha256"]))
+        self.assertEqual(sorted(a), sorted([*DA.LISTS, DA.DEVELOPMENT, "seed", "rule", "counts_by_benchmark",
+                                            "sha256"]))
+
+    def test_the_development_list_holds_every_table_task_drawn_or_not(self):
+        rows = table()
+        a = DA.draw(rows, P1, 169)
+        self.assertEqual(a[DA.DEVELOPMENT], sorted(r["task_id"] for r in rows))
+        self.assertGreater(set(a[DA.DEVELOPMENT]), set(a["p2"]) | set(a["p3"]))
 
     def test_p3_comes_from_the_whole_table_after_p2_and_may_hold_overlapping_templates(self):
         rows = table()
@@ -133,8 +140,8 @@ class TestDraw(unittest.TestCase):
         self.assertEqual(a["sha256"], DA.content_sha256(a))
         canonical = json.dumps({k: v for k, v in a.items() if k != "sha256"}, sort_keys=True, separators=(",", ":"))
         self.assertEqual(a["sha256"], hashlib.sha256(canonical.encode()).hexdigest())
-        for name, change in (("p1", ["x"]), ("p2", ["x"]), ("p2_new", ["x"]), ("p3", ["x"]), ("seed", 1), ("rule", "x"),
-                             ("counts_by_benchmark", {})):
+        for name, change in (("p1", ["x"]), ("p2", ["x"]), ("p2_new", ["x"]), ("p3", ["x"]), (DA.DEVELOPMENT, ["x"]),
+                             ("seed", 1), ("rule", "x"), ("counts_by_benchmark", {})):
             self.assertNotEqual(DA.content_sha256(dict(a, **{name: change})), a["sha256"], name)
 
 
@@ -285,6 +292,13 @@ class TestVerifyAllocation(unittest.TestCase):
         with self.assertRaisesRegex(DA.DrawRefused, "p3 overlaps p2"):
             DA.verify_allocation(self.rehashed(p3=[self.good["p2"][0], *self.good["p3"][1:]]))
 
+    def test_a_development_list_that_leaves_out_a_task_of_p2_or_p3(self):
+        for name in ("p1", "p2_new", "p3"):
+            left_out = self.good[name][0]
+            development = [t for t in self.good[DA.DEVELOPMENT] if t != left_out]
+            with self.assertRaisesRegex(DA.DrawRefused, "development list leaves out", msg=name):
+                DA.verify_allocation(self.rehashed(**{DA.DEVELOPMENT: development}))
+
     def test_p2_that_is_not_p1_plus_the_new_tasks(self):
         with self.assertRaisesRegex(DA.DrawRefused, "not p1 plus p2_new"):
             DA.verify_allocation(self.rehashed(p2=self.good["p2_new"]))
@@ -294,15 +308,16 @@ class TestVerifyAllocation(unittest.TestCase):
     def test_lists_of_the_wrong_shape(self):
         with self.assertRaisesRegex(DA.DrawRefused, "JSON object"):
             DA.verify_allocation([])
-        for name in DA.LISTS:
+        for name in (*DA.LISTS, DA.DEVELOPMENT):
             for value, message in (("webarena.1", "list of task IDs"), ([1], "list of task IDs"),
                                    ([""], "list of task IDs"), (["webarena.1", "webarena.1"], "twice"),
                                    (["visualwebarena.resized.1"], "not normalized")):
                 with self.assertRaisesRegex(DA.DrawRefused, message, msg=name):
                     DA.verify_allocation(self.rehashed(**{name: value}))
-        without = {k: v for k, v in self.good.items() if k != "p3"}
-        with self.assertRaisesRegex(DA.DrawRefused, "p3 must be"):
-            DA.verify_allocation(without)
+        for name in ("p3", DA.DEVELOPMENT):
+            without = {k: v for k, v in self.good.items() if k != name}
+            with self.assertRaisesRegex(DA.DrawRefused, f"{name} must be"):
+                DA.verify_allocation(without)
 
 
 class TestCommand(unittest.TestCase):

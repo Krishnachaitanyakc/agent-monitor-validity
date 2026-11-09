@@ -64,10 +64,12 @@ def task_ids(its):
     return [i.task_id for i in its]
 
 
-def allocation_file(folder, p1=(), p2_new=(), p3=(), name="allocation.json"):
-    """An allocation over the given task IDs, with its own hash, as the draw writes one."""
+def allocation_file(folder, p1=(), p2_new=(), p3=(), name="allocation.json", undrawn=()):
+    """An allocation over the given task IDs, with its own hash, as the draw writes one;
+    ``undrawn`` are development tasks that no list drew."""
     record = {"p1": sorted(p1), "p2": sorted({*p1, *p2_new}), "p2_new": sorted(p2_new), "p3": sorted(p3),
-              "seed": 169, "rule": "synthetic", "counts_by_benchmark": {}}
+              "development": sorted({*p1, *p2_new, *p3, *undrawn}), "seed": 169, "rule": "synthetic",
+              "counts_by_benchmark": {}}
     record["sha256"] = DA.content_sha256(record)
     path = Path(folder) / name
     path.write_text(json.dumps(record))
@@ -1218,6 +1220,14 @@ class TestEval(RunnerCase):
             self.assertEqual(provider.sent, [])
         self.assertFalse((self.root / "EVAL").exists())
 
+    def test_eval_refuses_a_development_task_that_no_list_drew(self):
+        panel, ids = self.write_manifest(), task_ids(self.panel_items)
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "tasks of the development allocation"):
+            self.eval(panel, provider=provider, allocation=allocation_file(self.tmp, ["task.a0"], undrawn=ids[:1]))
+        self.assertEqual(provider.sent, [])
+        self.assertFalse((self.root / "EVAL").exists())
+
     def test_eval_with_an_allocation_that_names_no_panel_task_runs_and_records_it(self):
         allocation = allocation_file(self.tmp, ["task.a0"], ["task.b0"], ["task.c0"])
         report, provider = self.eval(self.write_manifest(), allocation=allocation)
@@ -1660,10 +1670,12 @@ class TestPaidTokenCounts(unittest.TestCase):
         argv = ["run", "--stage", stage, "--run-root", str(run_root), "--data-root", str(data_root), "--packs", "p",
                 "--provenance", "q", *flags]
         with mock.patch.object(RS, "_guard", return_value=(data_root, run_root)), \
-                mock.patch.object(RS, "_forbid_network"), mock.patch.object(RS, "load_items", return_value=[]), \
+                mock.patch.object(RS, "_forbid_network"), \
+                mock.patch.object(RS, "load_items", return_value=[]) as load_items, \
                 mock.patch.object(RS, "print_report"), \
                 mock.patch.object(RS, "run_stage", return_value={"complete": True}) as run_stage:
             self.assertEqual(RS.main(argv), 0)
+        self.split_loaded = load_items.call_args.kwargs["split"]
         return run_stage.call_args.kwargs
 
     def test_the_paid_stage_command_counts_with_the_provider_on_its_transport_and_workspace(self):
@@ -1682,6 +1694,15 @@ class TestPaidTokenCounts(unittest.TestCase):
         self.assertEqual((kw["allocation"], kw["config_change_note"]), (str(self.allocation), str(note)))
         kw = self.command()
         self.assertEqual((kw["allocation"], kw["config_change_note"]), (None, None))
+
+    def test_a_paid_evaluation_loads_only_test_split_records_and_a_rehearsal_any(self):
+        note = self.tmp / "approval.txt"
+        note.write_text("Written go-ahead received on the study channel.\n")
+        paid = ("--paid", "--confirm-paid-calls", "--approval-note", str(note),
+                "--workspace", self.WORKSPACE, "--openai-project", self.PROJECT)
+        for flags, stage, split in ((paid, "EVAL", "test"), ((), "EVAL", None), (paid, "P3", "dev"), ((), "P1", "dev")):
+            self.command(*flags, stage=stage)
+            self.assertEqual(self.split_loaded, split, (stage, flags))
 
     def test_the_fake_stage_command_keeps_the_fake_counter(self):
         kw = self.command()
@@ -1747,6 +1768,10 @@ sys.exit(code)
 
 
 class TestCommands(CommandCase):
+    def test_a_development_split_record_is_refused_where_the_test_split_is_required(self):
+        with self.assertRaisesRegex(RS.StageRefused, "no test-split provenance record"):
+            RS.load_items([self.tmp / "packs"], [self.inputs / "provenance.jsonl"], split="test")
+
     def test_the_pilot_in_fake_mode_reads_no_key_and_installs_dev_only(self):
         record = self.tmp / "env_keys.json"
         args = self.stage_args("P1")

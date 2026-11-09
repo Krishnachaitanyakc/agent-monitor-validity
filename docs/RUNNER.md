@@ -26,14 +26,16 @@ The dispatcher takes all four slots or, for prompt development, A1 and B1 only; 
 3. P2 is P1's five plus the 15.
 4. P3 is 20 tasks from the remaining task IDs of the whole table after P2.
 
-One draw sorts its stratum's task IDs, gives each the next `random()` value of `random.Random(S)`, sorts by that value and takes the first ones needed. S is the big-endian integer of SHA-256 over `<seed>:<stratum>`, where the stratum is the benchmark name, or `p3` for P3. Only `random()` is used, since Python keeps its sequence for a given seed across versions and makes no such promise for `shuffle` or `sample`. The output holds `p1`, `p2`, `p2_new`, `p3`, the seed, the rule in words, the counts by benchmark and a SHA-256 over its canonical content. It is written once and its lists are sorted, so the same input gives identical bytes. The draw is refused when a stratum is short, the table has duplicates or an ID that is not normalized, the counts do not total, or a P1 task is missing from the table.
+One draw sorts its stratum's task IDs, gives each the next `random()` value of `random.Random(S)`, sorts by that value and takes the first ones needed. S is the big-endian integer of SHA-256 over `<seed>:<stratum>`, where the stratum is the benchmark name, or `p3` for P3. Only `random()` is used, since Python keeps its sequence for a given seed across versions and makes no such promise for `shuffle` or `sample`. The output holds `p1`, `p2`, `p2_new`, `p3`, `development` (every task ID of the table, drawn or not), the seed, the rule in words, the counts by benchmark and a SHA-256 over its canonical content. It is written once and its lists are sorted, so the same input gives identical bytes. The draw is refused when a stratum is short, the table has duplicates or an ID that is not normalized, the counts do not total, or a P1 task is missing from the table.
 
 `run_stage.py run --allocation` names that file, which must be outside the repository. Paid mode needs it at every stage, and fake mode takes it when given. A trace maps to its task through the `task_id_normalized` field of its provenance record, the ID the split table uses. Before a run folder is made or anything is sent, the runner refuses:
 
-- a file that fails its own hash, holds an ID that is not normalized, has a P2 that is not P1 plus the 15, or has a P3 that overlaps P2;
+- a file that fails its own hash, holds an ID that is not normalized, has a P2 that is not P1 plus the 15, has a P3 that overlaps P2, or has a development list that leaves out a task of P2 or P3;
 - a P1 trace whose task is not in `p1`, a P2 trace not in `p2`, or a P3 trace not in `p3`;
 - a trace with no normalized task ID in its provenance;
-- in EVAL, any panel task in `p2` or `p3`.
+- in EVAL, any panel task in `development`, drawn or not, since every development task stays out of evaluation.
+
+EVAL in paid mode also loads only provenance records of the test split, which covers the development tasks outside the table, the image-goal and AssistantBench ones. Fake mode leaves the split open, so a rehearsal can use other records.
 
 Once the previous stage's report is checked, an allocation other than the one that stage recorded is refused too. Stage sizes stay caps, so a stage may run fewer tasks than its list holds. `stage.json` records the allocation's SHA-256, and a resumed stage must give the same one.
 

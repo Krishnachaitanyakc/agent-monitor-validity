@@ -22,8 +22,9 @@ pre_join and has its own budget ($285). The guard is installed before anything i
 P3 and EVAL refuse a rubric whose status is not "frozen". --allocation names the
 development allocation from scripts/draw_allocation.py, which paid mode needs at every
 stage and fake mode takes when given: each trace's normalized task ID must be in the
-stage's list (P1 in p1, P2 in p2, P3 in p3), no panel task may be in p2 or p3, and
-stage.json records the allocation's SHA-256. EVAL refuses a configuration hash other than
+stage's list (P1 in p1, P2 in p2, P3 in p3), no panel task may be one of the allocation's
+development tasks, drawn or not, and stage.json records the allocation's SHA-256. EVAL
+in paid mode loads only records of the test split. EVAL refuses a configuration hash other than
 the one P3 ran under, unless --config-change-note names a non-empty file declaring the
 change, which stage.json keeps. --b-model picks judge B's model, gpt-6-sol or its first
 fallback; it is part of the configuration hash, so a stage resumes only under the model
@@ -260,8 +261,8 @@ def export_path(folder, budget: str, ledger_id: str) -> Path:
 def load_items(packs, provenance, split="dev") -> list:
     """Items from scripts/build_packs.py folders, each with its provenance file (same order).
 
-    ``split`` is the split every record must come from, or None (EVAL, where the panel
-    manifest names the tasks).
+    ``split`` is the split every record must come from, or None (EVAL in fake mode, where
+    the panel manifest names the tasks and a rehearsal may use other records).
     """
     if len(packs) != len(provenance):
         raise StageRefused("give one --provenance file for each --packs folder, in the same order")
@@ -758,16 +759,16 @@ def load_allocation(path) -> dict:
 
 
 def check_allocation(stage: str, items: list, allocation: dict) -> None:
-    """Refuse a trace whose task is outside its stage's list, and any panel task the
-    development allocation names. A trace maps to its task through its provenance record's
-    ``task_id_normalized``, the ID the split table uses."""
+    """Refuse a trace whose task is outside its stage's list, and any panel task among
+    the allocation's development tasks, drawn or not. A trace maps to its task through its
+    provenance record's ``task_id_normalized``, the ID the split table uses."""
     unmapped = [i.trace_key for i in items if i.task_id is None]
     if unmapped:
         raise StageRefused(f"{unmapped[0]} has no normalized task ID in its provenance, so the allocation cannot "
                            "be applied")
     tasks = {i.task_id for i in items}
     if stage == "EVAL":
-        used = sorted(tasks & (set(allocation["p2"]) | set(allocation["p3"])))
+        used = sorted(tasks & set(allocation[DA.DEVELOPMENT]))
         if used:
             raise StageRefused(f"EVAL's panel holds tasks of the development allocation: {used}")
         return
@@ -1171,7 +1172,8 @@ def cmd_run(args) -> int:
     else:
         transport, workspace, project, sleep = paid, args.workspace, args.openai_project, time.sleep
         counter = D.HttpsTokenCounter(transport, workspace, sleep=sleep)
-    items = load_items(args.packs, args.provenance, split="dev" if spec.budget == "pilot" else None)
+    items = load_items(args.packs, args.provenance,
+                       split="dev" if spec.budget == "pilot" else "test" if mode == "paid" else None)
     panel = ({"manifest": args.panel_manifest, "sha256": args.panel_sha256, "freeze_tag": args.freeze_tag}
              if spec.name == "EVAL" else None)
     config_env = os.environ.get(fence.CONFIG_ENV)

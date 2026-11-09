@@ -23,10 +23,11 @@ big-endian integer of SHA-256 over the text "<seed>:<stratum>", where the stratu
 benchmark name, or "p3" for P3. Only ``random()`` is used, since Python keeps its sequence
 for a given seed across versions and makes no such promise for ``shuffle`` or ``sample``.
 
-The draw is refused when a stratum is short, the table has duplicates or an ID that is not
-normalized, the counts do not total, or the P1 tasks are missing. The output file is
-written once, with its lists sorted and a SHA-256 over its canonical content, so the same
-input gives identical bytes. Standard library only.
+The output also lists every task ID of the table as ``development``, drawn or not, so the
+evaluation can refuse any of them. The draw is refused when a stratum is short, the table
+has duplicates or an ID that is not normalized, the counts do not total, or the P1 tasks
+are missing. The output file is written once, with its lists sorted and a SHA-256 over its
+canonical content, so the same input gives identical bytes. Standard library only.
 """
 
 import argparse
@@ -46,6 +47,7 @@ QUOTA = {"webarena": 8, "visualwebarena": 1, "workarena": 6}
 P1_TASKS, P2_NEW_TASKS, P3_TASKS = 5, 15, 20
 FIELDS = ("task_id", "benchmark", "template_overlaps_panel", "family")
 LISTS = ("p1", "p2", "p2_new", "p3")
+DEVELOPMENT = "development"
 FORCED_BENCHMARK, FORCED_FAMILY_WORD = "workarena", "infeasible"
 P3_STRATUM = "p3"
 RULE = ("P1's five tasks leave the pool. From the tasks whose template does not overlap the panel, 15 are drawn, "
@@ -164,7 +166,8 @@ def draw(table, p1, seed: int) -> dict:
     if len(remaining) < P3_TASKS:
         raise DrawRefused(f"{len(remaining)} task IDs remain after P2; P3 draws {P3_TASKS}")
     p3 = sorted(permuted(remaining, seed, P3_STRATUM)[:P3_TASKS])
-    allocation = {"p1": p1, "p2": p2, "p2_new": sorted(p2_new), "p3": p3, "seed": seed, "rule": RULE}
+    allocation = {"p1": p1, "p2": p2, "p2_new": sorted(p2_new), "p3": p3, DEVELOPMENT: sorted(rows),
+                  "seed": seed, "rule": RULE}
     allocation["counts_by_benchmark"] = {name: _by_benchmark(allocation[name], rows) for name in LISTS}
     check_totals(allocation)
     allocation["sha256"] = content_sha256(allocation)
@@ -174,10 +177,11 @@ def draw(table, p1, seed: int) -> dict:
 def verify_allocation(allocation) -> dict:
     """The allocation, once it passes the checks a runner makes on the file it is given:
     lists of distinct normalized task IDs, its own hash, P2 as P1 plus the 15, no overlap
-    of P3 with P2. Its sizes are left to the draw, since a stage's size is its own cap."""
+    of P3 with P2, and a development list that holds every task of P2 and P3. Its sizes
+    are left to the draw, since a stage's size is its own cap."""
     if not isinstance(allocation, dict):
         raise DrawRefused("an allocation is a JSON object")
-    for name in LISTS:
+    for name in (*LISTS, DEVELOPMENT):
         ids = allocation.get(name)
         if not isinstance(ids, list) or not all(isinstance(t, str) and t for t in ids):
             raise DrawRefused(f"{name} must be a list of task IDs")
@@ -193,6 +197,9 @@ def verify_allocation(allocation) -> dict:
     overlap = sorted(p2 & p3)
     if overlap:
         raise DrawRefused(f"p3 overlaps p2: {overlap}")
+    undrawn = sorted((p2 | p3) - set(allocation[DEVELOPMENT]))
+    if undrawn:
+        raise DrawRefused(f"the development list leaves out these tasks of p2 or p3: {undrawn}")
     return allocation
 
 
