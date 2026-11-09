@@ -22,11 +22,11 @@ A released primary label of Successful or Unsuccessful, in any letter case, is u
 In every regime, degenerate ones included, it gives:
 
 - The label-free quantities committed at the prediction lock, from `lock_quantities`: the largest gain per 100 panel tasks the panel can reach, whether 2 per 100 is reachable, and x, the change in the gain per 100 from one unstable task.
-- N, n_inv, n_D1, n_D0, s, K and that K is equal across the three policies; U2, U1 and S counts; R_unobserved, the valid first verdicts with both repeats invalid, disagreeing tasks included; invalid outputs by slot and category.
+- N, n_inv, n_D1, n_D0, s, K and K/N, and that K is equal across the three policies; U2, U1 and S counts; R_unobserved, the valid first verdicts with both repeats invalid, disagreeing tasks included; invalid outputs by slot and category.
 - Usable, Unsure and missing counts overall, by benchmark and by review group, one row each for I, G1, U2, U1 and S, with the reference-contradicted first verdicts of each group.
 - How often each judge contradicts the released references: the count and the rate over its own valid verdicts with a usable reference, with the denominator and the number of its invalid outputs among usable-reference tasks beside it. A1's needs only `E`; B1's needs the released labels and is otherwise reported as not assessed.
 - Two fixed lines on how to read a contradicted U2 and U1 verdict, and one under the gain saying that part of any gain is built in, all in the plan's words and with no numeric benchmark.
-- M, m1 and m0; each policy's exact expected capture over its own random choices, as a fraction and a decimal, and the share of M it captures.
+- M, m1 and m0; each policy's exact expected capture over its own random choices, as a fraction and a decimal, its K and K/N, and the share of M it captures.
 - The gain of instability-first review over disagreement-first and over random review, in verdicts and per 100 panel tasks, and disagreement-first minus random on the same two scales as a check. The secondary result is the same gain per 100 tasks with a usable label, N_Y. Nothing else is computed on usable labels only.
 - The observed gain against the practical reference of 2 per 100 panel tasks, stated only as observed at or above the reference, or below it.
 - The invalid-outcome variants of plan section 9, from `invalid_outcome_variants`: for each rule the difference in expected capture and that difference per 100 panel tasks, with s held at its primary value, capped at the variant's n_D0, and N held as the per-100 denominator.

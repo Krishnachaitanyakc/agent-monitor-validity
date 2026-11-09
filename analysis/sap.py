@@ -2863,7 +2863,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
             "N_V": design.N_V, "n_D1": design.n_D1, "n_D0": design.n_D0, "n_U2": design.n_U2,
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
             "lock": lock, "result_sentences": result_sentences(design.regime, observed, lock["x_per_100"]),
-            "K_by_policy": reviews, "K_equal": all(v == design.K for v in reviews.values()),
+            "K_by_policy": reviews, "K_over_N": {pol: reviews[pol] / design.N if design.N > 0 else None for pol in POLICY_ORDER},
+            "K_equal": all(v == design.K for v in reviews.values()),
             "R_unobserved": int((lf["R_unobserved"] == 1).sum()), "repeat_flags": _repeat_flags(lf),
             "invalid_by_slot": {k: sum(c for (slot, _), c in by_slot_category.items() if slot == k)
                                 for k in SLOT_NAMES.values()},
@@ -3030,7 +3031,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"  agreeing groups: U2 = {d['n_U2']}, U1 = {d['n_U1']}, S = {d['n_S']}",
             f"  valid first verdicts with both repeats invalid, disagreeing tasks included "
             f"(R_unobserved): {d['R_unobserved']}",
-            f"  slice s = {d['s']}; review count K = {d['K']}, {equal} ("
+            f"  slice s = {d['s']}; review count K = {d['K']}, "
+            f"K/N = {_exact_text(Fraction(d['K'], d['N']) if d['N'] else None)}, {equal} ("
             + ", ".join(f"{POLICY_NAMES[p]} {d['K_by_policy'][p]}" for p in POLICY_ORDER) + ")",
             f"  regime: {d['regime']}; {REGIME_NOTES[d['regime']]}",
             f"  largest gain per 100 panel tasks the panel can reach: {_exact_text(d['lock']['max_gain_per_100'])}",
@@ -3058,9 +3060,10 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             "  " + READING_U2_TEXT,
             "  " + READING_U1_TEXT,
             "", "EXPECTED CAPTURE at the same review count, exact over each policy's random choices",
-            "  policy | expected capture | share of M"]
+            "  policy | expected capture | K | K/N | share of M"]
     for p in POLICY_ORDER:
-        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {_exact_text(d['share_of_M'][p])}")
+        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {d['K_by_policy'][p]} | "
+                   f"{_exact_text(d['K_over_N'][p])} | {_exact_text(d['share_of_M'][p])}")
     g = d["gain"]
     out += ["", "GAIN OF INSTABILITY-FIRST REVIEW, in expected reference-contradicted first verdicts"]
     for key, name in (("over_disagreement", "disagreement-first"), ("over_random", "random")):

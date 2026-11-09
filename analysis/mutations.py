@@ -777,6 +777,22 @@ MUTATIONS = [
     ("print the usable count in the contradicted column",
      """(f" | {g['contradicted']}" if has_contradicted else "")""",
      """(f" | {g['usable']}" if has_contradicted else "")"""),
+    ("take K/N over the valid tasks in the policy table",
+     "reviews[pol] / design.N if design.N > 0 else None",
+     "reviews[pol] / design.N_V if design.N_V > 0 else None"),
+    ("report K/N of an empty panel as zero",
+     "reviews[pol] / design.N if design.N > 0 else None",
+     "reviews[pol] / design.N if design.N > 0 else Fraction(0)"),
+    ("leave K/N off the design line",
+     """            f"K/N = {_exact_text(Fraction(d['K'], d['N']) if d['N'] else None)}, {equal} ("\n""",
+     """            f"{equal} ("\n"""),
+    ("take the design line's K/N over the valid tasks",
+     "Fraction(d['K'], d['N']) if d['N'] else None",
+     "Fraction(d['K'], d['N_V']) if d['N_V'] else None"),
+    ("leave K and K/N out of each policy's row",
+     """        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {d['K_by_policy'][p]} | "\n"""
+     """                   f"{_exact_text(d['K_over_N'][p])} | {_exact_text(d['share_of_M'][p])}")\n""",
+     """        out.append(f"  {POLICY_NAMES[p]} | {_exact_text(d['captures'][p])} | {_exact_text(d['share_of_M'][p])}")\n"""),
 ]
 
 

@@ -200,7 +200,7 @@ class TestDesignAndReviewCount(unittest.TestCase):
     def test_report_states_the_equal_review_count(self):
         d = describe(labels_for(0, 2, 0, 2, 16), [0] * 20)
         txt = sap.describe_report(d, EXPOSURE)
-        self.assertIn("review count K = 5, equal across the three policies "
+        self.assertIn("review count K = 5, K/N = 1/4 (0.2500), equal across the three policies "
                       "(Instability-first 5, Disagreement-first 5, Random 5)", txt)
         self.assertIn("NOT equal across the three policies", sap.describe_report(dict(d, K_equal=False), EXPOSURE))
 
@@ -594,9 +594,9 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(d["secondary"], {"over_disagreement": Fraction(189, 136)})
         txt = sap.describe_report(d, EXPOSURE)
         for needle in ("M = 25: disagreement m_G1 = 11; unstable agreeing m1 = 4 (m_U2 = 1, m_U1 = 3); stable agreeing m0 = 10",
-                       "Instability-first | 65/4 (16.2500) | 13/20 (0.6500)",
-                       "Disagreement-first | 229/17 (13.4706) | 229/425 (0.5388)",
-                       "Random | 15/2 (7.5000) | 3/10 (0.3000)",
+                       "Instability-first | 65/4 (16.2500) | 60 | 3/10 (0.3000) | 13/20 (0.6500)",
+                       "Disagreement-first | 229/17 (13.4706) | 60 | 3/10 (0.3000) | 229/425 (0.5388)",
+                       "Random | 15/2 (7.5000) | 60 | 3/10 (0.3000) | 3/10 (0.3000)",
                        "over disagreement-first: 189/68 (2.7794) verdicts; 189/136 (1.3897) per 100 panel tasks (N = 200)",
                        "over random: 35/4 (8.7500) verdicts; 35/8 (4.3750) per 100 panel tasks (N = 200)",
                        "check, disagreement-first minus random: 203/34 (5.9706) verdicts; "
@@ -605,6 +605,23 @@ class TestGainsAndReference(unittest.TestCase):
                        "gain over disagreement-first per 100 panel tasks: 189/136 (1.3897); "
                        "observed below the reference."):
             self.assertIn(needle, txt, needle)
+
+    def test_each_policy_prints_its_review_count_and_its_share_of_the_panel(self):
+        # N = 40 and N_V = 38, so K/N and K/N_V differ. s = 6 and K = 2 + 5 + 6 = 13.
+        d = describe(labels_for(2, 5, 1, 2, 30), [0] * 40)
+        self.assertEqual(d["K_over_N"], dict.fromkeys(POLICIES, Fraction(13, 40)))
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        start = lines.index("  policy | expected capture | K | K/N | share of M")
+        self.assertEqual(lines[start + 1:start + 4], ["  Instability-first | 0 (0.0000) | 13 | 13/40 (0.3250) | not defined",
+                                                      "  Disagreement-first | 0 (0.0000) | 13 | 13/40 (0.3250) | not defined",
+                                                      "  Random | 0 (0.0000) | 13 | 13/40 (0.3250) | not defined"])
+
+    def test_K_over_N_is_not_defined_on_an_empty_panel(self):
+        d = describe_panel([], Y=[])
+        self.assertEqual(d["K_over_N"], dict.fromkeys(POLICIES))
+        txt = sap.describe_report(d, EXPOSURE)
+        self.assertIn("review count K = 0, K/N = not defined, equal", txt)
+        self.assertIn("  Random | 0 (0.0000) | 0 | not defined | not defined", txt.split("\n"))
 
     def test_practical_reference_is_compared_exactly(self):
         # N = 100, s = 15. Disagreement-first: 1/5 of 40 = 8; instability-first: 5 + 1/7 of 35 = 10.
@@ -620,7 +637,7 @@ class TestGainsAndReference(unittest.TestCase):
         d = describe(labels_for(0, 2, 0, 2, 16), [0] * 20)
         self.assertEqual(d["M"], 0)
         self.assertEqual(d["share_of_M"], dict.fromkeys(POLICIES))
-        self.assertIn("Instability-first | 0 (0.0000) | not defined", sap.describe_report(d, EXPOSURE))
+        self.assertIn("Instability-first | 0 (0.0000) | 5 | 1/4 (0.2500) | not defined", sap.describe_report(d, EXPOSURE))
 
     def test_degenerate_panel_with_no_unstable_tasks(self):
         # N = 20, s = 3, K = 7, M = 9. Random reviews 6/19 of the valid tasks; instability-first
