@@ -585,7 +585,7 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(g["over_random"], {"verdicts": Fraction(35, 4), "per_100_panel": Fraction(35, 8)})
         self.assertEqual(g["disagreement_over_random"], {"verdicts": Fraction(203, 34), "per_100_panel": Fraction(203, 68)})
         self.assertEqual(d["N_Y"], 200)
-        self.assertEqual(d["secondary"], {"over_disagreement": Fraction(189, 136), "over_random": Fraction(35, 8)})
+        self.assertEqual(d["secondary"], {"over_disagreement": Fraction(189, 136)})
         txt = sap.describe_report(d, EXPOSURE)
         for needle in ("M = 25: disagreement m_G1 = 11; unstable agreeing m1 = 4 (m_U2 = 1, m_U1 = 3); stable agreeing m0 = 10",
                        "Instability-first | 65/4 (16.2500) | 13/20 (0.6500)",
@@ -643,21 +643,21 @@ class TestGainsAndReference(unittest.TestCase):
         self.assertEqual(d["captures"], {"AUG": 2, "DIS": Fraction(5, 3), "RAND": Fraction(3, 2)})
         self.assertEqual(d["N_Y"], 7)                               # the invalid A1 with a usable label counts
         self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], Fraction(10, 3))
-        self.assertEqual(d["secondary"], {"over_disagreement": Fraction(100, 21), "over_random": Fraction(50, 7)})
+        self.assertEqual(d["secondary"], {"over_disagreement": Fraction(100, 21)})
         self.assertEqual(d["gain"]["disagreement_over_random"],     # 5/3 - 3/2, per 100 on the panel of 10
                          {"verdicts": Fraction(1, 6), "per_100_panel": Fraction(5, 3)})
         txt = sap.describe_report(d, EXPOSURE)
         self.assertIn("(N_Y = 7 of N = 10)", txt)
         lines = txt.split("\n")
         self.assertIn("  over disagreement-first: 100/21 (4.7619) per 100", lines)
-        self.assertIn("  over random: 50/7 (7.1429) per 100", lines)
+        self.assertFalse([x for x in lines if x.startswith("  over random") and "panel tasks" not in x])
 
     def test_no_usable_label_at_all(self):
         labels = labels_for(0, 2, 0, 2, 16)
         slots, _ = build(labels, [0] * 20)
         d = sap.describe_panel(slots, Y=["Unsure"] * 10 + [None] * 10)
         self.assertEqual(d["N_Y"], 0)
-        self.assertEqual(d["secondary"], {"over_disagreement": None, "over_random": None})
+        self.assertEqual(d["secondary"], {"over_disagreement": None})
         self.assertEqual(d["gain"]["over_disagreement"]["per_100_panel"], Fraction(0))
         txt = sap.describe_report(d, EXPOSURE)
         self.assertIn("over disagreement-first: not defined per 100", txt)
@@ -677,8 +677,7 @@ class TestGainsAndReference(unittest.TestCase):
             self.assertEqual(block[0], f"SECONDARY RESULT: the same gain per 100 tasks with a usable label "
                                        f"(N_Y = {len(labels)} of N = {len(labels)})", sizes)
             want = d["secondary"]
-            self.assertEqual(block[1:], [f"  over disagreement-first: {sap._exact_text(want['over_disagreement'])} per 100",
-                                         f"  over random: {sap._exact_text(want['over_random'])} per 100"], sizes)
+            self.assertEqual(block[1:], [f"  over disagreement-first: {sap._exact_text(want['over_disagreement'])} per 100"], sizes)
             self.assertEqual(want["over_disagreement"], d["gain"]["over_disagreement"]["verdicts"] * 100 / len(labels), sizes)
         self.assertEqual(seen, REGIMES)
 
@@ -691,10 +690,10 @@ class TestGainsAndReference(unittest.TestCase):
             d = sap.describe_panel(slots, Y=Y)
             seen.add(d["regime"])
             self.assertEqual(d["N_Y"], 0, sizes)
-            self.assertEqual(d["secondary"], {"over_disagreement": None, "over_random": None}, sizes)
+            self.assertEqual(d["secondary"], {"over_disagreement": None}, sizes)
             self.assertEqual(self.secondary_block(d),
                              [f"SECONDARY RESULT: the same gain per 100 tasks with a usable label (N_Y = 0 of N = {len(labels)})",
-                              "  over disagreement-first: not defined per 100", "  over random: not defined per 100"], sizes)
+                              "  over disagreement-first: not defined per 100"], sizes)
         self.assertEqual(seen, REGIMES)
 
     def test_the_secondary_carries_no_reference_line(self):

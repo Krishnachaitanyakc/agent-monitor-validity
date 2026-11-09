@@ -2864,8 +2864,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                      "over_random": {"verdicts": over_rand, "per_100_panel": _per_100(over_rand, design.N)},
                      "disagreement_over_random": {"verdicts": dis_over_rand,
                                                   "per_100_panel": _per_100(dis_over_rand, design.N)}},
-            "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y),
-                                                   "over_random": _per_100(over_rand, N_Y)},
+            "secondary": None if N_Y is None else {"over_disagreement": _per_100(over_dis, N_Y)},
             "invalid_outcome_variants": invalid_outcome_variants(slots, E, design.s, design.N),
             "practical_reference": {"per_100": MATERIAL_M, "status": status},
             "contradiction": {"A1": dict(_rate(M, n_a1_usable), invalid_outputs=n_a1_invalid),
@@ -3066,7 +3065,6 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
         out.append(f"SECONDARY RESULT: the same gain per 100 tasks with a usable label "
                    f"(N_Y = {d['N_Y']} of N = {d['N']})")
         out.append(f"  over disagreement-first: {_exact_text(d['secondary']['over_disagreement'])} per 100")
-        out.append(f"  over random: {_exact_text(d['secondary']['over_random'])} per 100")
     pr = d["practical_reference"]
     out += ["", f"PRACTICAL REFERENCE: {pr['per_100']} per 100 panel tasks, descriptive only",
             f"  gain over disagreement-first per 100 panel tasks: "
