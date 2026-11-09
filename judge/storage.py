@@ -12,7 +12,9 @@ Layout under the log root:
 Every file is written once: the bytes go to a temporary file, which is then hard-linked
 to its final name, so a file never appears half written and an existing file is never
 replaced (``WriteOnceError``). Attempt indices run 1, 2, 3 and so on in each slot, with no
-gap or repeat. A run cannot resume while any halt lacks a correction note.
+gap or repeat. An attempt's raw bytes are written before anything reads them and its
+record follows, so a stop in between leaves the bytes to rebuild it from. A run cannot
+resume while any halt lacks a correction note.
 """
 
 import hashlib
@@ -45,7 +47,9 @@ def write_once(path: Path, data: bytes) -> None:
 
 
 def _json(obj) -> bytes:
-    return (json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    # A lone surrogate, which an answer's JSON can hold, is written as its JSON escape.
+    return (json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            + "\n").encode("utf-8", "backslashreplace")
 
 
 def _name(value: str, what: str) -> str:
@@ -76,22 +80,25 @@ class AttemptLog:
             raise ValueError(f"{folder}: attempt indices {numbers} are not 1..{len(numbers)}")
         return [json.loads((folder / f"{n}.json").read_text(encoding="utf-8")) for n in numbers]
 
+    def write_raw(self, trace_key, config_sha256, judge, repeat, attempt: int, raw: bytes) -> Path:
+        """Write an attempt's raw bytes, before anything reads them. The index must be the
+        next one."""
+        key = (trace_key, config_sha256, judge, repeat)
+        if attempt != len(self.attempts(*key)) + 1:
+            raise ValueError(f"attempt {attempt} is not the next index for slot {judge}{repeat}")
+        path = self.slot_dir(*key) / f"{attempt}.raw"
+        write_once(path, raw or b"")
+        return path
+
     def write_attempt(self, record: dict, raw: bytes) -> Path:
         """Write one attempt: raw bytes, then the record. The index must be the next one."""
-        key = (record["trace_key"], record["config_sha256"], record["judge"], record["repeat"])
-        n = record["attempt"]
-        if n != len(self.attempts(*key)) + 1:
-            raise ValueError(f"attempt {n} is not the next index for slot {record['judge']}{record['repeat']}")
-        folder = self.slot_dir(*key)
-        raw = raw or b""
-        record = dict(record, raw_sha256=hashlib.sha256(raw).hexdigest(), raw_bytes=len(raw))
-        write_once(folder / f"{n}.raw", raw)
-        write_once(folder / f"{n}.json", _json(record))
-        return folder / f"{n}.json"
+        self.write_raw(record["trace_key"], record["config_sha256"], record["judge"], record["repeat"],
+                       record["attempt"], raw)
+        return self.complete_attempt(record)
 
     def complete_attempt(self, record: dict) -> Path:
-        """Write the record of an attempt whose raw bytes are on disk without it (a stop
-        between the two writes of ``write_attempt``). The index must be the next one."""
+        """Write the record of an attempt whose raw bytes are on disk (``write_raw``). The
+        index must be the next one."""
         key = (record["trace_key"], record["config_sha256"], record["judge"], record["repeat"])
         n = record["attempt"]
         if n != len(self.attempts(*key)) + 1:

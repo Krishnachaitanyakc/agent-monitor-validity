@@ -16,6 +16,13 @@ INVALID. Any terminal outcome ends the slot, and a slot that ended is never sent
 is logged as a HALT attempt and a halt record, and the dispatcher stops at once. It will
 not start again while any halt lacks a correction note (``AttemptLog.record_correction``).
 
+**A response that cannot be read.** The raw response is on disk before anything reads it.
+If classifying it or running its checks raises, or gives a value the log cannot store, the
+attempt is recorded with the halt kind ``classification_error``
+(``outcomes.classification_failure``) and the dispatcher stops as for a halt. A response
+that may be complete is MALFORMED, so its slot has ended: A1 is never sent again and the
+bytes stay in the log.
+
 **Per-response checks**, on every complete model response, each a halt on failure:
 A: the model string equals the first one recorded for this configuration;
 ``usage.service_tier`` is ``standard``; ``usage.inference_geo`` is ``global``; no one-hour
@@ -25,9 +32,9 @@ given. B: the model string equals the first recorded; ``service_tier`` is ``defa
 above which the provider prices the call at its long-context rate. A field that is not
 reported fails.
 
-**Recovery.** A stop between the two writes of an attempt leaves its raw response without
-its record. ``recover_attempt`` rebuilds that record from the bytes as the dispatcher
-would have classified them, and nothing is chosen by reading it. The status and headers
+**Recovery.** A stop after the raw response is written leaves it without its record.
+``recover_attempt`` rebuilds that record from the bytes as the dispatcher would have
+classified them, and nothing is chosen by reading it. The status and headers
 were not kept. Bytes that start the provider's stream, or open with its error event, are
 taken as HTTP 200, so a complete response is recorded as it was and a slot it ended is
 never sent again, an error in the stream is classified as the dispatcher classified it,
@@ -54,8 +61,8 @@ from datetime import datetime, timezone
 from http.client import HTTPException
 
 from . import requests as R
-from .outcomes import (ABSTAIN, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TERMINAL,
-                       TRANSPORT, VALID, Exchange, canonical_outcome, error_body_outcome)
+from .outcomes import (ABSTAIN, CLASSIFICATION_ERROR, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TERMINAL,
+                       TRANSPORT, VALID, Exchange, canonical_outcome, classification_failure, error_body_outcome)
 from .streams import parse_sse
 
 CACHE_LIFETIME_S = 300
@@ -190,6 +197,28 @@ def _identity_checks(log, provider: str, judge: str, config_sha256: str, summary
     return checks
 
 
+def _response_fields(oc: dict, checks: list) -> dict:
+    """The fields of an attempt record that come from reading its response. Raises if the
+    log could not store one of them."""
+    summary = oc["summary"] or {}
+    outcome, halt_kind = oc["outcome"], oc["halt_kind"]
+    if checks:
+        outcome, halt_kind = HALT, "response_check"
+    fields = {"outcome": outcome, "halt_kind": halt_kind, "detail": oc["detail"], "response_outcome": oc["outcome"],
+              "failed_checks": checks, "error": oc["error"], "response_id": summary.get("id"),
+              "response_model": summary.get("model"),
+              "stop": summary.get("stop_reason") or summary.get("terminal_event"),
+              "usage": summary.get("usage") or {}, "parse": oc["parse"]}
+    json.dumps(fields, allow_nan=False)
+    return fields
+
+
+def resume_rule(outcome: str) -> str:
+    """What a halt record says about resuming after an attempt with this outcome."""
+    return ("record a correction note; the slot resumes with its next attempt index" if outcome == HALT else
+            "record a correction note; the response is kept and its slot is never sent again")
+
+
 def _backoff(retry: int, headers: dict) -> float:
     wait = BACKOFF_BASE_S * 2 ** (retry - 1)
     try:
@@ -256,16 +285,18 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
             started = clock()
             exchange = transport.send(request)
             finished = clock()
-            oc = canonical_outcome(request.provider, exchange)
-            summary = oc["summary"] or {}
+            log.write_raw(trace_key, config_sha256, judge, repeat, attempt, exchange.raw)
             headers = {k.lower(): v for k, v in (exchange.headers or {}).items()}
-            checks = []
-            if oc["outcome"] in TERMINAL and summary.get("complete"):
-                checks = _identity_checks(log, request.provider, judge, config_sha256, summary, headers, workspace,
-                                          ref)
-            outcome, halt_kind = oc["outcome"], oc["halt_kind"]
-            if checks:
-                outcome, halt_kind = HALT, "response_check"
+            try:
+                oc, checks = canonical_outcome(request.provider, exchange), []
+                if oc["outcome"] in TERMINAL and (oc["summary"] or {}).get("complete"):
+                    checks = _identity_checks(log, request.provider, judge, config_sha256, oc["summary"], headers,
+                                              workspace, ref)
+                fields = _response_fields(oc, checks)
+            except Exception as e:
+                oc = classification_failure(exchange.status, e)
+                fields = _response_fields(oc, [])
+            outcome, halt_kind = fields["outcome"], fields["halt_kind"]
             since = None if judge != "A" or last_a_start is None else round(started - last_a_start, 3)
             record = {
                 "trace_key": trace_key, "config_sha256": config_sha256, "judge": judge, "repeat": repeat,
@@ -278,25 +309,18 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
                 "seconds_since_previous_a_start": since,
                 "within_cache_lifetime": None if since is None else since <= CACHE_LIFETIME_S,
                 "http_status": exchange.status, "transport_error": exchange.transport_error,
-                "response_headers": {k: headers[k] for k in KEPT_HEADERS if k in headers},
-                "outcome": outcome, "halt_kind": halt_kind, "detail": oc["detail"],
-                "response_outcome": oc["outcome"], "failed_checks": checks, "error": oc["error"],
-                "response_id": summary.get("id"), "response_model": summary.get("model"),
-                "stop": summary.get("stop_reason") or summary.get("terminal_event"),
-                "usage": summary.get("usage") or {}, "parse": oc["parse"],
+                "response_headers": {k: headers[k] for k in KEPT_HEADERS if k in headers}, **fields,
             }
-            log.write_attempt(record, exchange.raw)
+            log.complete_attempt(record)
             records.append(record)
             if judge == "A":
                 last_a_start = started
-            if outcome == HALT:
+            if outcome == HALT or halt_kind == CLASSIFICATION_ERROR:
                 halt_id = log.write_halt({"trace_key": trace_key, "config_sha256": config_sha256,
                                           "slot": slot, "attempt": attempt, "halt_kind": halt_kind,
-                                          "detail": oc["detail"], "failed_checks": checks,
+                                          "detail": oc["detail"], "failed_checks": fields["failed_checks"],
                                           "error": oc["error"], "http_status": exchange.status,
-                                          "at": _iso(finished),
-                                          "resume_rule": "record a correction note; the slot resumes "
-                                                         "with its next attempt index"})
+                                          "at": _iso(finished), "resume_rule": resume_rule(outcome)})
                 return {"halted": True, "halt_id": halt_id, "slots": results}
             if oc["retryable"]:
                 retries = sum(r["outcome"] == TRANSPORT for r in records)
@@ -334,35 +358,35 @@ def recover_attempt(log, reservation: dict) -> dict:
                                         reservation["provider"])
     slot = f"{judge}{repeat}"
     raw = (log.slot_dir(trace_key, config_sha256, judge, repeat) / f"{attempt}.raw").read_bytes()
-    status = 200 if _stream_started(provider, raw) else None
-    exchange = Exchange(status, {}, raw, None if status else "the response's status was not kept", None)
-    error_body = None if status else error_body_outcome(provider, raw)
-    oc = error_body or canonical_outcome(provider, exchange)
-    summary = oc["summary"] or {}
-    checks, ref = [], f"{trace_key}/{slot}/{attempt}"
-    if oc["outcome"] in TERMINAL and summary.get("complete"):
-        first = log.first_model(config_sha256, judge)
-        checks = response_checks(provider, summary, {}, first, None)
-        if not checks and first is None:
-            log.set_first_model(config_sha256, judge, summary.get("model"), ref)
-        rid = summary.get("id")             # the stopped process may have claimed it for this attempt
-        if rid and not log.claim_response_id(provider, rid, ref) and not log.owns_response_id(provider, rid, ref):
-            checks.append(f"provider response id {rid!r} was seen before")
-    outcome, halt_kind = oc["outcome"], oc["halt_kind"]
-    if checks:
-        outcome, halt_kind = HALT, "response_check"
+    ref, status, error_body = f"{trace_key}/{slot}/{attempt}", None, None
+    try:
+        status = 200 if _stream_started(provider, raw) else None
+        exchange = Exchange(status, {}, raw, None if status else "the response's status was not kept", None)
+        error_body = None if status else error_body_outcome(provider, raw)
+        oc, checks = error_body or canonical_outcome(provider, exchange), []
+        summary = oc["summary"] or {}
+        if oc["outcome"] in TERMINAL and summary.get("complete"):
+            first = log.first_model(config_sha256, judge)
+            checks = response_checks(provider, summary, {}, first, None)
+            if not checks and first is None:
+                log.set_first_model(config_sha256, judge, summary.get("model"), ref)
+            rid = summary.get("id")             # the stopped process may have claimed it for this attempt
+            if rid and not log.claim_response_id(provider, rid, ref) and not log.owns_response_id(provider, rid, ref):
+                checks.append(f"provider response id {rid!r} was seen before")
+        fields = _response_fields(oc, checks)
+    except Exception as e:
+        fields = _response_fields(classification_failure(status, e), [])
     record = {
         "trace_key": trace_key, "config_sha256": config_sha256, "judge": judge, "repeat": repeat, "slot": slot,
         "attempt": attempt, "provider": provider, "request_sha256": reservation["request_sha256"],
         "request_bytes": None, "model_requested": reservation["model"], "started_at": None, "finished_at": None,
         "first_byte_after_s": None, "seconds_since_previous_a_start": None, "within_cache_lifetime": None,
-        "http_status": status, "transport_error": exchange.transport_error, "response_headers": {},
-        "outcome": outcome, "halt_kind": halt_kind, "detail": oc["detail"], "response_outcome": oc["outcome"],
-        "failed_checks": checks, "error": oc["error"], "response_id": summary.get("id"),
-        "response_model": summary.get("model"), "stop": summary.get("stop_reason") or summary.get("terminal_event"),
-        "usage": summary.get("usage") or {}, "parse": oc["parse"],
+        "http_status": status, "transport_error": None if status else "the response's status was not kept",
+        "response_headers": {}, **fields,
         "recovered": {"from": f"{attempt}.raw",
                       "http_status": ("inferred from the stream" if status else
+                                      "unknown; its classification raised"
+                                      if fields["halt_kind"] == CLASSIFICATION_ERROR else
                                       "unknown; an error body, classified by its error fields" if error_body else
                                       "unknown; taken as no response"),
                       "checks_not_applied": ["anthropic-workspace-id header"] if provider == "anthropic" else []},
@@ -378,7 +402,7 @@ def capability_check(records: list, model: str) -> dict:
     """The fallback check for judge B on its first responses: access, image acceptance,
     strict structured output and a stable model string. Refusals are excluded: a refusal
     is a recorded outcome and never a reason to change judges. No invalid-rate threshold
-    is used.
+    is used. An attempt that could not be classified shows nothing about the judge either.
 
     ``records`` are B attempt records in dispatch order. Each check is "ok", "failed" or
     "unknown" (no response yet that shows it).
@@ -386,7 +410,8 @@ def capability_check(records: list, model: str) -> dict:
     access = images = strict = "unknown"
     models = []
     for r in records:
-        if r["outcome"] == REFUSAL or r.get("response_outcome") == REFUSAL:
+        if (r["outcome"] == REFUSAL or r.get("response_outcome") == REFUSAL
+                or r.get("halt_kind") == CLASSIFICATION_ERROR):
             continue
         code = (r.get("error") or {}).get("code")
         if r.get("halt_kind") in ("auth", "permission", "not_found"):

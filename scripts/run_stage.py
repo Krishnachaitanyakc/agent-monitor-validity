@@ -72,7 +72,9 @@ again; an error event that opens a stream, or a provider error body, halts, ends
 slot as FILTERED or is retried, as its error shows, and a B error body that would
 otherwise be a transport failure halts unless it is a known transient error, since
 OpenAI marks some halting errors by the status alone; a cut or unrecognized response is
-a transport failure whose slot is retried under the usual retry rule.
+a transport failure whose slot is retried under the usual retry rule. A response that
+raises while it is read is recorded with a classification_error halt; if it may be
+complete, its slot has ended and it is never sent again.
 The report prints the gates for review and never acts on them to select a judge. A halt
 stops the stage; rerun the same command after recording a correction note.
 """
@@ -99,7 +101,7 @@ from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
 from judge import spend as S  # noqa: E402
-from judge.outcomes import HALT, OUTCOMES, VALID, Exchange  # noqa: E402
+from judge.outcomes import CLASSIFICATION_ERROR, HALT, OUTCOMES, VALID, Exchange  # noqa: E402
 from judge.storage import AttemptLog, WriteOnceError, write_once  # noqa: E402
 from judge.streams import anthropic_events, openai_events, sse  # noqa: E402
 
@@ -608,7 +610,7 @@ def check_ledger_against_logs(spec: Stage, run_root: Path, ledger, run_id: str, 
 
 def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: str, slots) -> list:
     """Attempt records rebuilt from raw responses whose records were never written (a stop
-    between the two writes), classified as ``dispatch.recover_attempt`` describes: a
+    before the record), classified as ``dispatch.recover_attempt`` describes: a
     complete stream is recorded as it was and a slot it ended is never sent again, an
     error event that opens a stream or an error body halts, ends the slot as FILTERED or
     is retried, and a cut or unrecognized response is a transport failure retried under
@@ -655,23 +657,24 @@ def record_over_reservation_halts(log, ledger, run_id: str, stage: str, config_s
 
 
 def record_unrecorded_halts(log, items, config_sha256: str, slots, clock) -> list:
-    """Halt records for slots whose last attempt is a HALT with no halt record (a stop
-    between the two writes); each is then unresolved until a correction note."""
+    """Halt records for slots whose last attempt stopped the run, as a HALT or a
+    classification failure, with no halt record (a stop before it was written); each is
+    then unresolved until a correction note."""
     recorded = {(h.get("trace_key"), h.get("slot"), h.get("attempt")) for h in log.halts()}
     written = []
     for item in items:
         for j, r in slots:
             recs = log.attempts(item.trace_key, config_sha256, j, r)
-            if recs and recs[-1]["outcome"] == HALT and (item.trace_key, f"{j}{r}", recs[-1]["attempt"]) not in recorded:
+            stops = recs and (recs[-1]["outcome"] == HALT or recs[-1].get("halt_kind") == CLASSIFICATION_ERROR)
+            if stops and (item.trace_key, f"{j}{r}", recs[-1]["attempt"]) not in recorded:
                 last = recs[-1]
                 written.append(log.write_halt({
                     "trace_key": item.trace_key, "config_sha256": config_sha256, "slot": f"{j}{r}",
                     "attempt": last["attempt"], "halt_kind": last.get("halt_kind"),
                     "failed_checks": last.get("failed_checks") or [], "error": last.get("error"),
                     "http_status": last.get("http_status"),
-                    "detail": "the slot's last attempt is a HALT with no halt record; recorded at stage start",
-                    "at": _now(clock), "recorded_at_start": True,
-                    "resume_rule": "record a correction note; the slot resumes with its next attempt index"}))
+                    "detail": "the slot's last attempt stopped the run with no halt record; recorded at stage start",
+                    "at": _now(clock), "recorded_at_start": True, "resume_rule": D.resume_rule(last["outcome"])}))
     return written
 
 

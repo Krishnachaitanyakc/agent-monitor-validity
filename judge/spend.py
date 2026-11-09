@@ -57,8 +57,8 @@ the attempt log, which keeps the raw response:
   OpenAI's behavior is unverified and covered by reconciliation;
 - no response, an error body or unrecognized bytes whose status was not kept (a rebuilt
   record), a stream that did not complete, an Anthropic stream whose ``message_delta``
-  did not report final usage, or usage not reported in full holds the whole reservation,
-  which then counts as spent for good;
+  did not report final usage, usage not reported in full, or a response whose pricing
+  raises holds the whole reservation, which then counts as spent for good;
 - no attempt record at all also holds it.
 
 After a restart, an open reservation counts as spent until ``recover`` matches it to its
@@ -614,8 +614,11 @@ class Ledger:
             return self._append({"type": "hold", "id": rid, "reason": "no attempt was recorded for it",
                                  "at": _now(self.clock)})
         record, raw = found
-        kind, cost, tokens, detail = charge(r["provider"], r["model"], record["http_status"], raw,
-                                            reserved=Decimal(r["amount_usd"]))
+        try:
+            kind, cost, tokens, detail = charge(r["provider"], r["model"], record["http_status"], raw,
+                                                reserved=Decimal(r["amount_usd"]))
+        except Exception as e:                  # the bytes that stopped the classifier can stop this too
+            kind, detail = HOLD, f"pricing the response raised {type(e).__name__}, so its usage is unknown"
         if kind == HOLD:
             if record["http_status"] is None and record.get("recovered") and record.get("error"):
                 detail = ("an error body whose status was not kept; held, since the provider may still bill "
@@ -919,8 +922,8 @@ class MeteredTransport:
     reservation records. Before a send, the previous reservation is closed from the
     attempt record the dispatcher wrote for it; ``finish`` closes the last one after the
     trajectory. A slot folder holding a raw response without its attempt record (a stop
-    between the two writes, which the stage runner rebuilds at start) is refused before
-    anything is reserved or sent.
+    before the record was written, which the stage runner rebuilds at start) is refused
+    before anything is reserved or sent.
     """
 
     def __init__(self, inner, ledger: Ledger, run: str, stage: str, log_root, run_root=None, scopes=None):

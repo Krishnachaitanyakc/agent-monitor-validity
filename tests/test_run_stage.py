@@ -28,9 +28,10 @@ import run_stage as RS  # noqa: E402
 from judge import dispatch as D  # noqa: E402
 from judge import pack as P  # noqa: E402
 from judge import requests as R  # noqa: E402
+from judge import schema  # noqa: E402
 from judge import spend as S  # noqa: E402
 from judge.outcomes import HALT, Exchange, canonical_outcome, error_body_outcome  # noqa: E402
-from judge.storage import AttemptLog, write_once  # noqa: E402
+from judge.storage import AttemptLog  # noqa: E402
 from judge.streams import sse  # noqa: E402
 from test_pack import FixtureCase  # noqa: E402
 from test_requests import images_for, synthetic_pack  # noqa: E402
@@ -492,17 +493,147 @@ class TestRunRecords(RunnerCase):
         self.assertIn("was seen before", halt["failed_checks"][0])
 
     def stop_between_writes(self, slot, cut=False):
-        """write_attempt that, for ``slot``, writes the raw response (or half of it) and stops
-        before the record."""
-        real = AttemptLog.write_attempt
+        """complete_attempt that, for ``slot``, leaves the raw response (or half of it) on disk
+        and stops before the record."""
+        real = AttemptLog.complete_attempt
 
-        def write(log, record, raw):
+        def write(log, record):
             if record["slot"] == slot:
                 folder = log.slot_dir(record["trace_key"], record["config_sha256"], record["judge"], record["repeat"])
-                write_once(folder / f"{record['attempt']}.raw", raw[:len(raw) // 2] if cut else raw)
+                raw = folder / f"{record['attempt']}.raw"
+                if cut:
+                    raw.write_bytes(raw.read_bytes()[:raw.stat().st_size // 2])
                 raise KeyboardInterrupt
-            return real(log, record, raw)
-        return mock.patch.object(AttemptLog, "write_attempt", write)
+            return real(log, record)
+        return mock.patch.object(AttemptLog, "complete_attempt", write)
+
+    def a1(self, key, root=None):
+        return AttemptLog((root or self.root) / "P1" / "attempt_log").attempts(key, R.config_sha256(), "A", 1)
+
+    def test_a_parser_exception_keeps_the_response_and_a1_is_not_sent_again(self):
+        led = self.ledger()
+        its = items(2, "a")
+        key = its[0].trace_key
+        with mock.patch.object(schema, "parse", side_effect=RuntimeError("the answer was: quoted text")):
+            report, first = self.stage("P1", its, led)
+        self.assertEqual((report["complete"], report["stopped"]["kind"], report["stopped"]["slot"]),
+                         (False, "classification_error", "A1"))
+        self.assertEqual([r.judge for r in first.sent], ["A"])
+        records = self.a1(key)
+        self.assertEqual([(r["attempt"], r["outcome"], r["halt_kind"], r["detail"]) for r in records],
+                         [(1, "MALFORMED", "classification_error", "classification raised RuntimeError")])
+        folder = AttemptLog(self.root / "P1" / "attempt_log").slot_dir(key, R.config_sha256(), "A", 1)
+        self.assertEqual(R.sha256_bytes((folder / "1.raw").read_bytes()), records[0]["raw_sha256"])
+        self.assertTrue((folder / "1.raw").stat().st_size > 0)
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        self.assertIn("never sent again", log.halts()[0]["resume_rule"])
+        log.record_correction(report["stopped"]["halt_id"], "Read the raw response.", R.config_sha256(), at="now")
+        report, second = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in second.sent], ["A", "A", "B"] + ["A", "A", "A", "B"])    # no second A1
+        self.assertEqual([e["attempt"] for e in reserves(led) if e["slot"] == "A1" and e["trace_key"] == key], [1])
+        self.assertEqual(len(self.a1(key)), 1)
+        self.assertEqual(report["gates"]["invalid_share"]["A1"]["by_outcome"]["MALFORMED"]["n"], 1)
+        a1 = next(e for e in reserves(led) if e["slot"] == "A1" and e["trace_key"] == key)
+        self.assertEqual(led.reservations[a1["id"]]["state"], "settled")                  # its usage could be read
+
+    def test_bytes_that_stop_the_classifier_and_the_pricing_hold_the_reservation(self):
+        class Unreadable(RS.ScriptedProvider):
+            def _exchange(self, request, stage, ref, kind):
+                if ref.endswith("_A1_1"):
+                    raw = sse([("message_start", {"type": "message_start", "message": 5})])
+                    return Exchange(200, {}, raw, None, None)
+                return super()._exchange(request, stage, ref, kind)
+
+        led = self.ledger()
+        its = items(1, "a")
+        report, first = self.stage("P1", its, led, provider=Unreadable("central"))
+        self.assertEqual(report["stopped"]["kind"], "classification_error")
+        self.assertEqual(len(first.sent), 1)
+        self.assertEqual([(r["outcome"], r["http_status"], r["detail"]) for r in self.a1(its[0].trace_key)],
+                         [("MALFORMED", 200, "classification raised AttributeError")])
+        a1 = next(e for e in reserves(led) if e["slot"] == "A1")
+        self.assertEqual(led.reservations[a1["id"]]["state"], "held")
+        self.assertEqual([e["reason"] for e in led.entries if e["type"] == "hold" and e["id"] == a1["id"]],
+                         ["pricing the response raised AttributeError, so its usage is unknown"])
+        AttemptLog(self.root / "P1" / "attempt_log").record_correction(
+            report["stopped"]["halt_id"], "Read the raw response.", R.config_sha256(), at="now")
+        report, second = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in second.sent], ["A", "A", "B"])
+
+    def test_a_stop_while_a_response_is_classified_loses_nothing(self):
+        led = self.ledger()
+        its = items(1, "a")
+        with mock.patch.object(schema, "parse", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led)
+        self.assertEqual(led.open_reservations()[0]["slot"], "A1")               # left for the rebuild
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "B"])
+        self.assertEqual([(r["attempt"], r["outcome"]) for r in self.a1(its[0].trace_key)], [(1, "VALID")])
+        self.assertEqual(len([e for e in reserves(led) if e["slot"] == "A1"]), 1)
+
+    def test_a_parser_exception_during_the_rebuild_is_recorded_and_a1_is_not_sent_again(self):
+        led = self.ledger()
+        its = items(1, "a")
+        with self.stop_between_writes("A1"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led)
+        provider = RS.ScriptedProvider()
+        with mock.patch.object(schema, "parse", side_effect=RuntimeError("defect")):
+            with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+                self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        rec = self.a1(its[0].trace_key)[0]
+        self.assertEqual((rec["outcome"], rec["halt_kind"], rec["http_status"], rec["recovered"]["http_status"]),
+                         ("MALFORMED", "classification_error", 200, "inferred from the stream"))
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        halts = log.halts()
+        self.assertEqual([(h["slot"], h["halt_kind"], h["recorded_at_start"]) for h in halts],
+                         [("A1", "classification_error", True)])
+        log.record_correction(halts[0]["halt_id"], "Read the raw response.", R.config_sha256(), at="now")
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "B"])
+        self.assertEqual(len(self.a1(its[0].trace_key)), 1)
+
+    def test_a_rebuild_that_cannot_tell_the_status_says_so(self):
+        led = self.ledger()
+        its = items(1, "a")
+        with self.stop_between_writes("A1"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led)
+        provider = RS.ScriptedProvider()
+        with mock.patch.object(D, "_stream_started", side_effect=RuntimeError("defect")):
+            with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+                self.stage("P1", its, led, provider=provider)
+        rec = self.a1(its[0].trace_key)[0]
+        self.assertEqual((rec["outcome"], rec["http_status"], rec["recovered"]["http_status"]),
+                         ("MALFORMED", None, "unknown; its classification raised"))
+
+    def test_a_classification_halt_lost_in_a_stop_is_recorded_at_start(self):
+        led = self.ledger()
+        its = items(1, "a")
+        with mock.patch.object(schema, "parse", side_effect=RuntimeError("defect")):
+            with mock.patch.object(AttemptLog, "write_halt", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.stage("P1", its, led)
+        log = AttemptLog(self.root / "P1" / "attempt_log")
+        self.assertEqual(log.halts(), [])
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "halts without a correction note"):
+            self.stage("P1", its, led, provider=provider)
+        self.assertEqual(provider.sent, [])
+        halt = log.halts()[0]
+        self.assertEqual((halt["slot"], halt["halt_kind"], halt["recorded_at_start"]),
+                         ("A1", "classification_error", True))
+        self.assertIn("never sent again", halt["resume_rule"])
 
     def test_a_raw_response_without_its_record_is_rebuilt_and_never_sent_again(self):
         for slot in ("A1", "A2"):

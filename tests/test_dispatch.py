@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -18,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from judge import dispatch as D  # noqa: E402
 from judge import requests as R  # noqa: E402
-from judge.outcomes import (ABSTAIN, FILTERED, HALT, MALFORMED, REFUSAL, TRANSPORT,  # noqa: E402
-                            TRUNCATED, VALID, Exchange, canonical_outcome)
+from judge.outcomes import (ABSTAIN, CLASSIFICATION_ERROR, FILTERED, HALT, MALFORMED, REFUSAL,  # noqa: E402
+                            TRANSPORT, TRUNCATED, VALID, Exchange, canonical_outcome)
 from judge.storage import AttemptLog, WriteOnceError, write_once  # noqa: E402
 from judge.streams import (anthropic_events, anthropic_summary, openai_events,  # noqa: E402
                            openai_summary, parse_sse, sse)
@@ -281,6 +282,18 @@ class TestStorage(LogCase):
         with self.assertRaises(ValueError):
             self.log.attempts(KEY, self.config, "A", 1)
 
+    def test_raw_bytes_come_first_and_keep_the_next_index(self):
+        path = self.log.write_raw(KEY, self.config, "A", 1, 1, b"raw one")
+        self.assertEqual(path.read_bytes(), b"raw one")
+        self.assertEqual(self.log.attempts(KEY, self.config, "A", 1), [])
+        with self.assertRaises(WriteOnceError):
+            self.log.write_raw(KEY, self.config, "A", 1, 1, b"again")
+        with self.assertRaises(ValueError):
+            self.log.write_raw(KEY, self.config, "A", 1, 2, b"gap")
+        self.log.complete_attempt(self.record(1))
+        self.assertEqual(self.log.attempts(KEY, self.config, "A", 1)[0]["raw_bytes"], 7)
+        self.assertEqual(self.log.write_raw(KEY, self.config, "A", 1, 2, None).read_bytes(), b"")
+
     def test_unsafe_names_are_refused(self):
         for key in ("../x", ".hidden", "a/b", ""):
             with self.assertRaises(ValueError):
@@ -475,6 +488,78 @@ class TestDispatch(LogCase):
         self.assertTrue(result["halted"])
         self.assertIn("seen before", self.records("A2")[0]["failed_checks"][0])
 
+    def test_a_response_is_on_disk_before_anything_reads_it(self):
+        ex, seen = self.f.a(), []
+
+        def classify(provider, exchange):
+            seen.append((self.log.slot_dir(KEY, self.config, "A", 1) / "1.raw").read_bytes())
+            raise KeyboardInterrupt
+
+        with mock.patch.object(D, "canonical_outcome", classify):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_slots(ex)
+        self.assertEqual(seen, [ex.raw])
+        self.assertEqual(self.records("A1"), [])
+
+    def test_an_exception_while_a_response_is_read_ends_its_slot_and_halts(self):
+        with mock.patch.object(D, "canonical_outcome", side_effect=RuntimeError("quoted text")):
+            result, t = self.run_slots(self.f.a())
+        self.assertTrue(result["halted"])
+        self.assertEqual(len(t.sent), 1)
+        rec = self.records("A1")[0]
+        self.assertEqual((rec["outcome"], rec["response_outcome"], rec["halt_kind"], rec["detail"], rec["parse"]),
+                         (MALFORMED, MALFORMED, CLASSIFICATION_ERROR, "classification raised RuntimeError", None))
+        self.assertTrue(D._slot_done([rec]))
+        halt = self.log.halts()[0]
+        self.assertEqual((halt["halt_id"], halt["slot"], halt["attempt"], halt["halt_kind"], halt["http_status"]),
+                         (result["halt_id"], "A1", 1, CLASSIFICATION_ERROR, 200))
+        with self.assertRaises(D.HaltPending):
+            self.run_slots(self.f.a())
+        self.log.record_correction(result["halt_id"], "Read the raw response.", self.config, at="now")
+        result, t = self.run_slots(self.f.a(), self.f.a(), self.f.b())
+        self.assertFalse(result["halted"])
+        self.assertEqual([r.judge for r in t.sent], ["A", "A", "B"])
+        self.assertEqual(result["slots"]["A1"], {"outcome": MALFORMED, "valid": False, "verdict": None,
+                                                 "attempts": 1, "transport_attempts": 0})
+
+    def test_an_identity_check_that_raises_ends_the_slot_too(self):
+        with mock.patch.object(AttemptLog, "claim_response_id", side_effect=OSError("disk")):
+            result, _ = self.run_slots(self.f.a())
+        self.assertTrue(result["halted"])
+        self.assertEqual([(r["outcome"], r["detail"]) for r in self.records("A1")],
+                         [(MALFORMED, "classification raised OSError")])
+
+    def test_an_error_status_that_cannot_be_read_halts_and_its_slot_resumes(self):
+        unreadable = Exchange(400, {}, json.dumps({"type": "error", "error": {"type": "x", "message": 5}}).encode(),
+                              None, None)
+        result, _ = self.run_slots(unreadable)
+        self.assertTrue(result["halted"])
+        rec = self.records("A1")[0]
+        self.assertEqual((rec["outcome"], rec["halt_kind"], rec["http_status"]), (HALT, CLASSIFICATION_ERROR, 400))
+        self.assertFalse(D._slot_done([rec]))
+        self.assertIn("next attempt index", self.log.halts()[0]["resume_rule"])
+        self.log.record_correction(result["halt_id"], "Read the error body.", self.config, at="now")
+        result, t = self.run_slots(self.f.a(), self.f.a(), self.f.a(), self.f.b())
+        self.assertEqual([r.judge for r in t.sent], ["A", "A", "A", "B"])
+        self.assertEqual([r["outcome"] for r in self.records("A1")], [HALT, VALID])
+
+    def test_a_value_the_log_cannot_store_ends_the_slot_and_halts(self):
+        result, _ = self.run_slots(self.f.a(service_tier=float("nan")))
+        self.assertTrue(result["halted"])
+        rec = self.records("A1")[0]
+        self.assertEqual((rec["outcome"], rec["halt_kind"], rec["detail"], rec["usage"]),
+                         (MALFORMED, CLASSIFICATION_ERROR, "classification raised ValueError", {}))
+
+    def test_a_lone_surrogate_in_the_answer_is_stored_and_the_verdict_kept(self):
+        text = answer_with_literal("rationale", r'"caf\u00e9 \ud83d end"', verdict="failure")
+        result, _ = self.run_slots(self.f.a(text=text), self.f.a(), self.f.a(), self.f.b())
+        self.assertFalse(result["halted"])
+        rec = self.records("A1")[0]
+        self.assertEqual((rec["outcome"], rec["parse"]["verdict"], rec["parse"]["fields"]["rationale"]),
+                         (VALID, "failure", "caf\u00e9 \ud83d end"))
+        data = (self.log.slot_dir(KEY, self.config, "A", 1) / "1.json").read_bytes()
+        self.assertIn("caf\u00e9".encode("utf-8"), data)                    # other text stays as it was
+
     def test_cache_tokens_are_recorded(self):
         self.run_slots(self.f.a(usage={"cache_creation_input_tokens": 5000}),
                        self.f.a(usage={"cache_read_input_tokens": 5000}),
@@ -539,6 +624,20 @@ class TestCapability(LogCase):
         changed = dict(recs[0], response_model="gpt-6-sol-b")
         out = D.capability_check(recs + [changed], R.B_MODEL)
         self.assertEqual(out["checks"]["stable_model_string"], "failed")
+
+    def test_an_unclassified_response_is_not_a_capability_failure(self):
+        real = D.canonical_outcome
+
+        def classify(provider, exchange):
+            if provider == "openai":
+                raise RuntimeError("defect")
+            return real(provider, exchange)
+
+        with mock.patch.object(D, "canonical_outcome", classify):
+            recs = self.b_records(self.f.b())
+        self.assertEqual(recs[0]["halt_kind"], CLASSIFICATION_ERROR)
+        out = D.capability_check(recs, R.B_MODEL)
+        self.assertEqual((out["checks"]["strict_output"], out["failed"]), ("unknown", []))
 
     def test_no_invalid_rate_threshold(self):
         recs = self.b_records(self.f.b(), *[self.f.b(status="incomplete", incomplete_reason="max_output_tokens")] * 3)

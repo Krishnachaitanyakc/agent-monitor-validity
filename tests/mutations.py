@@ -350,6 +350,46 @@ MUTATIONS = [
     ("hold rebuilt unrecognized bytes as if no response arrived", "judge/spend.py",
      '            elif record["http_status"] is None and record.get("recovered") and raw:',
      '            elif False:'),
+    ("read a response before its raw bytes are on disk", "judge/dispatch.py",
+     "            log.write_raw(trace_key, config_sha256, judge, repeat, attempt, exchange.raw)\n"
+     "            headers = {k.lower(): v for k, v in (exchange.headers or {}).items()}\n"
+     "            try:\n"
+     "                oc, checks = canonical_outcome(request.provider, exchange), []\n",
+     "            headers = {k.lower(): v for k, v in (exchange.headers or {}).items()}\n"
+     "            try:\n"
+     "                oc, checks = canonical_outcome(request.provider, exchange), []\n"
+     "                log.write_raw(trace_key, config_sha256, judge, repeat, attempt, exchange.raw)\n"),
+    ("write raw bytes at an index that is not the next", "judge/storage.py",
+     "        if attempt != len(self.attempts(*key)) + 1:\n", "        if False:\n"),
+    ("let an exception while a response is read stop the dispatcher", "judge/dispatch.py",
+     "            except Exception as e:\n                oc = classification_failure(exchange.status, e)\n",
+     "            except ZeroDivisionError as e:\n                oc = classification_failure(exchange.status, e)\n"),
+    ("let an exception while a raw response is rebuilt stop every start", "judge/dispatch.py",
+     "    except Exception as e:\n        fields = _response_fields(classification_failure(status, e), [])\n",
+     "    except ZeroDivisionError as e:\n        fields = _response_fields(classification_failure(status, e), [])\n"),
+    ("leave open the slot of a response that cannot be read", "judge/outcomes.py",
+     "    outcome = HALT if status is not None and not 200 <= status < 300 else MALFORMED\n", "    outcome = HALT\n"),
+    ("end the slot of an error status that cannot be read", "judge/outcomes.py",
+     "    outcome = HALT if status is not None and not 200 <= status < 300 else MALFORMED\n", "    outcome = MALFORMED\n"),
+    ("keep the message of a classification exception", "judge/outcomes.py",
+     'f"classification raised {type(e).__name__}"', 'f"classification raised {e}"'),
+    ("go on after a response that cannot be read", "judge/dispatch.py",
+     "            if outcome == HALT or halt_kind == CLASSIFICATION_ERROR:", "            if outcome == HALT:"),
+    ("lose a classification halt that a stop left unrecorded", "scripts/run_stage.py",
+     ' or recs[-1].get("halt_kind") == CLASSIFICATION_ERROR)', ")"),
+    ("let pricing raise on bytes that stopped the classifier", "judge/spend.py",
+     "        except Exception as e:                  # the bytes that stopped the classifier can stop this too",
+     "        except ZeroDivisionError as e:"),
+    ("record a value the log cannot store", "judge/dispatch.py", "    json.dumps(fields, allow_nan=False)\n", ""),
+    ("refuse to store a lone surrogate from an answer", "judge/storage.py",
+     '.encode("utf-8", "backslashreplace")', '.encode("utf-8")'),
+    ("count a response that could not be read against judge B's capability", "judge/dispatch.py",
+     '\n                or r.get("halt_kind") == CLASSIFICATION_ERROR):', "):"),
+    ("say a slot that has ended resumes", "judge/dispatch.py",
+     'next attempt index" if outcome == HALT else', 'next attempt index" if True else'),
+    ("describe a rebuild that raised as no response", "judge/dispatch.py",
+     '                                      if fields["halt_kind"] == CLASSIFICATION_ERROR else\n',
+     "                                      if False else\n"),
 ]
 
 

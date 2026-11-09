@@ -21,6 +21,9 @@ not an outcome of the slot. It stops the run, and ``halt_kind`` says why: ``auth
 ``billing``, ``permission``, ``not_found``, ``spend_limit`` or ``request_error``. A request
 or configuration error halts because identical retries cannot succeed, and it is never an
 invalid verdict. Every non-VALID terminal outcome is invalid for its slot.
+
+An attempt that cannot be classified, because reading it raised, has the halt kind
+``classification_error`` (``classification_failure``).
 """
 
 import json
@@ -61,6 +64,7 @@ IMAGE_ERROR_CODES = frozenset(c for c in B_REQUEST_CODES if "image" in c)
 B_ACCESS_CODES = {"invalid_api_key": "auth", "unsupported_country_region_territory": "permission",
                   "model_not_found": "not_found"}
 B_TRANSIENT_TYPES = frozenset({"server_error"})
+CLASSIFICATION_ERROR = "classification_error"
 
 
 def _result(outcome, detail, halt_kind=None, summary=None, parsed=None, error=None) -> dict:
@@ -201,6 +205,17 @@ def openai_outcome(ex: Exchange) -> dict:
         return _result(REFUSAL, "refusal output", summary=s)
     outcome, parsed = _parsed_outcome(s["text"])
     return _result(outcome, f"completed, {parsed['status']}", summary=s, parsed=parsed)
+
+
+def classification_failure(status, e: Exception) -> dict:
+    """The outcome of an attempt whose classification raised. That is a defect in the
+    reader and says nothing about the model, so the run stops whichever outcome this is.
+    An error status means there is no model response, so it is a HALT, and the slot resumes
+    with its next attempt after the note. Otherwise the response may be complete and paid
+    for: it is MALFORMED, which ends the slot, so it is never sent again. Only the
+    exception's type is kept, since its message can quote the response."""
+    outcome = HALT if status is not None and not 200 <= status < 300 else MALFORMED
+    return _result(outcome, f"classification raised {type(e).__name__}", CLASSIFICATION_ERROR)
 
 
 def canonical_outcome(provider: str, exchange: Exchange) -> dict:
