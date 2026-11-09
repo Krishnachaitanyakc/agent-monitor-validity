@@ -1325,7 +1325,7 @@ class TestEval(RunnerCase):
 
     def write_manifest(self, **change):
         m = {"kind": "panel-manifest", "frozen": True, "freeze_tag": "freeze-1", "config_sha256": R.config_sha256(),
-             "n": 2, "tasks": [{"trace_key": i.trace_key, "pack_sha256": i.pack_sha256} for i in self.panel_items]}
+             "p3_run_id": self.run_id(), "n": 2, "tasks": [{"trace_key": i.trace_key, "pack_sha256": i.pack_sha256} for i in self.panel_items]}
         m.update(change)
         path = self.tmp / "panel.json"
         path.write_text(json.dumps(m))
@@ -1390,6 +1390,49 @@ class TestEval(RunnerCase):
         model = R.B_FALLBACK_MODELS[0]
         return model, self.write_manifest(config_sha256=R.config_sha256(b_model=model))
 
+    def second_pilot(self, root, p3=None, **kw):
+        """P1 to P3 of one task each in another run root, on the pilot ledger."""
+        led = self.ledger()
+        for stage, its in (("P1", items(1, "x")), ("P2", items(1, "y")), ("P3", p3 or items(1, "z"))):
+            report, provider = self.stage(stage, its, led, root=root, **kw)
+            self.assertTrue(report["complete"], stage)
+            if provider.sent:
+                self.reconcile(led, provider)
+        led.close()
+
+    def test_a_fresh_run_root_with_its_own_short_p3_cannot_run_the_panel(self):
+        model, panel = self.fallback()
+        root = self.tmp / "fresh"
+        self.second_pilot(root, b_model=model)
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "frozen after the P3 of run"):
+            with self.eval_ledger() as led:
+                self.stage("EVAL", self.panel_items, led, panel=panel, repo=self.repo, root=root, provider=provider,
+                           b_model=model)
+        self.assertEqual(provider.sent, [])
+        self.assertFalse((root / "EVAL").exists())
+
+    def test_a_manifest_that_names_no_p3_run_is_refused(self):
+        manifest = self.write_manifest()
+        record = json.loads(Path(manifest["manifest"]).read_text())
+        del record["p3_run_id"]
+        Path(manifest["manifest"]).write_text(json.dumps(record))
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "frozen after the P3 of run None"):
+            self.eval(dict(manifest, sha256=R.sha256_bytes(Path(manifest["manifest"]).read_bytes())), provider=provider)
+        self.assertEqual(provider.sent, [])
+
+    def test_a_p3_of_this_run_that_sent_no_call_does_not_open_the_panel(self):
+        root = self.tmp / "nocall"
+        self.second_pilot(root, p3=[ineligible_item("z")])
+        panel = self.write_manifest(p3_run_id=self.run_id(root))
+        provider = RS.ScriptedProvider()
+        with self.assertRaisesRegex(RS.StageRefused, "P3 of this run sent no call"):
+            with self.eval_ledger() as led:
+                self.stage("EVAL", self.panel_items, led, panel=panel, repo=self.repo, root=root, provider=provider)
+        self.assertEqual(provider.sent, [])
+        self.assertFalse((root / "EVAL").exists())
+
     def test_eval_refuses_another_configuration_than_p3_s_without_a_note(self):
         model, panel = self.fallback()
         empty = self.tmp / "empty.txt"
@@ -1431,7 +1474,7 @@ class TestEval(RunnerCase):
         (root / "P3").mkdir(parents=True)
         (root / "P3" / "stage.json").write_text(json.dumps({"config_sha256": "0" * 64}))
         led = self.ledger(self.tmp / "paid" / "ledger-evaluation.jsonl", budget="evaluation", mode="paid")
-        with mock.patch.object(RS, "check_previous", return_value=None), \
+        with mock.patch.object(RS, "check_previous", return_value=None), mock.patch.object(RS, "check_panel_run"), \
                 mock.patch.object(RS, "verify_panel", return_value={"n": 2, "sha256": "s"}), \
                 self.assertRaisesRegex(RS.StageRefused, "not the one P3 ran under"):
             RS.run_stage("EVAL", root, self.panel_items, mode="paid", transport=https, ledger=led,

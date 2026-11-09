@@ -16,7 +16,8 @@ last call:
   P1    five development cases, A1, A2, A3 then B1 each
   P2    one prompt pass on 20 development traces, A1 and B1, uncached
   P3    a frozen development pass on 20 tasks with the two planned repeats
-  EVAL  the frozen panel; needs --panel-manifest, its recorded --panel-sha256 and --freeze-tag
+  EVAL  the frozen panel; needs --panel-manifest, its recorded --panel-sha256 and --freeze-tag,
+        in the run root whose P3 the panel was frozen after, and that P3 must have sent a call
 P1 to P3 install the dev_only guard and share the pilot budget ($95); EVAL installs
 pre_join and has its own budget ($285). The guard is installed before anything is read.
 P3 and EVAL refuse a rubric whose status is not "frozen". --allocation names the
@@ -611,6 +612,10 @@ def check_previous(spec: Stage, run_root: Path, ledger, mode: str, run: dict):
                 raise StageRefused(f"{prev.name} ran on {prev.budget} ledger {recorded.get('id')}, not on "
                                    f"{prev_ledger.ledger_id}")
             reconciled = prev_ledger.reconciled_after_last_call(run["run_id"], prev.name)
+            if not any(e["type"] == "reserve" and e["run"] == run["run_id"] and e["stage"] == prev.name
+                       for e in prev_ledger.entries):
+                raise StageRefused(f"{prev.name} of this run sent no call, so no configuration ran that "
+                                   f"{spec.name} could follow")
     if not reconciled:
         raise StageRefused(f"reconcile the {prev.budget} ledger with the providers' usage after {prev.name} "
                            f"before starting {spec.name}")
@@ -740,9 +745,11 @@ def verify_panel(panel, config_sha256: str, items: list, repo=REPO, allocation=N
     """EVAL's frozen panel manifest, checked against its recorded hash and freeze tag.
 
     The manifest is JSON: {"kind": "panel-manifest", "frozen": true, "freeze_tag",
-    "config_sha256", "allocation_sha256", "n", "tasks": [{"trace_key", "pack_sha256"},
-    ...]}. The packs given must be its tasks, in its order, the code must be at the freeze
-    tag, and ``allocation``, when one is in use, must be the one the manifest names.
+    "config_sha256", "allocation_sha256", "p3_run_id", "n", "tasks": [{"trace_key",
+    "pack_sha256"}, ...]}. The packs given must be its tasks, in its order, the code must
+    be at the freeze tag, and ``allocation``, when one is in use, must be the one the
+    manifest names. ``p3_run_id`` is the run_id in the run.json of the run root whose P3
+    the panel was frozen after, which ``check_panel_run`` compares with this run.
     """
     if not panel or not all(panel.get(k) for k in ("manifest", "sha256", "freeze_tag")):
         raise StageRefused("EVAL needs --panel-manifest, its recorded --panel-sha256 and --freeze-tag")
@@ -768,7 +775,16 @@ def verify_panel(panel, config_sha256: str, items: list, repo=REPO, allocation=N
     if [(t.get("trace_key"), t.get("pack_sha256")) for t in tasks] != [(i.trace_key, i.pack_sha256) for i in items]:
         raise StageRefused("the packs given are not the panel's tasks in the manifest's order")
     return {"manifest": str(path.resolve()), "sha256": panel["sha256"], "freeze_tag": panel["freeze_tag"],
-            "freeze_commit": freeze_commit(repo, panel["freeze_tag"]), "n": len(tasks)}
+            "freeze_commit": freeze_commit(repo, panel["freeze_tag"]), "n": len(tasks),
+            "p3_run_id": m.get("p3_run_id")}
+
+
+def check_panel_run(panel_record: dict, run: dict) -> None:
+    """EVAL runs in the run root whose P3 the panel was frozen after. A fresh run root gets
+    a new random run ID, so its own short P3 cannot stand in for that one."""
+    if panel_record["p3_run_id"] != run["run_id"]:
+        raise StageRefused(f"the panel was frozen after the P3 of run {panel_record['p3_run_id']!r}; this run root "
+                           f"is run {run['run_id']!r}, so its P3 is not the one the panel followed")
 
 
 def load_allocation(path) -> dict:
@@ -936,6 +952,8 @@ def run_stage(stage: str, run_root, items: list, *, mode: str, transport, ledger
         panel_record = verify_panel(panel, config_hash, items, repo, allocation_record)
     run = run_record(run_root, mode, scopes, ledger)
     previous = check_previous(spec, run_root, ledger, mode, run)
+    if panel_record is not None:
+        check_panel_run(panel_record, run)
     if allocation_record is not None:
         check_same_allocation(stage, run_root, mode, allocation_record)
     change_note = check_eval_config(run_root, config_hash, config_change_note) if spec.name == "EVAL" else None
