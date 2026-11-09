@@ -34,7 +34,7 @@ In every regime, degenerate ones included, it gives:
 - A1 and B1 validity against usable references with failure as the positive class, one row per judge on all tasks with a usable reference, N_Y, and one on the shared subset where both are valid, with the number of usable tasks excluded from it: the confusion matrix of valid verdicts, invalid outputs split by reference class, failure recall and success recall with every reference of the class in the denominator, balanced accuracy as their mean, so an invalid output counts as not correct, failure precision on valid verdicts, valid coverage over N_Y, prevalence, and each denominator. These need the released labels, since `E` alone cannot give B1's reference where A1 is invalid.
 - Actual inference costs: total, by slot, the extra cost of A2 and A3, and that cost per extra expected verdict captured when the gain is positive.
 
-A rate with an empty denominator is reported as not defined, never as zero. The report carries no p-value, interval, significance wording, size class, fragility count or bootstrap.
+A rate with an empty denominator is reported as not defined, never as zero. The report carries no p-value, interval, size class, fragility count or bootstrap, and none of the words plan section 8 leaves out for this result; the only use of "significance" is in its two fixed sentences saying that no such claim is made.
 
 The `costs` argument has `total` and `by_slot`, with one amount for each of A1, A2, A3 and B1, in USD, as decimal strings the way the ledger writes them or as numbers. Whatever the ledger's total holds beyond the four slots, such as a reconciliation adjustment, is printed as not attributed to a slot.
 
@@ -60,7 +60,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 232 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 239 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 

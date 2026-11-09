@@ -1,10 +1,12 @@
 """Tests of the descriptive path in sap.py, the primary result. Synthetic data only.
 
 Covers the exact expected captures against an enumeration of every draw, the equal
-review count, the A1 and B1 validity metrics and contradiction rates, the cases of the
-recorded rule, invalid and Unsure handling, costs, the report's fixed statements and
-its freedom from inferential wording, and the path argument that keeps population
-inference out of the primary result.
+review count, the quantities committed at the prediction lock, the result sentences
+and reading lines of the plan, the invalid-outcome variants, the A1 and B1 validity
+metrics and contradiction rates, the cases of the recorded rule, invalid and Unsure
+handling, costs, the report's fixed statements and its freedom from inferential
+wording and from the words the plan does not use, and the path argument that keeps
+population inference out of the primary result.
 
 Run from the repository root: python -m unittest discover -s analysis -v
 """
@@ -1568,6 +1570,17 @@ FORBIDDEN = (r"p[\s-]?values?\b", r"\bp\s*[=<>≤≥]", r"confidence", r"interva
              r"unreachable", r"delta_m", r"δ")
 
 
+# Plan section 8, the words the report does not use for this result, in any letter case.
+PLAN_UNUSED_WORDS = (r"signific", r"evidence that", r"generaliz", r"\bcorrected\b", r"blind spot",
+                     r"untouched holdout", r"independent validation", r"\berrors?\b")
+
+
+def plan_unused_words_in(txt):
+    """Which of the words the plan does not use are in the text, set aside its two fixed sentences."""
+    body = txt.replace(sap.SCOPE_TEXT, "").replace(sap.RESULT_CLOSING_TEXT, "")
+    return [p for p in PLAN_UNUSED_WORDS if re.search(p, body, re.IGNORECASE)]
+
+
 def report_panels():
     """A report-ready panel in every regime, with and without Unsure and invalid outcomes."""
     costs = {"total": "12", "by_slot": {"A1": "3", "A2": "3", "A3": "3", "B1": "3"}}
@@ -1599,6 +1612,25 @@ class TestDescriptiveReport(unittest.TestCase):
             for pattern in FORBIDDEN:
                 self.assertIsNone(re.search(pattern, body, re.IGNORECASE), (pattern, d["regime"]))
         self.assertEqual(seen, REGIMES)
+
+    def test_the_report_does_not_use_the_words_the_plan_leaves_out(self):
+        seen = set()
+        for d in report_panels():
+            seen.add(d["regime"])
+            txt = sap.describe_report(d, EXPOSURE)
+            self.assertEqual(plan_unused_words_in(txt), [], d["regime"])
+            self.assertEqual(txt.count(sap.SCOPE_TEXT), 1)
+            self.assertEqual(txt.count(sap.RESULT_CLOSING_TEXT), 1)
+        self.assertEqual(seen, REGIMES)
+
+    def test_the_scan_of_the_plans_words_is_live(self):
+        for phrase in ("a Significant gain", "the significance of it", "evidence that it works", "this generalizes",
+                       "the corrected verdicts", "a blind spot", "an untouched holdout", "independent validation",
+                       "a judge error", "two errors"):
+            self.assertTrue(plan_unused_words_in(phrase), phrase)
+        self.assertEqual(plan_unused_words_in(sap.SCOPE_TEXT + " " + sap.RESULT_CLOSING_TEXT), [])
+        self.assertEqual(plan_unused_words_in("a reference-contradicted first verdict; not correct"), [])
+        self.assertEqual(sap.RESULT_CLOSING_TEXT, CLOSING)
 
     def test_the_scan_catches_inferential_wording(self):
         # The patterns are live: the population-inference report trips them.
