@@ -626,7 +626,9 @@ def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: 
     error event that opens a stream or an error body halts, ends the slot as FILTERED or
     is retried, and a cut or unrecognized response is a transport failure retried under
     the usual rule. Each must have its reservation in the ledger, which then closes from
-    the rebuilt record."""
+    the rebuilt record. A stop during a send closes that attempt's reservation with no
+    record and the next start reserves the attempt again, so the last reservation is the
+    one the raw response answers; the ledger keeps only one open, so the others are closed."""
     rebuilt = []
     for item in items:
         for j, r in slots:
@@ -638,10 +640,10 @@ def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: 
                      and e.get("stage") == stage and (e.get("trace_key"), e.get("config_sha256"), e.get("judge"),
                                                       e.get("repeat"), e.get("attempt"))
                      == (item.trace_key, config_sha256, j, r, n)]
-            if len(match) != 1:
+            if not match:
                 raise StageRefused(f"{raw} has no attempt record and no reservation in the {ledger.budget} "
                                    "ledger, so nothing is sent")
-            record = D.recover_attempt(log, match[0])
+            record = D.recover_attempt(log, match[-1])
             rebuilt.append({"trace_key": item.trace_key, "slot": f"{j}{r}", "attempt": n,
                             "outcome": record["outcome"], "http_status": record["http_status"]})
     return rebuilt

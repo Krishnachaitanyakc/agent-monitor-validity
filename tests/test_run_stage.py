@@ -737,6 +737,45 @@ class TestRunRecords(RunnerCase):
                                "http_status": 200}])
             self.assertEqual(led.totals()["held"], 0)
 
+    def test_a_raw_response_whose_attempt_was_reserved_twice_is_rebuilt_and_never_sent_again(self):
+        class StopsDuringTheSend(RS.ScriptedProvider):
+            def send(self, request):
+                super().send(request)
+                raise KeyboardInterrupt
+
+        led = self.ledger()
+        its = items(1, "a")
+        with self.assertRaises(KeyboardInterrupt):
+            self.stage("P1", its, led, provider=StopsDuringTheSend("central"))
+        with self.stop_between_writes("A1"):
+            with self.assertRaises(KeyboardInterrupt):
+                self.stage("P1", its, led)
+        first, second = reserves(led)
+        self.assertEqual([(e["slot"], e["attempt"]) for e in (first, second)], [("A1", 1), ("A1", 1)])
+        self.assertEqual([led.reservations[e["id"]]["state"] for e in (first, second)], ["held", "open"])
+        report, provider = self.stage("P1", its, led)
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "B"])          # no second A1
+        self.assertEqual([led.reservations[e["id"]]["state"] for e in (first, second)], ["held", "settled"])
+        self.assertEqual([(r["attempt"], r["outcome"]) for r in self.a1(its[0].trace_key)], [(1, "VALID")])
+        self.assertEqual(report["attempts_rebuilt_at_start"],
+                         [{"trace_key": its[0].trace_key, "slot": "A1", "attempt": 1, "outcome": "VALID",
+                           "http_status": 200}])
+
+    def test_a_raw_response_is_rebuilt_from_the_last_reservation_of_its_attempt_and_needs_one(self):
+        led = self.ledger()
+        log = AttemptLog(self.tmp / "log")
+        item, config, slots = items(1, "a")[0], R.config_sha256(), (("A", 1),)
+        fields = {"run": "run", "stage": "P1", "trace_key": item.trace_key, "config_sha256": config, "judge": "A",
+                  "repeat": 1, "slot": "A1", "attempt": 1, "provider": "anthropic", "model": R.A_MODEL}
+        log.write_raw(item.trace_key, config, "A", 1, 1, b"bytes that hold no response")
+        with self.assertRaisesRegex(RS.StageRefused, "no attempt record and no reservation"):
+            RS.rebuild_orphans(log, led, [item], "run", "P1", config, slots)
+        led.close_reservation(led.reserve(dict(fields, request_sha256="a" * 64), Decimal("0.1")), None)
+        led.reserve(dict(fields, request_sha256="b" * 64), Decimal("0.1"))
+        RS.rebuild_orphans(log, led, [item], "run", "P1", config, slots)
+        self.assertEqual(log.attempts(item.trace_key, config, "A", 1)[0]["request_sha256"], "b" * 64)
+
     def test_a_cut_raw_response_without_its_record_is_a_transport_failure_and_is_retried(self):
         led = self.ledger()
         its = items(1, "a")
