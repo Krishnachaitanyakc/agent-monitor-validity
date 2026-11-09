@@ -11,13 +11,16 @@ Parser rules (``parse``), applied to the final answer text of a complete respons
   allowed), with no duplicate keys and no NaN or infinity. Otherwise: ``malformed``.
 - The object must have exactly the five fields, and ``verdict`` must be a string.
   Otherwise: ``malformed``.
-- ``verdict`` must equal "success" or "failure", ignoring case, with no other change.
-  Otherwise: ``abstain`` (it parses, but gives no admissible verdict).
+- ``verdict`` must equal "success" or "failure", ignoring ASCII letter case, with no
+  other change, so a look-alike character never becomes a verdict. Otherwise: ``abstain``
+  (it parses, but gives no admissible verdict).
 - A bad covariate voids that field only, never the verdict: ``p_failure`` that is not a
   finite number in [0, 1], ``evidence_sufficient`` that is not "yes" or "no" ignoring case,
   ``evidence_step_ids`` that is not a list of integers, and ``rationale`` that is not a
   string of at most 100 words (whitespace-separated). A voided field is None, and the
   reason is recorded under ``voided``.
+- An integer literal of more than 18 digits is not converted. For these rules it is neither
+  an integer nor a number, so in a covariate it voids that field like any other bad value.
 """
 
 import hashlib
@@ -25,12 +28,13 @@ import json
 import math
 
 SCHEMA_VERSION = "schema-S-v0"
-PARSER_VERSION = "parser-v0"
+PARSER_VERSION = "parser-v1"
 SCHEMA_NAME = "schema_s"          # the name OpenAI's json_schema format requires
 
 VERDICTS = ("success", "failure")
 SUFFICIENT = ("yes", "no")
 RATIONALE_MAX_WORDS = 100
+INTEGER_MAX_DIGITS = 18           # every integer this long fits in 64 bits
 FIELDS = ("verdict", "p_failure", "evidence_sufficient", "evidence_step_ids", "rationale")
 
 # Field order is the protocol's. Providers generate fields in schema order, so the request
@@ -68,12 +72,22 @@ def _no_duplicates(pairs):
     return dict(pairs)
 
 
+# What an integer literal over INTEGER_MAX_DIGITS parses to. Converting one could raise,
+# since Python refuses a literal over its digit limit (4,300 by default, and configurable),
+# and the verdict would be lost with it. No field check accepts this value.
+_TOO_LONG = object()
+
+
+def _parse_int(digits):
+    return int(digits) if len(digits.lstrip("-")) <= INTEGER_MAX_DIGITS else _TOO_LONG
+
+
 def _is_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
 def _is_number(v) -> bool:
-    return (_is_int(v) or isinstance(v, float)) and math.isfinite(v)
+    return _is_int(v) or (isinstance(v, float) and math.isfinite(v))
 
 
 def parse(text) -> dict:
@@ -89,7 +103,8 @@ def parse(text) -> dict:
         out["error"] = "no answer text"
         return out
     try:
-        obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_reject_constant)
+        obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_reject_constant,
+                         parse_int=_parse_int)
     except (ValueError, RecursionError) as e:
         out["error"] = f"not one JSON object: {e}"
         return out
@@ -132,7 +147,7 @@ def parse(text) -> dict:
         voided["rationale"] = (f"over {RATIONALE_MAX_WORDS} words" if isinstance(r, str)
                                else "not a string")
 
-    verdict = obj["verdict"].casefold()
+    verdict = obj["verdict"].lower() if obj["verdict"].isascii() else None
     fields["verdict"] = verdict if verdict in VERDICTS else None
     out.update(fields=fields, voided=voided)
     if verdict not in VERDICTS:
