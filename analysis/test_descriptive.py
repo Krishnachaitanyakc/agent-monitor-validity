@@ -917,7 +917,8 @@ class TestGainsAndReference(unittest.TestCase):
         # and disagreement-first both take every disagreement and 3/16 of the stable tasks.
         labels = labels_for(1, 3, 0, 0, 16)
         E = E_for(n_inv=(1, 0), G1=(3, 1), S=(16, 8))
-        d = describe(labels, E, costs={"total": "8", "by_slot": {"A1": "2", "A2": "2", "A3": "2", "B1": "2"}})
+        d = describe(labels, E, costs={"total": "8", "by_slot": {"A1": "2", "A2": "2", "A3": "2", "B1": "2"},
+                                     "a1_cache_premium": "0.5"})
         self.assertEqual((d["regime"], d["n_U2"], d["n_U1"], d["n_S"], d["s"], d["K"]),
                          ("DEGENERATE-NONE", 0, 0, 16, 3, 7))
         self.assertEqual(d["captures"]["AUG"], d["captures"]["DIS"])
@@ -1913,7 +1914,8 @@ class TestInvalidAndUnsure(unittest.TestCase):
 
 
 class TestCosts(unittest.TestCase):
-    COSTS = {"total": "10.50", "by_slot": {"A1": "3.00", "A2": "2.50", "A3": "2.50", "B1": "2.00"}}
+    COSTS = {"total": "10.50", "by_slot": {"A1": "3.00", "A2": "2.50", "A3": "2.50", "B1": "2.00"},
+             "a1_cache_premium": "0.50"}
 
     def panel(self, **kw):
         return describe(labels_for(0, 30, 3, 7, 160), E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10)), **kw)
@@ -1924,12 +1926,14 @@ class TestCosts(unittest.TestCase):
         self.assertEqual(c["total"], Fraction(21, 2))
         self.assertEqual(c["by_slot"], {"A1": 3, "A2": Fraction(5, 2), "A3": Fraction(5, 2), "B1": 2})
         self.assertEqual(c["not_attributed"], Fraction(1, 2))
-        self.assertEqual(c["extra_repeats"], 5)
-        self.assertEqual(c["extra_per_extra_verdict"], 5 / Fraction(189, 68))
+        self.assertEqual(c["a1_cache_premium"], Fraction(1, 2))
+        self.assertEqual(c["extra_instability"], Fraction(11, 2))
+        self.assertEqual(c["extra_per_extra_verdict"], Fraction(11, 2) / Fraction(189, 68))
         txt = sap.describe_report(d, EXPOSURE)
         for needle in ("total: 10.5000", "by slot: A1 3.0000, A2 2.5000, A3 2.5000, B1 2.0000",
-                       "not attributed to a slot: 0.5000", "extra cost of A2 and A3: 5.0000",
-                       "extra cost per extra expected verdict captured: 1.7989, "
+                       "not attributed to a slot: 0.5000",
+                       "extra cost of instability, A2, A3 and A1's cache-write premium: 5.5000, of which the premium 0.5000",
+                       "extra cost per extra expected verdict captured: 1.9788, "
                        "the extra cost over the gain of 189/68 (2.7794) verdicts"):
             self.assertIn(needle, txt, needle)
 
@@ -1943,19 +1947,33 @@ class TestCosts(unittest.TestCase):
                       "disagreement-first review is not positive (-5/8 (-0.6250) verdicts)",
                       sap.describe_report(d, EXPOSURE))
 
-    def test_the_repeats_are_A2_and_A3_each_counted_once(self):
-        costs = {"total": "9", "by_slot": {"A1": "3", "A2": "2", "A3": "1.25", "B1": "2.75"}}
+    def test_the_extra_cost_is_each_repeat_once_and_the_premium_once(self):
+        costs = {"total": "9", "by_slot": {"A1": "3", "A2": "2", "A3": "1.25", "B1": "2.75"}, "a1_cache_premium": "0.25"}
         c = sap.inference_costs(costs, Fraction(2))
-        self.assertEqual(c["extra_repeats"], Fraction(13, 4))
-        self.assertEqual(c["extra_per_extra_verdict"], Fraction(13, 8))
+        self.assertEqual(c["a1_cache_premium"], Fraction(1, 4))
+        self.assertEqual(c["extra_instability"], Fraction(7, 2))
+        self.assertEqual(c["extra_per_extra_verdict"], Fraction(7, 4))
+
+    def test_the_premium_sits_inside_A1_and_leaves_the_totals_alone(self):
+        slots = {"A1": "3", "A2": "2", "A3": "1", "B1": "2"}
+        zero = sap.inference_costs({"total": "9", "by_slot": slots, "a1_cache_premium": "0"}, Fraction(1))
+        some = sap.inference_costs({"total": "9", "by_slot": slots, "a1_cache_premium": "1"}, Fraction(1))
+        self.assertEqual((zero["not_attributed"], some["not_attributed"]), (1, 1))
+        self.assertEqual((zero["by_slot"], zero["total"]), (some["by_slot"], some["total"]))
+        self.assertEqual((zero["extra_instability"], some["extra_instability"]), (3, 4))
+
+    def test_a_premium_equal_to_A1s_cost_is_accepted(self):
+        slots = {"A1": "3", "A2": "2", "A3": "1", "B1": "2"}
+        c = sap.inference_costs({"total": "9", "by_slot": slots, "a1_cache_premium": "3"}, Fraction(1))
+        self.assertEqual(c["a1_cache_premium"], 3)
 
     def test_the_cost_per_extra_verdict_is_defined_for_a_gain_below_one(self):
         # N = 20, s = 3: instability-first reviews one contradicted U1 task for sure, disagreement-first with chance 1/6.
         labels = labels_for(0, 2, 0, 2, 16)
         d = describe(labels, E_for(G1=(2, 0), U1=(2, 1), S=(16, 0)), costs=self.COSTS)
         self.assertEqual(d["gain"]["over_disagreement"]["verdicts"], Fraction(5, 6))
-        self.assertEqual(d["costs"]["extra_per_extra_verdict"], 6)
-        self.assertIn("extra cost per extra expected verdict captured: 6.0000, the extra cost over the gain of 5/6 (0.8333) verdicts",
+        self.assertEqual(d["costs"]["extra_per_extra_verdict"], Fraction(33, 5))
+        self.assertIn("extra cost per extra expected verdict captured: 6.6000, the extra cost over the gain of 5/6 (0.8333) verdicts",
                       sap.describe_report(d, EXPOSURE))
 
     def test_costs_not_supplied_are_stated_never_zero(self):
@@ -1964,21 +1982,28 @@ class TestCosts(unittest.TestCase):
         self.assertNotIn("total: 0", txt)
 
     def test_amount_forms(self):
-        c = sap.inference_costs({"total": 9, "by_slot": {"A1": 3, "A2": 2.5, "A3": Fraction(5, 2), "B1": "1"}}, Fraction(1))
-        self.assertEqual((c["total"], c["extra_repeats"]), (9, 5))
+        c = sap.inference_costs({"total": 9, "by_slot": {"A1": 3, "A2": 2.5, "A3": Fraction(5, 2), "B1": "1"},
+                                 "a1_cache_premium": 0.5}, Fraction(1))
+        self.assertEqual((c["total"], c["extra_instability"]), (9, Fraction(11, 2)))
 
     def test_a_bad_ledger_dict_is_refused(self):
         slots = {"A1": "1", "A2": "1", "A3": "1", "B1": "1"}
-        bad = [{"by_slot": slots},
-               {"total": "4"},
-               {"total": "4", "by_slot": {"A1": "1", "A2": "1", "A3": "1"}},
-               {"total": "4", "by_slot": dict(slots, A4="0")},
-               {"total": "3", "by_slot": slots},
-               {"total": "-1", "by_slot": slots},
-               {"total": "4", "by_slot": dict(slots, A1="-0.5")},
-               {"total": "a lot", "by_slot": slots},
-               {"total": None, "by_slot": slots},
-               {"total": float("nan"), "by_slot": slots}]
+        premium = {"a1_cache_premium": "0"}
+        bad = [{"by_slot": slots, **premium},
+               {"total": "4", **premium},
+               {"total": "4", "by_slot": slots},
+               {"total": "4", "by_slot": {"A1": "1", "A2": "1", "A3": "1"}, **premium},
+               {"total": "4", "by_slot": dict(slots, A4="0"), **premium},
+               {"total": "3", "by_slot": slots, **premium},
+               {"total": "-1", "by_slot": slots, **premium},
+               {"total": "4", "by_slot": dict(slots, A1="-0.5"), **premium},
+               {"total": "a lot", "by_slot": slots, **premium},
+               {"total": None, "by_slot": slots, **premium},
+               {"total": float("nan"), "by_slot": slots, **premium},
+               {"total": "4", "by_slot": slots, "a1_cache_premium": "-0.5"},
+               {"total": "4", "by_slot": slots, "a1_cache_premium": "a lot"},
+               {"total": "4", "by_slot": slots, "a1_cache_premium": None},
+               {"total": "4", "by_slot": slots, "a1_cache_premium": "1.01"}]
         for costs in bad:
             with self.assertRaises(ValueError, msg=repr(costs)):
                 sap.inference_costs(costs, Fraction(1))
@@ -2005,7 +2030,7 @@ def plan_unused_words_in(txt):
 
 def report_panels():
     """A report-ready panel in every regime, with and without Unsure and invalid outcomes."""
-    costs = {"total": "12", "by_slot": {"A1": "3", "A2": "3", "A3": "3", "B1": "3"}}
+    costs = {"total": "12", "by_slot": {"A1": "3", "A2": "3", "A3": "3", "B1": "3"}, "a1_cache_premium": "0.5"}
     for sizes, E in (((1, 3, 0, 0, 16), [1, 0] * 10), ((0, 7, 0, 1, 0), [0, 1] * 4), ((0, 0, 1, 1, 1), [1, 0, 1]),
                      ((0, 30, 3, 7, 160), E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10))),
                      ((0, 10, 4, 10, 36), E_for(G1=(10, 3), U2=(4, 2), U1=(10, 3), S=(36, 3)))):

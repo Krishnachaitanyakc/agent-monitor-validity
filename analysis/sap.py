@@ -2727,13 +2727,16 @@ def _case_shows(cell: str, matched_on: Optional[str], instability_probability: F
 def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
     """Actual inference costs in USD, taken from the spending ledger.
 
-    costs has 'total' and 'by_slot', the latter with one amount for each of A1, A2,
-    A3 and B1, as decimal strings the way the ledger writes them or as numbers. The
+    costs has 'total', 'by_slot', with one amount for each of A1, A2, A3 and B1, and
+    'a1_cache_premium', the part of A1's cost that the cache write adds, all as decimal
+    strings the way the ledger writes them or as numbers. The premium sits inside A1's
+    cost and cannot be more than it. The
     total can exceed the sum over the slots, for example through a reconciliation
     adjustment, and the rest is reported as not attributed to a slot; it can never be
     smaller. gain is the expected verdicts instability-first review captures beyond
-    disagreement-first review. The extra cost is that of the repeats A2 and A3, and the
-    extra cost per extra expected verdict is not defined (None) unless the gain is positive.
+    disagreement-first review. The extra cost is that of the repeats A2 and A3 and A1's
+    cache-write premium, and the extra cost per extra expected verdict is not defined
+    (None) unless the gain is positive.
     """
     def amount(name: str, x) -> Fraction:
         try:
@@ -2743,8 +2746,8 @@ def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
         if v < 0:
             raise ValueError(f"{name} is negative: {x!r}")
         return v
-    if not {"total", "by_slot"} <= set(costs):
-        raise ValueError("costs must give 'total' and 'by_slot'")
+    if not {"total", "by_slot", "a1_cache_premium"} <= set(costs):
+        raise ValueError("costs must give 'total', 'by_slot' and 'a1_cache_premium'")
     names = tuple(SLOT_NAMES.values())
     if set(costs["by_slot"]) != set(names):
         raise ValueError(f"by_slot must give exactly the slots {names}")
@@ -2753,9 +2756,12 @@ def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
     attributed = sum(by_slot.values(), Fraction(0))
     if attributed > total:
         raise ValueError("the slot costs add up to more than the total")
-    extra = by_slot["A2"] + by_slot["A3"]
+    premium = amount("a1_cache_premium", costs["a1_cache_premium"])
+    if premium > by_slot["A1"]:
+        raise ValueError("A1's cache-write premium is more than A1's cost")
+    extra = by_slot["A2"] + by_slot["A3"] + premium
     return {"total": total, "by_slot": by_slot, "not_attributed": total - attributed,
-            "extra_repeats": extra, "gain": gain,
+            "a1_cache_premium": premium, "extra_instability": extra, "gain": gain,
             "extra_per_extra_verdict": extra / gain if gain > 0 else None}
 
 
@@ -3105,7 +3111,8 @@ def _cost_lines(c: Optional[dict]) -> List[str]:
     out.append(f"  total: {_f(c['total'])}")
     out.append("  by slot: " + ", ".join(f"{k} {_f(v)}" for k, v in c["by_slot"].items()))
     out.append(f"  not attributed to a slot: {_f(c['not_attributed'])}")
-    out.append(f"  extra cost of A2 and A3: {_f(c['extra_repeats'])}")
+    out.append(f"  extra cost of instability, A2, A3 and A1's cache-write premium: {_f(c['extra_instability'])}, "
+               f"of which the premium {_f(c['a1_cache_premium'])}")
     if c["extra_per_extra_verdict"] is None:
         out.append(f"  extra cost per extra expected verdict captured: {NOT_DEFINED_TEXT}, since the gain over "
                    f"disagreement-first review is not positive ({_exact_text(c['gain'])} verdicts)")
