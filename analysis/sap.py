@@ -2479,6 +2479,7 @@ READING_NEGATIVE_TEXT = ("In COVERAGE, a negative gain means stable agreeing tas
 READING_SEPARATE_TEXT = ("A gain can come from judge noise or from unreliable references on hard tasks, since references "
                          "that are wrong mostly on unstable tasks can produce a gain with no difference in judge "
                          "behavior. At the expected number of unstable tasks the table does not tell these apart.")
+READING_FLIP_TEXT = "x is also the change, or in PARTIAL the largest change, from one reference flipping on an unstable task."
 # The limitations stated with the result, plan sections 7 and 8. Prior exposure is the statement at the top.
 LIMITATIONS_TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. "
                     "Runs are kept as recorded: the way a run ends could influence judge accuracy, and we have "
@@ -3185,7 +3186,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     out.append(f"  check, disagreement-first minus random: {_exact_text(check['verdicts'])} verdicts; "
                f"{_exact_text(check['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
     out.append("  " + READING_GAIN_TEXT)
-    out += ["  " + t for t in (READING_NOISE_TEXT, READING_SHARED_TEXT, READING_NEGATIVE_TEXT, READING_SEPARATE_TEXT)]
+    out += ["  " + t for t in (READING_NOISE_TEXT, READING_SHARED_TEXT, READING_NEGATIVE_TEXT, READING_SEPARATE_TEXT,
+                               READING_FLIP_TEXT)]
     out.append("")
     if d["secondary"] is None:
         out += ["SECONDARY RESULT: the same gain per 100 tasks with a usable label",

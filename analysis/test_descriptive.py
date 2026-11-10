@@ -442,7 +442,9 @@ class TestLockQuantities(unittest.TestCase):
                       sap.describe_report(d, EXPOSURE).split("\n"))
         d = describe(labels_for(0, 30, 3, 7, 160), [0] * 200)
         self.assertEqual(d["regime"], "COVERAGE")
-        self.assertNotIn("largest change", sap.describe_report(d, EXPOSURE))
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  change in the gain per 100 panel tasks from one unstable task, x: 7/17 (0.4118)", lines)
+        self.assertFalse(any(line.startswith("  largest change") for line in lines))
 
 
 CLOSING = ("This describes these tasks and these realized judge calls and carries no population confidence or "
@@ -618,6 +620,7 @@ class TestReadingLines(unittest.TestCase):
     SEPARATE = ("  A gain can come from judge noise or from unreliable references on hard tasks, since references that "
                 "are wrong mostly on unstable tasks can produce a gain with no difference in judge behavior. At the "
                 "expected number of unstable tasks the table does not tell these apart.")
+    FLIP = "  x is also the change, or in PARTIAL the largest change, from one reference flipping on an unstable task."
 
     def test_word_for_word_in_their_places_in_every_regime(self):
         seen = set()
@@ -629,13 +632,13 @@ class TestReadingLines(unittest.TestCase):
             self.assertEqual(lines[start + 2:start + 4], [self.U2, self.U1])
             self.assertEqual(lines[start + 4], "")
             check = next(i for i, x in enumerate(lines) if x.startswith("  check, disagreement-first minus random"))
-            self.assertEqual(lines[check + 1:check + 7],
-                             [self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, ""])
+            self.assertEqual(lines[check + 1:check + 8],
+                             [self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP, ""])
         self.assertEqual(seen, REGIMES)
 
     def test_each_is_printed_once_and_states_no_number(self):
         txt = sap.describe_report(next(report_panels()), EXPOSURE)
-        for line in (self.U2, self.U1, self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE):
+        for line in (self.U2, self.U1, self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP):
             self.assertEqual(txt.count(line), 1, line)
             self.assertIsNone(re.search(r"\d", re.sub(r"\b(U2|U1|A1)\b", "", line)), line)
 
@@ -648,8 +651,22 @@ class TestReadingLines(unittest.TestCase):
             self.assertNotIn("freezes that direction", txt)
 
     def test_the_readings_never_use_the_word_the_plan_leaves_out(self):
-        for line in (self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE):
+        for line in (self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP):
             self.assertEqual(plan_unused_words_in(line), [], line)
+        self.assertNotIn("fragil", self.FLIP.lower())
+
+    def test_what_the_line_on_a_reference_flip_says_holds(self):
+        # A flip on one unstable task moves E there by one, so it moves the gain by that group's weight.
+        for sizes in ((0, 30, 3, 7, 160), (0, 10, 4, 10, 36), (0, 10, 40, 5, 5), (0, 80, 0, 2, 18)):
+            design = sap.Design.from_labels(labels_for(*sizes))
+            zero = {"G1": 0, "U2": 0, "U1": 0, "S": 0}
+            gain = lambda c: Fraction(100, design.N) * sap.expected_captures(design, c)["Delta"]
+            sized = (("U2", design.n_U2), ("U1", design.n_U1))
+            moves = [abs(gain(dict(zero, **{j: 1})) - gain(zero)) for j, n in sized if n > 0]
+            x = sap.lock_quantities(design)["x_per_100"]
+            self.assertEqual(max(moves), x, sizes)
+            if design.regime == "COVERAGE":
+                self.assertEqual(set(moves), {x}, sizes)
 
     def test_what_a_negative_gain_means_in_each_regime_holds(self):
         # COVERAGE, N = 20, s = 3: no contradicted unstable task, six contradicted stable tasks.
