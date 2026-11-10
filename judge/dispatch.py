@@ -79,6 +79,7 @@ RETRY_AFTER_CAP_S = 120.0
 # OpenAI-Project request header and lists no project header among its common response
 # headers, so a response may report none.
 OPENAI_PROJECT_HEADER = "openai-project"
+USER_AGENT = "agent-monitor-validity/1.0"
 KEPT_HEADERS = ("request-id", "anthropic-workspace-id", "x-request-id", OPENAI_PROJECT_HEADER,
                 "retry-after", "content-type")
 # Each provider's token-count endpoint, and the fields of the sent body that its reference
@@ -149,10 +150,10 @@ def read_stream(fileobj, clock=time.time):
 class HttpsTransport:
     """Sends one request over HTTPS with ``urllib`` and reads its event stream.
 
-    The credential comes from the named environment variable at send time. It and, on
-    every OpenAI request, the study's project are the only headers added to the request,
-    so the prepared request and the configuration hash do not depend on the project. SDKs
-    are not used, so nothing retries behind the runner.
+    The credential comes from the named environment variable at send time. It, a fixed
+    User-Agent and, on every OpenAI request, the study's project are the only headers
+    added to the request, so the prepared request and the configuration hash depend on
+    none of them. SDKs are not used, so nothing retries behind the runner.
     """
 
     KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
@@ -170,7 +171,7 @@ class HttpsTransport:
         key = os.environ.get(self.KEY_ENV[request.provider])
         if not key:
             raise RuntimeError(f"set {self.KEY_ENV[request.provider]}")
-        headers = dict(request.headers)
+        headers = dict(request.headers, **{"user-agent": USER_AGENT})
         if request.provider == "anthropic":
             headers["x-api-key"] = key
         else:

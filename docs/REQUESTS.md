@@ -46,7 +46,7 @@ A cut stream is TRANSPORT and its partial text is never parsed.
 
 ## Reading the example files
 
-The dry run writes `example_request_A.json` and `example_request_B.json` for the `webarena.380` walkthrough pack: endpoint, headers (the credential and, for B, the OpenAI project are added at send time), hashes and size, then `body`, the exact body in sent-byte order with each image's base64 replaced by its length and SHA-256. `placeholders_restore_the_exact_bytes` records that restoring the images reproduces the request hash.
+The dry run writes `example_request_A.json` and `example_request_B.json` for the `webarena.380` walkthrough pack: endpoint, headers (the credential, a fixed User-Agent and, for B, the OpenAI project are added at send time), hashes and size, then `body`, the exact body in sent-byte order with each image's base64 replaced by its length and SHA-256. `placeholders_restore_the_exact_bytes` records that restoring the images reproduces the request hash.
 
 ## Hash layers
 

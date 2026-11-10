@@ -749,6 +749,15 @@ class TestHttpsTransport(unittest.TestCase):
         sent, _ = self.sent_by_transport(reqs["A"])
         self.assertIsNone(sent.get_header("Openai-project"))
 
+    def test_sends_and_token_counts_carry_the_fixed_user_agent_for_both_providers(self):
+        pack = synthetic_pack(1)
+        reqs = R.prepare(pack, images_for(pack))["requests"]
+        for judge in ("A", "B"):
+            for request in (reqs[judge], D.count_request(reqs[judge])):
+                sent, _ = self.sent_by_transport(request)
+                self.assertEqual(sent.get_header("User-agent"), D.USER_AGENT)
+            self.assertNotIn("user-agent", dict(reqs[judge].headers))
+
     def test_the_project_is_not_part_of_the_prepared_request_or_the_configuration(self):
         self.assertEqual(dict(R.B_HEADERS), {"content-type": "application/json"})
         self.assertEqual(R.config_record()["judges"]["B"]["headers"], {"content-type": "application/json"})

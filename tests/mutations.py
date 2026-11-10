@@ -583,6 +583,8 @@ MUTATIONS = [
     ("send the OpenAI project to Anthropic too", "judge/dispatch.py",
      '            headers["x-api-key"] = key\n',
      '            headers["x-api-key"] = key\n            headers[OPENAI_PROJECT_HEADER] = self.openai_project\n'),
+    ("send no fixed User-Agent", "judge/dispatch.py",
+     'headers = dict(request.headers, **{"user-agent": USER_AGENT})', "headers = dict(request.headers)"),
     ("build the HTTPS transport without the OpenAI project", "judge/dispatch.py",
      '        if not openai_project:\n            raise ValueError("HttpsTransport binds',
      '        if False:\n            raise ValueError("HttpsTransport binds'),
