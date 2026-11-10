@@ -2460,6 +2460,8 @@ RESULT_MORE_TEXT = ("On this panel instability-first selected {g} more reference
                     "reference of 2 per 100.")
 RESULT_ONE_TASK_TEXT = "One unstable task changes this number by {x} per 100."
 RESULT_ONE_TASK_PARTIAL_TEXT = "One unstable task changes this number by at most {x} per 100."
+RESULT_PARTITION_TEXT = ("Of the {M} reference-contradicted first verdicts, {m_G1} were in the disagreement group, "
+                         "{m1} were unstable agreeing verdicts and {m0} were stable agreeing verdicts.")
 RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge calls and carries no population "
                        "confidence or significance claim.")
 # How to read the counts and the gain, plan section 8, word for word.
@@ -3121,6 +3123,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
            f"Prior exposure statement: {prior_exposure}",
            "",
            "RESULT"]
+    out.append("  " + RESULT_PARTITION_TEXT.format(M=d["M"], m_G1=d["m_counts"]["G1"], m1=d["m1"], m0=d["m0"]))
     out += ["  " + sentence for sentence in d["result_sentences"]]
     out += ["", LIMITATIONS_TEXT, ""]
     out += _provenance_lines(d["provenance"])

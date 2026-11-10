@@ -537,8 +537,35 @@ class TestResultSentences(unittest.TestCase):
         d = describe(labels_for(*sizes), E)
         lines = sap.describe_report(d, EXPOSURE).split("\n")
         self.assertEqual(lines[4:6], ["", "RESULT"])
+        self.assertTrue(lines[6].startswith("  Of the "), lines[6])
         end = lines.index("", 6)
-        return d, lines[6:end]
+        return d, lines[7:end]
+
+    def test_the_partition_comes_directly_before_the_sentence_with_hand_counts(self):
+        # G1 holds 11, U2 and U1 hold 1 + 3 = 4, and S holds 10, so M = 25.
+        d = describe(labels_for(0, 30, 3, 7, 160), E_for(G1=(30, 11), U2=(3, 1), U1=(7, 3), S=(160, 10)))
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertEqual(lines[6], "  Of the 25 reference-contradicted first verdicts, 11 were in the disagreement "
+                                   "group, 4 were unstable agreeing verdicts and 10 were stable agreeing verdicts.")
+        self.assertEqual(lines[7], "  " + d["result_sentences"][0])
+
+    def test_the_partition_adds_up_and_is_printed_once_in_every_regime(self):
+        seen = set()
+        for d in report_panels():
+            seen.add(d["regime"])
+            mc = d["m_counts"]
+            self.assertEqual(d["M"], mc["G1"] + d["m1"] + d["m0"])
+            want = (f"  Of the {d['M']} reference-contradicted first verdicts, {mc['G1']} were in the disagreement "
+                    f"group, {d['m1']} were unstable agreeing verdicts and {d['m0']} were stable agreeing verdicts.")
+            lines = sap.describe_report(d, EXPOSURE).split("\n")
+            self.assertEqual(lines.count(want), 1, d["regime"])
+            self.assertEqual(lines[lines.index(want) - 1], "RESULT")
+            self.assertEqual(lines[lines.index(want) + 1], "  " + d["result_sentences"][0])
+        self.assertEqual(seen, REGIMES)
+
+    def test_the_partition_is_not_one_of_the_section_8_sentences(self):
+        d = describe(labels_for(0, 30, 3, 7, 160), [0] * 200)
+        self.assertFalse(any(x.startswith("Of the ") for x in d["result_sentences"]))
 
     def test_the_report_opens_with_the_block_in_every_case(self):
         n = lambda t: "  " + t
