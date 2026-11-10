@@ -1957,13 +1957,13 @@ class TestDescriptiveReport(unittest.TestCase):
         txt = sap.describe_report(d, EXPOSURE)
         lines = txt.split("\n")
         self.assertEqual(lines[0], "Primary result: descriptive audit of the frozen panel, "
-                                   "analysis plan version 4.0, Nov 8, 2026")
+                                   "analysis plan version 4.2, Nov 9, 2026")
         self.assertEqual(lines[1], sap.SCOPE_TEXT)
         self.assertEqual(lines[2], "Panel: a retrospective evaluation panel with documented prior exposure.")
         self.assertEqual(lines[3], "Prior exposure statement: " + EXPOSURE)
 
     def test_only_the_population_path_refers_to_the_old_plan_version(self):
-        self.assertEqual(sap.PLAN_VERSION, "4.0, Nov 8, 2026")
+        self.assertEqual(sap.PLAN_VERSION, "4.2, Nov 9, 2026")
         self.assertEqual(sap.POPULATION_PLAN_VERSION, "v3.2")
         for d in report_panels():
             self.assertNotIn("3.2", sap.describe_report(d, EXPOSURE))

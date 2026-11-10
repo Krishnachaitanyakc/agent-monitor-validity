@@ -1,7 +1,7 @@
 """Statistical analysis of the instability-first review study: reference implementation.
 
-The primary path is descriptive and implements version 4.0 of the study's analysis
-plan, dated Nov 8, 2026 (PLAN_VERSION). describe_panel() audits the frozen panel: the
+The primary path is descriptive and implements version 4.2 of the study's analysis
+plan, dated Nov 9, 2026 (PLAN_VERSION). describe_panel() audits the frozen panel: the
 exact expected capture of each policy over its own random choices, the full A1 and
 B1 validity metrics, invalid outputs, Unsure and missing references and actual
 inference costs. describe_report() prints it. The conclusion applies to these tasks
@@ -135,7 +135,7 @@ INTERVAL_METHODS = ("full", "berger-boos")
 INTERVAL_METHOD = "berger-boos"    # the frozen interval method; "full" is kept for comparison
 BB_GAMMA = 0.001                   # Berger-Boos: 1 - 0.999 Clopper-Pearson set for p0
 FRAGILITY_MAX = 15                 # search depth for the fragility count
-PLAN_VERSION = "4.0, Nov 8, 2026"   # the analysis plan the descriptive path implements
+PLAN_VERSION = "4.2, Nov 9, 2026"   # the analysis plan the descriptive path implements
 POPULATION_PLAN_VERSION = "v3.2"   # the plan the population-inference path implements
 PATH_DESCRIPTIVE = "descriptive"   # the primary path and the default
 PATH_POPULATION = "population_inference"   # outside the primary result, separately scoped
