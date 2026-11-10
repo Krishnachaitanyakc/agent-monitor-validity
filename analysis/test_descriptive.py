@@ -447,6 +447,69 @@ class TestLockQuantities(unittest.TestCase):
         self.assertFalse(any(line.startswith("  largest change") for line in lines))
 
 
+class TestUnstableClusters(unittest.TestCase):
+    # Tasks 0-1 disagree, 2-3 are U2, 4-6 are U1 and 7-9 are stable.
+    LABELS = labels_for(0, 2, 2, 3, 3)
+    #           G1   G1   U2   U2   U1   U1   U1   S    S    S
+    CLUSTERS = ["a", "a", "b", "c", "b", "b", "d", "e", "e", "e"]
+
+    def panel(self):
+        return build(self.LABELS, [0] * 10)
+
+    def test_counted_on_the_unstable_agreeing_tasks_only(self):
+        self.assertEqual(sap.unstable_clusters(self.LABELS, self.CLUSTERS), {"clusters": 3, "largest": 3})
+
+    def test_u2_and_u1_both_count(self):
+        self.assertEqual(sap.unstable_clusters(["U2", "U1"], ["a", "b"]), {"clusters": 2, "largest": 1})
+        self.assertEqual(sap.unstable_clusters(["U2", "U1"], ["a", "a"]), {"clusters": 1, "largest": 2})
+
+    def test_no_unstable_task_gives_zero(self):
+        self.assertEqual(sap.unstable_clusters(["S", "G1", "I"], ["a", "b", "c"]), {"clusters": 0, "largest": 0})
+
+    def test_the_result_holds_them_without_reading_a_label(self):
+        slots, Y = self.panel()
+        other = ["Unsure" if i % 3 == 0 else ("Unsuccessful" if i % 3 == 1 else None) for i in range(10)]
+        want = {"clusters": 3, "largest": 3}
+        self.assertEqual(describe_panel(slots, Y=Y, clusters=self.CLUSTERS)["unstable_clusters"], want)
+        self.assertEqual(describe_panel(slots, Y=other, clusters=self.CLUSTERS)["unstable_clusters"], want)
+
+    def test_clusters_are_not_taken_from_the_templates(self):
+        # Each WorkArena task is its own template, while its cluster is the name family.
+        slots, Y = self.panel()
+        templates = [f"t{i}" for i in range(10)]
+        d = describe_panel(slots, Y=Y, templates=templates, clusters=self.CLUSTERS)
+        self.assertEqual(d["unstable_clusters"], {"clusters": 3, "largest": 3})
+        self.assertEqual(d["template_multiplicities"]["n_templates"], 10)
+
+    def test_the_lock_quantities_are_left_as_they_were(self):
+        slots, Y = self.panel()
+        d = describe_panel(slots, Y=Y, clusters=self.CLUSTERS)
+        self.assertEqual(set(d["lock"]), {"max_gain_per_100", "reference_reachable", "x_per_100"})
+
+    def test_printed_right_after_x_and_stated_when_not_supplied(self):
+        slots, Y = self.panel()
+        for kw, want in (({"clusters": self.CLUSTERS},
+                          "  section 2 clusters among unstable agreeing tasks: 3; the largest holds 3"),
+                         ({}, "  section 2 clusters among unstable agreeing tasks: not supplied with the panel manifest.")):
+            lines = sap.describe_report(describe_panel(slots, Y=Y, **kw), EXPOSURE).split("\n")
+            x = next(i for i, line in enumerate(lines) if " from one unstable task, x: " in line)
+            self.assertEqual(lines[x + 1], want, kw)
+
+    def test_not_supplied_is_none_and_never_zero(self):
+        slots, Y = self.panel()
+        self.assertIsNone(describe_panel(slots, Y=Y)["unstable_clusters"])
+
+    def test_one_cluster_per_task_is_required(self):
+        slots, Y = self.panel()
+        with self.assertRaises(ValueError):
+            describe_panel(slots, Y=Y, clusters=self.CLUSTERS[:-1])
+
+    def test_the_population_path_refuses_them(self):
+        slots, _ = self.panel()
+        with self.assertRaises(TypeError):
+            sap.analyze_panel(slots, [0] * 10, clusters=self.CLUSTERS, path=sap.PATH_POPULATION)
+
+
 CLOSING = ("This describes these tasks and these realized judge calls and carries no population confidence or "
            "significance claim.")
 

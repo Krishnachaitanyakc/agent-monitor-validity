@@ -2813,6 +2813,18 @@ def lock_quantities(design: Design) -> dict:
             "x_per_100": per_100 * max(abs(weight[j]) for j in UNSTABLE_GROUPS if size[j] > 0)}
 
 
+def unstable_clusters(labels: Sequence[str], clusters: Sequence[str]) -> dict:
+    """Label-free: how many section 2 clusters the unstable agreeing tasks span, and the largest one's count.
+
+    clusters gives each panel task's cluster: its template, or for WorkArena its name
+    family, which templates cannot stand in for since each WorkArena task is its own
+    template. largest counts the unstable agreeing tasks in the cluster that holds the
+    most of them.
+    """
+    c = Counter(str(k) for l, k in zip(labels, clusters) if l in UNSTABLE_GROUPS)
+    return {"clusters": len(c), "largest": max(c.values(), default=0)}
+
+
 def _gain_text(g: Fraction) -> str:
     """A positive gain to 4 decimals, or with more digits when 4 would contradict the comparison.
 
@@ -2855,6 +2867,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
                    provenance: Optional[dict] = None,
                    ids: Optional[Sequence[str]] = None,
                    templates: Optional[Sequence[str]] = None,
+                   clusters: Optional[Sequence[str]] = None,
                    rationales: Optional[Sequence[Mapping[str, Optional[str]]]] = None,
                    second_annotator: Optional[Sequence[Optional[str]]] = None,
                    case_seed: int) -> dict:
@@ -2870,7 +2883,9 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     case_seed is the seed in the freeze list. It has no default, so a forgotten seed
     stops the analysis instead of choosing the cases with seed 0. templates gives each
     panel task's template id, label-free, and the report gives N with its template
-    multiplicities (template_multiplicities). rationales gives, for each trajectory,
+    multiplicities (template_multiplicities). clusters gives each panel task's section 2
+    cluster, label-free, and the report gives how many clusters the unstable agreeing
+    tasks span with the largest one's count (unstable_clusters). rationales gives, for each trajectory,
     the judge rationale of each slot, by slot name, and second_annotator its second
     annotator's label, if any. Each case shows them with its released label, and an
     input that was not given is printed as not supplied.
@@ -2905,7 +2920,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     n = len(slots)
     if benchmarks is not None and len(benchmarks) != n:
         raise ValueError("benchmarks must give one entry per trajectory")
-    for name, given in (("templates", templates), ("rationales", rationales), ("second_annotator", second_annotator)):
+    for name, given in (("templates", templates), ("clusters", clusters), ("rationales", rationales),
+                        ("second_annotator", second_annotator)):
         if given is not None and len(given) != n:
             raise ValueError(f"{name} must give one entry per trajectory")
     lf = derive_label_free(slots)
@@ -2961,6 +2977,7 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
             "n_U1": design.n_U1, "n_S": design.n_S, "s": design.s, "K": design.K, "regime": design.regime,
             "template_multiplicities": template_multiplicities(templates) if templates is not None else None,
             "lock": lock, "result_sentences": result_sentences(design.regime, observed, lock["x_per_100"]),
+            "unstable_clusters": unstable_clusters(labels, clusters) if clusters is not None else None,
             "K_by_policy": reviews, "K_over_N": {pol: reviews[pol] / design.N if design.N > 0 else None for pol in POLICY_ORDER},
             "K_equal": all(v == design.K for v in reviews.values()),
             "R_unobserved": int((lf["R_unobserved"] == 1).sum()), "repeat_flags": _repeat_flags(lf),
@@ -3158,6 +3175,10 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"  2 per 100 reachable on this panel: {'yes' if d['lock']['reference_reachable'] else 'no'}",
             f"  {'largest change' if d['regime'] == 'PARTIAL' else 'change'} in the gain per 100 panel tasks from one "
             f"unstable task, x: {_exact_text(d['lock']['x_per_100'])}",
+            ("  section 2 clusters among unstable agreeing tasks: not supplied with the panel manifest."
+             if d["unstable_clusters"] is None else
+             f"  section 2 clusters among unstable agreeing tasks: {d['unstable_clusters']['clusters']}; "
+             f"the largest holds {d['unstable_clusters']['largest']}"),
             ""]
     out += _repeat_lines(d["repeat_flags"])
     out += ["", "INVALID OUTPUTS by judge slot and category", "  slot | invalid | categories"]
