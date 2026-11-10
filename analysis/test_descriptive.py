@@ -755,7 +755,8 @@ class TestReadingLines(unittest.TestCase):
 
 
 class TestLimitations(unittest.TestCase):
-    TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. Runs are "
+    TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. 14 of the 15 "
+            "WorkArena development tasks share a name family with eligible test tasks. Runs are "
             "kept as recorded: the way a run ends could influence judge accuracy, and we have not established that "
             "it does. Tasks that share a template and WorkArena families stay in the panel.")
 

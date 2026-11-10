@@ -2482,6 +2482,7 @@ READING_SEPARATE_TEXT = ("A gain can come from judge noise or from unreliable re
 READING_FLIP_TEXT = "x is also the change, or in PARTIAL the largest change, from one reference flipping on an unstable task."
 # The limitations stated with the result, plan sections 7 and 8. Prior exposure is the statement at the top.
 LIMITATIONS_TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. "
+                    "14 of the 15 WorkArena development tasks share a name family with eligible test tasks. "
                     "Runs are kept as recorded: the way a run ends could influence judge accuracy, and we have "
                     "not established that it does. Tasks that share a template and WorkArena families stay in "
                     "the panel.")
