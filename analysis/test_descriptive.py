@@ -1978,7 +1978,7 @@ class TestInvalidAndUnsure(unittest.TestCase):
 
 
 class TestCosts(unittest.TestCase):
-    COSTS = {"total": "10.50", "by_slot": {"A1": "3.00", "A2": "2.50", "A3": "2.50", "B1": "2.00"},
+    COSTS = {"total": "11.00", "by_slot": {"A1": "3.00", "A2": "2.50", "A3": "2.50", "B1": "2.00"},
              "a1_cache_premium": "0.50"}
 
     def panel(self, **kw):
@@ -1987,15 +1987,15 @@ class TestCosts(unittest.TestCase):
     def test_totals_and_extra_cost(self):
         d = self.panel(costs=self.COSTS)
         c = d["costs"]
-        self.assertEqual(c["total"], Fraction(21, 2))
+        self.assertEqual(c["total"], 11)
         self.assertEqual(c["by_slot"], {"A1": 3, "A2": Fraction(5, 2), "A3": Fraction(5, 2), "B1": 2})
-        self.assertEqual(c["not_attributed"], Fraction(1, 2))
+        self.assertEqual(c["not_attributed"], 1)
         self.assertEqual(c["a1_cache_premium"], Fraction(1, 2))
         self.assertEqual(c["extra_instability"], Fraction(11, 2))
         self.assertEqual(c["extra_per_extra_verdict"], Fraction(11, 2) / Fraction(189, 68))
         txt = sap.describe_report(d, EXPOSURE)
-        for needle in ("total: 10.5000", "by slot: A1 3.0000, A2 2.5000, A3 2.5000, B1 2.0000",
-                       "not attributed to a slot: 0.5000",
+        for needle in ("total: 11.0000", "by slot: A1 3.0000, A2 2.5000, A3 2.5000, B1 2.0000",
+                       "not attributed to a slot: 1.0000",
                        "extra cost of instability, A2, A3 and A1's cache-write premium: 5.5000, of which the premium 0.5000",
                        "extra cost per extra expected verdict captured: 1.9788, "
                        "the extra cost over the gain of 189/68 (2.7794) verdicts"):

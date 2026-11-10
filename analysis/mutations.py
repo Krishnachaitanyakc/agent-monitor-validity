@@ -1201,6 +1201,12 @@ MUTATIONS = [
     ('start the exhausted slots of each slot at 1',
      "{sum(v.get('exhausted', 0) for v in prov['by_slot'].values())} slots exhausted",
      "{sum(v.get('exhausted', 1) for v in prov['by_slot'].values())} slots exhausted"),
+    ('print the cache-write premium as the amount not attributed to a slot',
+     "not attributed to a slot: {_f(c['not_attributed'])}",
+     "not attributed to a slot: {_f(c['a1_cache_premium'])}"),
+    ('print the amount not attributed to a slot as the cache-write premium',
+     "of which the premium {_f(c['a1_cache_premium'])}",
+     "of which the premium {_f(c['not_attributed'])}"),
 ]
 
 
