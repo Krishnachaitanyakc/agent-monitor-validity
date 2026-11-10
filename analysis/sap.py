@@ -2468,9 +2468,17 @@ RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge call
 READING_U2_TEXT = "A contradicted U2 verdict has both repeats matching the released reference."
 READING_U1_TEXT = "A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
 READING_GAIN_TEXT = "Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
-READING_INDEPENDENT_TEXT = ("With independent calls and a judge that is right more often than wrong on a task, "
-                            "contradicted verdicts are relatively more common in U2 than in U1.")
-READING_FROZEN_TEXT = "This plan freezes that direction and no numeric benchmark."
+READING_NOISE_TEXT = ("Averaged over redraws of the calls, which this study does not make, call noise alone gives a "
+                      "positive gain when judge A is right more often than wrong on the noisy tasks. That gain shrinks "
+                      "as judge B grows more accurate on those tasks and is zero only if B is always right.")
+READING_SHARED_TEXT = ("A positive gain does not show that instability reaches verdicts both judges get wrong for a "
+                       "shared reason, and it says nothing about how many contradicted verdicts are stable.")
+READING_NEGATIVE_TEXT = ("In COVERAGE, a negative gain means stable agreeing tasks had the higher contradiction rate. "
+                         "In PARTIAL, it means the slice instability-first reviews had a lower rate than the agreeing "
+                         "set overall.")
+READING_SEPARATE_TEXT = ("A gain can come from judge noise or from unreliable references on hard tasks, since references "
+                         "that are wrong mostly on unstable tasks can produce a gain with no difference in judge "
+                         "behavior. At the expected number of unstable tasks the table does not tell these apart.")
 # The limitations stated with the result, plan sections 7 and 8. Prior exposure is the statement at the top.
 LIMITATIONS_TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. "
                     "Runs are kept as recorded: the way a run ends could influence judge accuracy, and we have "
@@ -3163,8 +3171,6 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"(m_U2 = {mc['U2']}, m_U1 = {mc['U1']}); stable agreeing m0 = {d['m0']}",
             "  " + READING_U2_TEXT,
             "  " + READING_U1_TEXT,
-            "  " + READING_INDEPENDENT_TEXT,
-            "  " + READING_FROZEN_TEXT,
             "", "EXPECTED CAPTURE at the same review count, exact over each policy's random choices",
             "  policy | expected capture | K | K/N | share of M"]
     for p in POLICY_ORDER:
@@ -3179,6 +3185,7 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     out.append(f"  check, disagreement-first minus random: {_exact_text(check['verdicts'])} verdicts; "
                f"{_exact_text(check['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
     out.append("  " + READING_GAIN_TEXT)
+    out += ["  " + t for t in (READING_NOISE_TEXT, READING_SHARED_TEXT, READING_NEGATIVE_TEXT, READING_SEPARATE_TEXT)]
     out.append("")
     if d["secondary"] is None:
         out += ["SECONDARY RESULT: the same gain per 100 tasks with a usable label",

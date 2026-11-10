@@ -608,9 +608,16 @@ class TestReadingLines(unittest.TestCase):
     U2 = "  A contradicted U2 verdict has both repeats matching the released reference."
     U1 = "  A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
     GAIN = "  Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
-    INDEPENDENT = ("  With independent calls and a judge that is right more often than wrong on a task, contradicted "
-                   "verdicts are relatively more common in U2 than in U1.")
-    FROZEN = "  This plan freezes that direction and no numeric benchmark."
+    NOISE = ("  Averaged over redraws of the calls, which this study does not make, call noise alone gives a positive "
+             "gain when judge A is right more often than wrong on the noisy tasks. That gain shrinks as judge B grows "
+             "more accurate on those tasks and is zero only if B is always right.")
+    SHARED = ("  A positive gain does not show that instability reaches verdicts both judges get wrong for a shared "
+              "reason, and it says nothing about how many contradicted verdicts are stable.")
+    NEGATIVE = ("  In COVERAGE, a negative gain means stable agreeing tasks had the higher contradiction rate. In "
+                "PARTIAL, it means the slice instability-first reviews had a lower rate than the agreeing set overall.")
+    SEPARATE = ("  A gain can come from judge noise or from unreliable references on hard tasks, since references that "
+                "are wrong mostly on unstable tasks can produce a gain with no difference in judge behavior. At the "
+                "expected number of unstable tasks the table does not tell these apart.")
 
     def test_word_for_word_in_their_places_in_every_regime(self):
         seen = set()
@@ -619,17 +626,44 @@ class TestReadingLines(unittest.TestCase):
             lines = sap.describe_report(d, EXPOSURE).split("\n")
             start = lines.index("REFERENCE-CONTRADICTED FIRST VERDICTS")
             self.assertTrue(lines[start + 1].startswith("  M = "))
-            self.assertEqual(lines[start + 2:start + 6], [self.U2, self.U1, self.INDEPENDENT, self.FROZEN])
-            self.assertEqual(lines[start + 6], "")
+            self.assertEqual(lines[start + 2:start + 4], [self.U2, self.U1])
+            self.assertEqual(lines[start + 4], "")
             check = next(i for i, x in enumerate(lines) if x.startswith("  check, disagreement-first minus random"))
-            self.assertEqual(lines[check + 1:check + 3], [self.GAIN, ""])
+            self.assertEqual(lines[check + 1:check + 7],
+                             [self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, ""])
         self.assertEqual(seen, REGIMES)
 
     def test_each_is_printed_once_and_states_no_number(self):
         txt = sap.describe_report(next(report_panels()), EXPOSURE)
-        for line in (self.U2, self.U1, self.GAIN, self.INDEPENDENT, self.FROZEN):
+        for line in (self.U2, self.U1, self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE):
             self.assertEqual(txt.count(line), 1, line)
             self.assertIsNone(re.search(r"\d", re.sub(r"\b(U2|U1|A1)\b", "", line)), line)
+
+    def test_the_readings_the_plan_dropped_are_gone(self):
+        self.assertFalse(hasattr(sap, "READING_INDEPENDENT_TEXT"))
+        self.assertFalse(hasattr(sap, "READING_FROZEN_TEXT"))
+        for d in report_panels():
+            txt = sap.describe_report(d, EXPOSURE)
+            self.assertNotIn("relatively more common", txt)
+            self.assertNotIn("freezes that direction", txt)
+
+    def test_the_readings_never_use_the_word_the_plan_leaves_out(self):
+        for line in (self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE):
+            self.assertEqual(plan_unused_words_in(line), [], line)
+
+    def test_what_a_negative_gain_means_in_each_regime_holds(self):
+        # COVERAGE, N = 20, s = 3: no contradicted unstable task, six contradicted stable tasks.
+        labels = labels_for(0, 2, 0, 2, 16)
+        d = describe(labels, E_for(G1=(2, 0), U1=(2, 0), S=(16, 6)))
+        self.assertEqual(d["regime"], "COVERAGE")
+        self.assertLess(d["gain"]["over_disagreement"]["verdicts"], 0)
+        self.assertGreater(Fraction(d["m_counts"]["S"], d["n_S"]), Fraction(d["m1"], d["n_U2"] + d["n_U1"]))
+        # PARTIAL, N = 60, s = 9, n_D0 = 50: the slice falls in U2, whose rate is below the agreeing set's.
+        labels = labels_for(0, 10, 40, 5, 5)
+        d = describe(labels, E_for(G1=(10, 0), U2=(40, 0), U1=(5, 5), S=(5, 5)))
+        self.assertEqual(d["regime"], "PARTIAL")
+        self.assertLess(d["gain"]["over_disagreement"]["verdicts"], 0)
+        self.assertLess(Fraction(d["m_counts"]["U2"], d["n_U2"]), Fraction(d["m1"] + d["m0"], d["n_D0"]))
 
     def test_what_they_say_of_a_contradicted_verdict_holds(self):
         for a1 in ("success", "failure"):
