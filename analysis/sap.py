@@ -2731,10 +2731,9 @@ def inference_costs(costs: Mapping[str, object], gain: Fraction) -> dict:
     costs has 'total', 'by_slot', with one amount for each of A1, A2, A3 and B1, and
     'a1_cache_premium', the part of A1's cost that the cache write adds, all as decimal
     strings the way the ledger writes them or as numbers. The premium sits inside A1's
-    cost and cannot be more than it. The
-    total can exceed the sum over the slots, for example through a reconciliation
-    adjustment, and the rest is reported as not attributed to a slot; it can never be
-    smaller. gain is the expected verdicts instability-first review captures beyond
+    cost and cannot be more than it. The total can exceed the sum over the slots, for
+    example through a reconciliation adjustment, and the rest is reported as not
+    attributed to a slot; it can never be smaller. gain is the expected verdicts instability-first review captures beyond
     disagreement-first review. The extra cost is that of the repeats A2 and A3 and A1's
     cache-write premium, and the extra cost per extra expected verdict is not defined
     (None) unless the gain is positive.
@@ -2886,8 +2885,8 @@ def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]
     panel task's template id, label-free, and the report gives N with its template
     multiplicities (template_multiplicities). clusters gives each panel task's section 2
     cluster, label-free, and the report gives how many clusters the unstable agreeing
-    tasks span with the largest one's count (unstable_clusters). rationales gives, for each trajectory,
-    the judge rationale of each slot, by slot name, and second_annotator its second
+    tasks span with the largest one's count (unstable_clusters). rationales gives, for
+    each trajectory, the judge rationale of each slot, by slot name, and second_annotator its second
     annotator's label, if any. Each case shows them with its released label, and an
     input that was not given is printed as not supplied.
 
