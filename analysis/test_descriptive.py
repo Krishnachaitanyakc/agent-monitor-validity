@@ -2260,6 +2260,23 @@ class TestDescriptiveReport(unittest.TestCase):
             txt = sap.describe_report(d, EXPOSURE)
             self.assertIn(f"regime: {d['regime']}; {sap.REGIME_NOTES[d['regime']]}", txt)
 
+    def test_the_regime_notes_as_exact_strings(self):
+        self.assertEqual(sap.REGIME_NOTES, {
+            "DEGENERATE-NONE": "no instability among agreeing verdicts, so instability-first and disagreement-first "
+                               "review capture the same expected number",
+            "DEGENERATE-CAP": "the slice covers every agreeing task (s = n_D0), so both policies review all of them",
+            "DEGENERATE-NOSLICE": "the slice is empty (s = 0), so neither policy reviews an agreeing task",
+            "COVERAGE": "the slice reaches every unstable agreeing task",
+            "PARTIAL": "the slice reaches only part of the unstable agreeing tasks"})
+
+    def test_the_coverage_intro_as_an_exact_string(self):
+        slots, Y, _ = mixed_panel()
+        lines = sap.describe_report(describe_panel(slots, Y=Y), EXPOSURE).split("\n")
+        start = lines.index("REFERENCE LABEL COVERAGE: Unsure and missing labels")
+        self.assertEqual(lines[start + 1],
+                         "  These tasks are unknown, not correct verdicts. The result per 100 panel tasks counts them as "
+                         "not reference-contradicted; the secondary result is per 100 tasks with a usable label.")
+
 
 class TestPaths(unittest.TestCase):
     def data(self):
