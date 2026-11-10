@@ -33,7 +33,7 @@ The prompt tasks use three templates that hold panel tasks. Those templates hold
 
 ## Known use before the draw
 
-`counts/scripts/build_mapping.py` lists the tasks with development traces on disk before the draw. Its comment says 20 traces, and the list names 16 tasks. This record is built from the repository's documents and the project's notes. The data root and past session transcripts were not opened for it. The Nov 5 plan does not count earlier pack inspection as tuning.
+`counts/scripts/build_mapping.py` lists the tasks with development traces on disk before the draw. Its comment says 20 traces, and the list names 16 tasks. This record is built from the repository's documents and the project's notes. The data root and past session transcripts were not opened for it. The Nov 2 review does not treat earlier pack inspection as prompt tuning.
 
 "Read" below means that a person or a session read the run's content. Scripts have also read these files: the Oct 9 audit's count of run endings and rewards and the screenshot check cover 20 development runs, and the element counts and the request dry run cover 19.
 
