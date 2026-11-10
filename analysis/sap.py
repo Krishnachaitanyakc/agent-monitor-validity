@@ -1553,8 +1553,15 @@ def select_panel(runs: Sequence[Mapping[str, object]], seed: int, unit: str = PA
     return [chosen[t] for t in sorted(picked)]
 
 
+def _refuse_blank_ids(ids: Sequence, kind: str) -> None:
+    """Stop on an absent or blank id, which would otherwise count as one real template or cluster."""
+    if any(k is None or (isinstance(k, float) and math.isnan(k)) or not str(k).strip() for k in ids):
+        raise ValueError(f"every panel task needs a {kind} id; a None or blank id would count as one real {kind}")
+
+
 def template_multiplicities(templates: Sequence[str]) -> dict:
     """Label-free: how many panel tasks each template holds, for the panel manifest."""
+    _refuse_blank_ids(templates, "template")
     c = Counter(str(t) for t in templates)
     mult = sorted(c.values(), reverse=True)
     return {"n_tasks": sum(mult), "n_templates": len(c), "max_multiplicity": mult[0] if mult else 0,
@@ -2819,8 +2826,9 @@ def unstable_clusters(labels: Sequence[str], clusters: Sequence[str]) -> dict:
     clusters gives each panel task's cluster: its template, or for WorkArena its name
     family, which templates cannot stand in for since each WorkArena task is its own
     template. largest counts the unstable agreeing tasks in the cluster that holds the
-    most of them.
+    most of them. A None or blank id on any panel task stops the analysis.
     """
+    _refuse_blank_ids(clusters, "cluster")
     c = Counter(str(k) for l, k in zip(labels, clusters) if l in UNSTABLE_GROUPS)
     return {"clusters": len(c), "largest": max(c.values(), default=0)}
 

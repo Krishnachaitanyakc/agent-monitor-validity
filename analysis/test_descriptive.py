@@ -301,6 +301,17 @@ class TestTemplateMultiplicities(unittest.TestCase):
         self.assertEqual(describe_panel(slots, Y=Y, templates=self.TEMPLATES)["template_multiplicities"],
                          describe_panel(slots, Y=unknown, templates=self.TEMPLATES)["template_multiplicities"])
 
+    def test_a_none_or_blank_template_id_is_refused(self):
+        slots, Y = self.panel()
+        for bad in (None, "", "   ", float("nan")):
+            templates = ["t"] * 20
+            templates[7] = bad
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                sap.template_multiplicities(templates)
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                describe_panel(slots, Y=Y, templates=templates)
+        self.assertEqual(sap.template_multiplicities([0, 0, 1])["max_multiplicity"], 2)   # 0 is an id
+
     def test_one_template_id_per_task_is_required(self):
         slots, Y = self.panel()
         with self.assertRaises(ValueError):
@@ -498,6 +509,18 @@ class TestUnstableClusters(unittest.TestCase):
     def test_not_supplied_is_none_and_never_zero(self):
         slots, Y = self.panel()
         self.assertIsNone(describe_panel(slots, Y=Y)["unstable_clusters"])
+
+    def test_a_none_or_blank_cluster_id_is_refused(self):
+        slots, Y = self.panel()
+        for bad in (None, "", "   ", float("nan")):
+            for task in (0, 2):                                      # a disagreeing task and an unstable agreeing task
+                clusters = list(self.CLUSTERS)
+                clusters[task] = bad
+                with self.assertRaises(ValueError, msg=repr((bad, task))):
+                    sap.unstable_clusters(self.LABELS, clusters)
+                with self.assertRaises(ValueError, msg=repr((bad, task))):
+                    describe_panel(slots, Y=Y, clusters=clusters)
+        self.assertEqual(sap.unstable_clusters(["U2", "U1"], [0, 0]), {"clusters": 1, "largest": 2})   # 0 is an id
 
     def test_one_cluster_per_task_is_required(self):
         slots, Y = self.panel()
