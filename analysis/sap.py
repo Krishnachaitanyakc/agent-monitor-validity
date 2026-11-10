@@ -189,7 +189,8 @@ PARTIAL_ASSUMPTION_TEXT = (
     "the template dependence retained on a one-trajectory-per-task panel, and its synthetic "
     "validation, are still to come and are required before the freeze."
 )
-# The two statements the descriptive report prints word for word.
+# Two fixed statements of the descriptive report. The panel wording is plan section 2's. The
+# scope line states the scope of plan section 1 in its own words.
 SCOPE_TEXT = ("Scope: these results apply to these tasks and these realized judge calls, with no "
               "population confidence or significance claim.")
 PANEL_WORDING = "a retrospective evaluation panel with documented prior exposure"

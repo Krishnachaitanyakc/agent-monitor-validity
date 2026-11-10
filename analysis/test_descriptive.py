@@ -783,7 +783,7 @@ class TestLimitations(unittest.TestCase):
             "kept as recorded: the way a run ends could influence judge accuracy, and we have not established that "
             "it does. Tasks that share a template and WorkArena families stay in the panel.")
 
-    def test_printed_word_for_word_right_after_the_result_in_every_regime(self):
+    def test_printed_as_fixed_text_right_after_the_result_in_every_regime(self):
         seen = set()
         for d in report_panels():
             seen.add(d["regime"])
