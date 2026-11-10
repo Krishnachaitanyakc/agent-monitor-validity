@@ -889,6 +889,21 @@ class TestInvalidOutcomeVariants(unittest.TestCase):
         self.assertEqual(v["difference"], 1)                           # 2 of 2 minus 3/6 of 2
         self.assertEqual(v["per_100_panel"], 5)
 
+    def test_s_stays_at_its_capped_primary_value_when_a_variant_adds_agreeing_tasks(self):
+        # Primary: N = 20, the nominal s is 3, n_D0 = 1 and the cap makes s = 1. Treating an INVALID B1
+        # as agreement adds ten agreeing tasks, and s stays 1 instead of going back to 3:
+        # instability-first reviews 1 of the 4 U2 tasks, disagreement-first 1 of the 11 agreeing tasks.
+        no_b1 = {"B1": "REFUSAL"}
+        slots = [slot("S")] + [slot("G1")] * 9 + [dict(slot("U2"), **no_b1)] * 4 + [dict(slot("S"), **no_b1)] * 6
+        E = [0] * 10 + [1] * 4 + [0] * 6
+        d = describe_panel(slots, E)
+        self.assertEqual((d["N"], d["n_D0"], d["s"], sap.slice_nominal(20)), (20, 1, 1, 3))
+        v = {x["name"]: x for x in d["invalid_outcome_variants"]}["B1 INVALID treated as agreement (D = 0) instead of D = 1"]
+        self.assertEqual(v["difference"], Fraction(7, 11))
+        self.assertEqual(v["per_100_panel"], Fraction(35, 11))
+        lines = sap.describe_report(d, EXPOSURE).split("\n")
+        self.assertIn("  B1 INVALID treated as agreement (D = 0) instead of D = 1: 7/11 (0.6364) verdicts", lines)
+
     def test_an_empty_panel_is_not_defined_per_100(self):
         d = describe_panel([], Y=[])
         self.assertTrue(all(v["per_100_panel"] is None for v in d["invalid_outcome_variants"]))

@@ -1207,6 +1207,9 @@ MUTATIONS = [
     ('print the amount not attributed to a slot as the cache-write premium',
      "of which the premium {_f(c['a1_cache_premium'])}",
      "of which the premium {_f(c['not_attributed'])}"),
+    ("run the invalid-outcome variants at the uncapped nominal s",
+     "invalid_outcome_variants(slots, E, design.s, design.N)",
+     "invalid_outcome_variants(slots, E, slice_nominal(design.N), design.N)"),
 ]
 
 
