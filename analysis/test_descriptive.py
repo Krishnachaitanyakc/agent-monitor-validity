@@ -271,7 +271,7 @@ class TestDesignAndReviewCount(unittest.TestCase):
 
 
 class TestTemplateMultiplicities(unittest.TestCase):
-    TEMPLATES = ["a"] * 3 + ["b"] * 3 + ["c"] * 2 + [f"solo{i}" for i in range(12)]
+    TEMPLATES = ["a"] * 4 + ["b"] * 3 + ["c"] * 2 + [f"solo{i}" for i in range(11)]
 
     def panel(self):
         return build(labels_for(0, 2, 0, 2, 16), [0] * 20)
@@ -279,13 +279,13 @@ class TestTemplateMultiplicities(unittest.TestCase):
     def test_N_is_reported_with_its_template_multiplicities(self):
         slots, Y = self.panel()
         d = sap.analyze_panel(slots, Y=Y, templates=self.TEMPLATES, case_seed=0)
-        self.assertEqual(d["template_multiplicities"], {"n_tasks": 20, "n_templates": 15, "max_multiplicity": 3,
-                                                        "tasks_sharing": 8, "histogram": {1: 12, 2: 1, 3: 2}})
+        self.assertEqual(d["template_multiplicities"], {"n_tasks": 20, "n_templates": 14, "max_multiplicity": 4,
+                                                        "tasks_sharing": 9, "histogram": {1: 11, 2: 1, 3: 1, 4: 1}})
         lines = sap.describe_report(d, EXPOSURE).split("\n")
         start = lines.index("  N = 20, invalid A1 n_inv = 0, valid N_V = 20")
         self.assertEqual(lines[start + 1:start + 3],
-                         ["  Panel tasks: 20 in 15 templates; largest template holds 3; 8 tasks share a template.",
-                          "  Templates by number of tasks: 1 task: 12, 2 tasks: 1, 3 tasks: 2"])
+                         ["  Panel tasks: 20 in 14 templates; largest template holds 4; 9 tasks share a template.",
+                          "  Templates by number of tasks: 1 task: 11, 2 tasks: 1, 3 tasks: 1, 4 tasks: 1"])
 
     def test_the_report_says_when_they_were_not_supplied(self):
         slots, Y = self.panel()
@@ -1504,6 +1504,17 @@ class TestCaseRule(unittest.TestCase):
         # A benchmark match of the other verdict is never a control, and with no verdict match there is none.
         self.assertEqual(picks([D, benchmark]), [("D", 0)])
 
+    def test_the_control_matches_on_A1_when_a_stable_task_has_an_invalid_repeat(self):
+        # Such a task stays stable agreeing, and its A1 verdict differs from that repeat's outcome code.
+        D, control = self.row("S", 1), self.row("S", 0)
+        for repeat in ("A2", "A3"):
+            for task in (0, 1):                                      # the D case, then the control
+                slots, E, status, bench, ids = case_panel([D, control])
+                slots[task] = dict(slots[task], **{repeat: "MALFORMED"})
+                self.assertEqual(list(sap.derive_label_free(slots)["stratum"]), ["S", "S"])
+                chosen = sap.select_cases(slots, E, status, benchmarks=bench, ids=ids)
+                self.assertEqual([(c["cell"], c["index"]) for c in chosen], [("D", 0), ("E", 1)], (repeat, task))
+
     def test_the_control_of_a_panel_without_benchmarks_matches_on_the_verdict_alone(self):
         rows = [self.row("S", 1, USABLE, "wa", "failure")] + [self.row("S", 0, USABLE, "work", "failure")] * 5 + \
                [self.row("S", 0, USABLE, "wa", "success")] * 5
@@ -2218,7 +2229,7 @@ class TestDescriptiveReport(unittest.TestCase):
     def test_the_provenance_lines_as_exact_strings(self):
         # Eight trajectories whose counts all differ, in the A1 line and in the line for all slots.
         A, T, H = sap.Attempt, sap.TRANSPORT, sap.HALT
-        special = {("t0", "A", 1): [T, T, "success"], ("t1", "A", 1): [H, "success"], ("t2", "A", 1): [T] * 4,
+        special = {("t0", "A", 1): [T, T, "success"], ("t1", "A", 1): [H, H, "success"], ("t2", "A", 1): [T] * 4,
                    ("t3", "A", 1): ["REFUSAL"], ("t4", "A", 1): ["MALFORMED"], ("t5", "A", 1): [T, "success"],
                    ("t7", "A", 1): ["ABSTAIN"], ("t0", "A", 2): [H, H, H, "success"], ("t1", "A", 3): [T, "success"],
                    ("t2", "B", 1): [T] * 4, ("t3", "B", 1): [T] * 4}
@@ -2232,9 +2243,9 @@ class TestDescriptiveReport(unittest.TestCase):
                     log.append(A(t, j, r, "cfg-1", k, outcome, f"{t}-{j}{r}" if complete else None))
         lines = sap._provenance_lines(sap.resolve_panel(log, ids, "cfg-1")["provenance"])
         self.assertEqual(lines[2:], [
-            "  A1 slots: 8; slots that needed transport retries: 3 (6 retries in total); halts logged: 1; "
+            "  A1 slots: 8; slots that needed transport retries: 3 (6 retries in total); halts logged: 2; "
             "A1 INVALID: 4 (ABSTAIN 1, MALFORMED 1, REFUSAL 1, TRANSPORT_EXHAUSTED 1).",
-            "  All slots: 13 transport retries, 4 halts, 3 slots exhausted; response ids checked on 27 of 29 complete "
+            "  All slots: 13 transport retries, 5 halts, 3 slots exhausted; response ids checked on 27 of 29 complete "
             "responses, none repeated (a payload-keyed response cache would repeat them)."])
 
     def test_a_count_absent_from_the_log_summary_prints_as_zero(self):

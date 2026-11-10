@@ -1210,6 +1210,15 @@ MUTATIONS = [
     ("run the invalid-outcome variants at the uncapped nominal s",
      "invalid_outcome_variants(slots, E, design.s, design.N)",
      "invalid_outcome_variants(slots, E, slice_nominal(design.N), design.N)"),
+    ("print the exhausted count as the halts logged on the A1 line",
+     "halts logged: {a1.get('halts', 0)}",
+     "halts logged: {a1.get('exhausted', 0)}"),
+    ("report the second-largest template as the largest",
+     '"max_multiplicity": mult[0] if mult else 0',
+     '"max_multiplicity": mult[1] if mult else 0'),
+    ("match the section 11 control on A3 in place of A1",
+     'a1 = [canonical_outcome(sl["A1"]) for sl in slots]',
+     'a1 = [canonical_outcome(sl["A3"]) for sl in slots]'),
 ]
 
 
