@@ -319,7 +319,7 @@ class TestLockQuantities(unittest.TestCase):
         effect = {i: review["AUG"][i] - review["DIS"][i] for i in agreeing}
         gains = [sum((effect[i] for i, e in zip(agreeing, bits) if e), Fraction(0))
                  for bits in itertools.product((0, 1), repeat=len(agreeing))]
-        unstable = [effect[i] for i in agreeing if labels[i] in ("U2", "U1")]
+        unstable = [abs(effect[i]) for i in agreeing if labels[i] in ("U2", "U1")]
         return Fraction(100, N) * max(gains), Fraction(100, N) * max(unstable, default=Fraction(0)), design
 
     def check(self, sizes):
@@ -372,6 +372,37 @@ class TestLockQuantities(unittest.TestCase):
         # No U2 task: x is U1's weight, and in COVERAGE that is (n_D0 - s)/n_D0.
         design = sap.Design.from_labels(labels_for(0, 30, 0, 7, 163))
         self.assertEqual(sap.lock_quantities(design)["x_per_100"], Fraction(100, 200) * Fraction(170 - 30, 170))
+
+    def test_x_takes_the_largest_absolute_weight(self):
+        # N = 60, s = 9, n_D0 = 50. U2 holds the whole slice, so w_U2 = 9/40 - 9/50 = 9/200 and
+        # w_U1 = -9/50. The negative weight is the larger in size: x = (100/60)(9/50) = 3/10.
+        design = sap.Design.from_labels(labels_for(0, 10, 40, 5, 5))
+        self.assertEqual(design.regime, "PARTIAL")
+        self.assertEqual(sap.lock_quantities(design)["x_per_100"], Fraction(3, 10))
+
+    def test_the_brute_force_agrees_where_the_negative_weight_is_the_larger(self):
+        # N = 20, s = 3, n_D0 = 14: U2 holds the slice, w_U2 = 3/10 - 3/14 and w_U1 = -3/14.
+        self.check((0, 6, 10, 2, 2))
+        self.assertEqual(sap.lock_quantities(sap.Design.from_labels(labels_for(0, 6, 10, 2, 2)))["x_per_100"],
+                         Fraction(100, 20) * Fraction(3, 14))
+
+    def test_an_empty_unstable_group_does_not_set_x(self):
+        # An empty group has weight -s/n_D0 = -3/4 here; only the group with tasks counts.
+        for sizes, want in (((0, 80, 0, 2, 18), Fraction(1, 4)), ((0, 80, 2, 0, 18), Fraction(1, 4))):
+            design = sap.Design.from_labels(labels_for(*sizes))
+            self.assertEqual(design.regime, "COVERAGE", sizes)
+            self.assertEqual(sap.lock_quantities(design)["x_per_100"], want, sizes)
+        # In PARTIAL with one group empty, x is the other group's weight: (100/60)(27/100) = 9/20.
+        for sizes in ((0, 10, 0, 20, 30), (0, 10, 20, 0, 30)):
+            design = sap.Design.from_labels(labels_for(*sizes))
+            self.assertEqual(design.regime, "PARTIAL", sizes)
+            self.assertEqual(sap.lock_quantities(design)["x_per_100"], Fraction(9, 20), sizes)
+
+    def test_the_stable_group_does_not_set_x(self):
+        # N = 100, s = 15, n_D0 = 20, n1 = 15: U1 has weight 1/4 and S has weight -3/4.
+        design = sap.Design.from_labels(labels_for(0, 80, 0, 15, 5))
+        self.assertEqual(sap.delta_weights(design)["S"], -Fraction(3, 4))
+        self.assertEqual(sap.lock_quantities(design)["x_per_100"], Fraction(1, 4))
 
     def test_zero_in_the_degenerate_regimes(self):
         zero = {"max_gain_per_100": 0, "reference_reachable": False, "x_per_100": 0}

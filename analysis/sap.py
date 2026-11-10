@@ -2778,8 +2778,10 @@ def lock_quantities(design: Design) -> dict:
     w_j m_j, so it is largest when every task of a group with a positive weight is
     reference-contradicted and no other agreeing task is. reference_reachable says
     whether that largest gain reaches the practical reference of 2 per 100. x_per_100 is
-    the change in the gain per 100 from one unstable task: 100/N times the largest weight
-    among unstable groups with at least one task, which in COVERAGE is (n_D0 - s)/n_D0.
+    the change in the gain per 100 from one unstable task: 100/N times the largest absolute
+    weight among unstable groups with at least one task, which in COVERAGE is
+    (n_D0 - s)/n_D0 and in PARTIAL is the larger of |w_U2| and |w_U1|. An empty group has
+    a weight of -s/n_D0 and no task for it to apply to, so it is left out.
     In the degenerate regimes the gain is 0 whatever the labels are, so all of these
     are 0 and the reference is not reachable.
     """
@@ -2790,7 +2792,7 @@ def lock_quantities(design: Design) -> dict:
     per_100 = Fraction(100, design.N_per100)
     largest = per_100 * sum((max(Fraction(0), weight[j]) * size[j] for j in weight), Fraction(0))
     return {"max_gain_per_100": largest, "reference_reachable": largest >= MATERIAL_M,
-            "x_per_100": per_100 * max(weight[j] for j in UNSTABLE_GROUPS if size[j] > 0)}
+            "x_per_100": per_100 * max(abs(weight[j]) for j in UNSTABLE_GROUPS if size[j] > 0)}
 
 
 def _gain_text(g: Fraction) -> str:
