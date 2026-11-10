@@ -2459,6 +2459,7 @@ RESULT_MORE_TEXT = ("On this panel instability-first selected {g} more reference
                     "100 panel tasks, in expectation over each policy's random choices, {side} the practical "
                     "reference of 2 per 100.")
 RESULT_ONE_TASK_TEXT = "One unstable task changes this number by {x} per 100."
+RESULT_ONE_TASK_PARTIAL_TEXT = "One unstable task changes this number by at most {x} per 100."
 RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge calls and carries no population "
                        "confidence or significance claim.")
 # How to read the counts and the gain, plan section 8, word for word.
@@ -2816,8 +2817,8 @@ def result_sentences(regime: str, g_hat: Optional[Fraction], x: Fraction) -> Lis
     task (lock_quantities). Both are printed as decimals, the gain with as many digits
     as keep it from reading as the reference or as zero. A degenerate regime has its
     own sentence; otherwise the sentence follows g_hat, compared exactly with 0 and with
-    the practical reference of 2 per 100, and is followed by the sentence on x. Every
-    case ends with the closing sentence.
+    the practical reference of 2 per 100, and is followed by the sentence on x, which
+    says "by at most x" in PARTIAL. Every case ends with the closing sentence.
     """
     if regime in RESULT_DEGENERATE_TEXT:
         return [RESULT_DEGENERATE_TEXT[regime], RESULT_CLOSING_TEXT]
@@ -2825,7 +2826,8 @@ def result_sentences(regime: str, g_hat: Optional[Fraction], x: Fraction) -> Lis
         first = RESULT_NOT_MORE_TEXT
     else:
         first = RESULT_MORE_TEXT.format(g=_gain_text(g_hat), side="at or above" if g_hat >= MATERIAL_M else "below")
-    return [first, RESULT_ONE_TASK_TEXT.format(x=_f(x)), RESULT_CLOSING_TEXT]
+    return [first, (RESULT_ONE_TASK_PARTIAL_TEXT if regime == "PARTIAL" else RESULT_ONE_TASK_TEXT).format(x=_f(x)),
+            RESULT_CLOSING_TEXT]
 
 
 def describe_panel(slots: Sequence[Mapping[str, str]], E: Optional[Sequence[int]] = None, *,
@@ -3135,7 +3137,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
             f"  regime: {d['regime']}; {REGIME_NOTES[d['regime']]}",
             f"  largest gain per 100 panel tasks the panel can reach: {_exact_text(d['lock']['max_gain_per_100'])}",
             f"  2 per 100 reachable on this panel: {'yes' if d['lock']['reference_reachable'] else 'no'}",
-            f"  change in the gain per 100 panel tasks from one unstable task, x: {_exact_text(d['lock']['x_per_100'])}",
+            f"  {'largest change' if d['regime'] == 'PARTIAL' else 'change'} in the gain per 100 panel tasks from one "
+            f"unstable task, x: {_exact_text(d['lock']['x_per_100'])}",
             ""]
     out += _repeat_lines(d["repeat_flags"])
     out += ["", "INVALID OUTPUTS by judge slot and category", "  slot | invalid | categories"]

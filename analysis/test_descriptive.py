@@ -435,6 +435,15 @@ class TestLockQuantities(unittest.TestCase):
         d = describe(labels_for(0, 75, 0, 3, 22), [0] * 100)
         self.assertIn("  2 per 100 reachable on this panel: no", sap.describe_report(d, EXPOSURE).split("\n"))
 
+    def test_the_label_free_design_block_says_largest_change_in_partial_only(self):
+        d = describe(labels_for(0, 10, 4, 10, 36), [0] * 60)
+        self.assertEqual(d["regime"], "PARTIAL")
+        self.assertIn("  largest change in the gain per 100 panel tasks from one unstable task, x: 41/30 (1.3667)",
+                      sap.describe_report(d, EXPOSURE).split("\n"))
+        d = describe(labels_for(0, 30, 3, 7, 160), [0] * 200)
+        self.assertEqual(d["regime"], "COVERAGE")
+        self.assertNotIn("largest change", sap.describe_report(d, EXPOSURE))
+
 
 CLOSING = ("This describes these tasks and these realized judge calls and carries no population confidence or "
            "significance claim.")
@@ -457,7 +466,7 @@ class TestResultSentences(unittest.TestCase):
             ("PARTIAL", F(-3, 2), F(7, 17),
              ["On this panel instability-first did not select more reference-contradicted first verdicts than "
               "disagreement-first, in expectation over each policy's random choices.",
-              "One unstable task changes this number by 0.4118 per 100.", CLOSING]),
+              "One unstable task changes this number by at most 0.4118 per 100.", CLOSING]),
             ("COVERAGE", F(189, 136), F(7, 17),
              ["On this panel instability-first selected 1.3897 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
@@ -467,7 +476,7 @@ class TestResultSentences(unittest.TestCase):
              ["On this panel instability-first selected 0.5000 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
               "per 100.",
-              "One unstable task changes this number by 0.3333 per 100.", CLOSING]),
+              "One unstable task changes this number by at most 0.3333 per 100.", CLOSING]),
             ("COVERAGE", F(1), F(1, 3),
              ["On this panel instability-first selected 1.0000 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
@@ -477,7 +486,7 @@ class TestResultSentences(unittest.TestCase):
              ["On this panel instability-first selected 1.9900 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, below the practical reference of 2 "
               "per 100.",
-              "One unstable task changes this number by 0.3333 per 100.", CLOSING]),
+              "One unstable task changes this number by at most 0.3333 per 100.", CLOSING]),
             ("COVERAGE", F(2), F(4, 5),
              ["On this panel instability-first selected 2.0000 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, at or above the practical reference "
@@ -487,10 +496,16 @@ class TestResultSentences(unittest.TestCase):
              ["On this panel instability-first selected 10.8000 more reference-contradicted first verdicts per 100 "
               "panel tasks, in expectation over each policy's random choices, at or above the practical reference "
               "of 2 per 100.",
-              "One unstable task changes this number by 1.3667 per 100.", CLOSING]),
+              "One unstable task changes this number by at most 1.3667 per 100.", CLOSING]),
         ]
         for regime, g, x, want in cases:
             self.assertEqual(sap.result_sentences(regime, g, x), want, (regime, g))
+
+    def test_only_partial_says_at_most(self):
+        for regime, words in (("COVERAGE", "by 0.5000 per 100."), ("PARTIAL", "by at most 0.5000 per 100.")):
+            for g in (Fraction(-1), Fraction(1), Fraction(3)):
+                self.assertEqual(sap.result_sentences(regime, g, Fraction(1, 2))[1],
+                                 "One unstable task changes this number " + words, (regime, g))
 
     def test_a_gain_next_to_the_reference_or_to_zero_keeps_enough_digits(self):
         F = Fraction
