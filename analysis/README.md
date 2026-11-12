@@ -2,7 +2,7 @@
 
 `sap.py` is the study's analysis. It compares instability-first review with disagreement-first and random review at equal review budgets, and reports how many additional reference-contradicted first verdicts instability-first review captures.
 
-It has two paths. The primary path is descriptive: a completed audit of the frozen panel, whose conclusions apply to these tasks and these realized judge calls, with no population confidence or significance claim. `PLAN_VERSION` names version 4.2 of the study's analysis plan, dated Nov 9, 2026, which the primary path implements. The population inference, which follows version 3.2 of that plan (`POPULATION_PLAN_VERSION`), is outside the primary result and separately scoped. It stays in the module and runs only when asked for by name.
+It has two paths. The primary path is descriptive: a completed audit of the frozen panel, whose conclusions apply to these tasks and these realized judge calls, with no population confidence or significance claim. `PLAN_VERSION` names version 4.3 of the study's analysis plan, dated Nov 12, 2026, which the primary path implements. The population inference, which follows version 3.2 of that plan (`POPULATION_PLAN_VERSION`), is outside the primary result and separately scoped. It stays in the module and runs only when asked for by name.
 
 sap.py reads and writes no files, and its results depend only on its inputs and seeds; the tests use synthetic inputs only.
 
@@ -60,7 +60,7 @@ python3.12 -m venv ~/venvs/analysis
 ~/venvs/analysis/bin/python analysis/mutations.py
 ```
 
-`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 404 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
+`test_descriptive.py` holds the tests of the primary path, `test_sap.py` those of the core method and `test_plan_rules.py` those of reference handling, label coverage, outcome classes and the panel unit. `mutations.py` makes 406 deliberate breaks, such as counting an Unsure label as contradicted, treating HALT as INVALID, reporting an empty denominator as zero, printing a p-value in the descriptive report or making population inference the default, and expects the tests to catch each one. CI runs both on Python 3.12 and 3.13.
 
 ## Not yet covered
 
