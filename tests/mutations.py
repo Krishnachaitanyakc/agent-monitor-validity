@@ -585,6 +585,8 @@ MUTATIONS = [
      '            headers["x-api-key"] = key\n            headers[OPENAI_PROJECT_HEADER] = self.openai_project\n'),
     ("send no fixed User-Agent", "judge/dispatch.py",
      'headers = dict(request.headers, **{"user-agent": USER_AGENT})', "headers = dict(request.headers)"),
+    ("send another User-Agent value", "judge/dispatch.py",
+     'USER_AGENT = "agent-monitor-validity/1.0"', 'USER_AGENT = "agent-monitor-validity/1.1"'),
     ("build the HTTPS transport without the OpenAI project", "judge/dispatch.py",
      '        if not openai_project:\n            raise ValueError("HttpsTransport binds',
      '        if False:\n            raise ValueError("HttpsTransport binds'),

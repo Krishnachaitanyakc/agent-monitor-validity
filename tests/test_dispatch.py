@@ -755,7 +755,7 @@ class TestHttpsTransport(unittest.TestCase):
         for judge in ("A", "B"):
             for request in (reqs[judge], D.count_request(reqs[judge])):
                 sent, _ = self.sent_by_transport(request)
-                self.assertEqual(sent.get_header("User-agent"), D.USER_AGENT)
+                self.assertEqual(sent.get_header("User-agent"), "agent-monitor-validity/1.0")
             self.assertNotIn("user-agent", dict(reqs[judge].headers))
 
     def test_the_project_is_not_part_of_the_prepared_request_or_the_configuration(self):
