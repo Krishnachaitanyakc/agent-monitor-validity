@@ -344,8 +344,8 @@ def _run_into(args, data_root: Path, out: Path) -> bool:
             all_ok &= restored
             doc = {"note": "The exact request body, with each image's base64 data replaced by its length "
                            "and the SHA-256 of the base64 text. Keys appear in the canonical order of the "
-                           "sent bytes. The credential header and, on an OpenAI request, the project header "
-                           "are added at send time and are not shown.",
+                           "sent bytes. The credential header, a fixed User-Agent and, on an OpenAI request, "
+                           "the project header are added at send time and are not shown.",
                    "judge": j, "endpoint": reqs[j].url, "headers": dict(reqs[j].headers),
                    "request_sha256": reqs[j].sha256, "body_bytes": len(reqs[j].body),
                    "config_sha256": config_hash, "images_replaced": len(b64),
