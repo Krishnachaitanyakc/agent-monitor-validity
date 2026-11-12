@@ -708,8 +708,8 @@ class TestReadingLines(unittest.TestCase):
     NEGATIVE = ("  In COVERAGE, a negative gain means stable agreeing tasks had the higher contradiction rate. In "
                 "PARTIAL, it means the slice instability-first reviews had a lower rate than the agreeing set overall.")
     SEPARATE = ("  A gain can come from judge noise or from unreliable references on hard tasks, since references that "
-                "are wrong mostly on unstable tasks can produce a gain with no difference in judge behavior. At the "
-                "expected number of unstable tasks the table does not tell these apart.")
+                "are wrong mostly on unstable tasks can produce a gain with no difference in judge behavior. The "
+                "table does not tell these apart.")
     FLIP = "  x is also the change, or in PARTIAL the largest change, from one reference flipping on an unstable task."
     # Plan section 8, version 4.3, the paragraph "Reading a gain" after its heading.
     PLAN_READING_A_GAIN = (
@@ -725,6 +725,13 @@ class TestReadingLines(unittest.TestCase):
         "PARTIAL, it means the slice instability-first reviews had a lower rate than the agreeing set overall. A "
         "contradicted U2 verdict has both repeats matching the released reference. A contradicted U1 verdict whose "
         "other repeat is valid has a majority that stays with A1.")
+    # Plan section 8, version 4.3, the paragraph "What the table cannot separate" after its heading. Its
+    # last sentence is not printed, since the fragility count is not part of this round.
+    PLAN_CANNOT_SEPARATE = (
+        "A gain can come from judge noise or from unreliable references on hard tasks, since references that are "
+        "wrong mostly on unstable tasks can produce a gain with no difference in judge behavior. The table does not "
+        "tell these apart. x is also the change, or in PARTIAL the largest change, from one reference flipping on an "
+        "unstable task. The label-flip fragility count went with the test.")
 
     def test_the_lines_are_the_plans_reading_of_a_gain_word_for_word(self):
         lines = (self.GAIN, self.NOISE, self.MODEL_LIMIT, self.SHARED, self.NEGATIVE, self.U2, self.U1)
@@ -732,6 +739,12 @@ class TestReadingLines(unittest.TestCase):
         self.assertEqual(sap.READING_GAIN_TEXT, self.GAIN.strip())
         self.assertEqual(sap.READING_NOISE_TEXT, self.NOISE.strip())
         self.assertEqual(sap.READING_MODEL_LIMIT_TEXT, self.MODEL_LIMIT.strip())
+
+    def test_the_lines_are_the_plans_word_for_word_on_what_the_table_cannot_separate(self):
+        printed = " ".join(x.strip() for x in (self.SEPARATE, self.FLIP))
+        self.assertEqual(printed + " The label-flip fragility count went with the test.", self.PLAN_CANNOT_SEPARATE)
+        self.assertEqual(sap.READING_SEPARATE_TEXT, self.SEPARATE.strip())
+        self.assertTrue(sap.READING_SEPARATE_TEXT.endswith(" The table does not tell these apart."))
 
     def test_word_for_word_in_their_places_in_every_regime(self):
         seen = set()
@@ -765,6 +778,7 @@ class TestReadingLines(unittest.TestCase):
             self.assertNotIn("part of any gain is built in", txt)
             self.assertNotIn("Averaged over redraws of the calls", txt)
             self.assertNotIn("is zero only if B is always right", txt)
+            self.assertNotIn("At the expected number of unstable tasks", txt)
 
     def test_the_readings_never_use_the_word_the_plan_leaves_out(self):
         for line in (self.GAIN, self.NOISE, self.MODEL_LIMIT, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP):

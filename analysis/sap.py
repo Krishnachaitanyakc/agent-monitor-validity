@@ -2491,7 +2491,7 @@ READING_NEGATIVE_TEXT = ("In COVERAGE, a negative gain means stable agreeing tas
                          "set overall.")
 READING_SEPARATE_TEXT = ("A gain can come from judge noise or from unreliable references on hard tasks, since references "
                          "that are wrong mostly on unstable tasks can produce a gain with no difference in judge "
-                         "behavior. At the expected number of unstable tasks the table does not tell these apart.")
+                         "behavior. The table does not tell these apart.")
 READING_FLIP_TEXT = "x is also the change, or in PARTIAL the largest change, from one reference flipping on an unstable task."
 # The limitations stated with the result, plan sections 7 and 8. Prior exposure is the statement at the top.
 LIMITATIONS_TEXT = ("Limitations. One dataset and two judges. Released labels are a reference, not ground truth. "
