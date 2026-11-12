@@ -2475,10 +2475,15 @@ RESULT_CLOSING_TEXT = ("This describes these tasks and these realized judge call
 # How to read the counts and the gain, plan section 8, word for word.
 READING_U2_TEXT = "A contradicted U2 verdict has both repeats matching the released reference."
 READING_U1_TEXT = "A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
-READING_GAIN_TEXT = "Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
-READING_NOISE_TEXT = ("Averaged over redraws of the calls, which this study does not make, call noise alone gives a "
-                      "positive gain when judge A is right more often than wrong on the noisy tasks. That gain shrinks "
-                      "as judge B grows more accurate on those tasks and is zero only if B is always right.")
+READING_GAIN_TEXT = ("Instability and the reference-contradicted outcome are both defined from A1, so they are "
+                     "not independent measurements.")
+READING_NOISE_TEXT = ("Under a simple model, in which judge A's calls on a task are independent with a task-level "
+                      "chance of matching the reference and judge B is independent of A given the task, "
+                      "call-to-call randomness alone produces a positive expected gain when A matches the "
+                      "reference more often than not on the tasks where it varies, and that expected gain "
+                      "shrinks as B becomes more accurate on those tasks.")
+READING_MODEL_LIMIT_TEXT = ("Simulations under that model show the mechanism can occur. They do not show how much "
+                            "of an observed gain it explains, and the model's assumptions are not tested here.")
 READING_SHARED_TEXT = ("A positive gain does not show that instability reaches verdicts both judges get wrong for a "
                        "shared reason, and it says nothing about how many contradicted verdicts are stable.")
 READING_NEGATIVE_TEXT = ("In COVERAGE, a negative gain means stable agreeing tasks had the higher contradiction rate. "
@@ -3223,8 +3228,8 @@ def describe_report(desc: dict, prior_exposure: Optional[str] = None) -> str:
     out.append(f"  check, disagreement-first minus random: {_exact_text(check['verdicts'])} verdicts; "
                f"{_exact_text(check['per_100_panel'])} per 100 panel tasks (N = {d['N']})")
     out.append("  " + READING_GAIN_TEXT)
-    out += ["  " + t for t in (READING_NOISE_TEXT, READING_SHARED_TEXT, READING_NEGATIVE_TEXT, READING_SEPARATE_TEXT,
-                               READING_FLIP_TEXT)]
+    out += ["  " + t for t in (READING_NOISE_TEXT, READING_MODEL_LIMIT_TEXT, READING_SHARED_TEXT,
+                               READING_NEGATIVE_TEXT, READING_SEPARATE_TEXT, READING_FLIP_TEXT)]
     out.append("")
     if d["secondary"] is None:
         out += ["SECONDARY RESULT: the same gain per 100 tasks with a usable label",

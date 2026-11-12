@@ -695,10 +695,14 @@ class TestResultSentences(unittest.TestCase):
 class TestReadingLines(unittest.TestCase):
     U2 = "  A contradicted U2 verdict has both repeats matching the released reference."
     U1 = "  A contradicted U1 verdict whose other repeat is valid has a majority that stays with A1."
-    GAIN = "  Instability and the reference-contradicted outcome both use A1, so part of any gain is built in."
-    NOISE = ("  Averaged over redraws of the calls, which this study does not make, call noise alone gives a positive "
-             "gain when judge A is right more often than wrong on the noisy tasks. That gain shrinks as judge B grows "
-             "more accurate on those tasks and is zero only if B is always right.")
+    GAIN = ("  Instability and the reference-contradicted outcome are both defined from A1, so they are not "
+            "independent measurements.")
+    NOISE = ("  Under a simple model, in which judge A's calls on a task are independent with a task-level chance of "
+             "matching the reference and judge B is independent of A given the task, call-to-call randomness alone "
+             "produces a positive expected gain when A matches the reference more often than not on the tasks where "
+             "it varies, and that expected gain shrinks as B becomes more accurate on those tasks.")
+    MODEL_LIMIT = ("  Simulations under that model show the mechanism can occur. They do not show how much of an "
+                   "observed gain it explains, and the model's assumptions are not tested here.")
     SHARED = ("  A positive gain does not show that instability reaches verdicts both judges get wrong for a shared "
               "reason, and it says nothing about how many contradicted verdicts are stable.")
     NEGATIVE = ("  In COVERAGE, a negative gain means stable agreeing tasks had the higher contradiction rate. In "
@@ -707,6 +711,27 @@ class TestReadingLines(unittest.TestCase):
                 "are wrong mostly on unstable tasks can produce a gain with no difference in judge behavior. At the "
                 "expected number of unstable tasks the table does not tell these apart.")
     FLIP = "  x is also the change, or in PARTIAL the largest change, from one reference flipping on an unstable task."
+    # Plan section 8, version 4.3, the paragraph "Reading a gain" after its heading.
+    PLAN_READING_A_GAIN = (
+        "Instability and the reference-contradicted outcome are both defined from A1, so they are not independent "
+        "measurements. Under a simple model, in which judge A's calls on a task are independent with a task-level "
+        "chance of matching the reference and judge B is independent of A given the task, call-to-call randomness "
+        "alone produces a positive expected gain when A matches the reference more often than not on the tasks where "
+        "it varies, and that expected gain shrinks as B becomes more accurate on those tasks. Simulations under that "
+        "model show the mechanism can occur. They do not show how much of an observed gain it explains, and the "
+        "model's assumptions are not tested here. A positive gain does not show that instability reaches verdicts "
+        "both judges get wrong for a shared reason, and it says nothing about how many contradicted verdicts are "
+        "stable. In COVERAGE, a negative gain means stable agreeing tasks had the higher contradiction rate. In "
+        "PARTIAL, it means the slice instability-first reviews had a lower rate than the agreeing set overall. A "
+        "contradicted U2 verdict has both repeats matching the released reference. A contradicted U1 verdict whose "
+        "other repeat is valid has a majority that stays with A1.")
+
+    def test_the_lines_are_the_plans_reading_of_a_gain_word_for_word(self):
+        lines = (self.GAIN, self.NOISE, self.MODEL_LIMIT, self.SHARED, self.NEGATIVE, self.U2, self.U1)
+        self.assertEqual(" ".join(x.strip() for x in lines), self.PLAN_READING_A_GAIN)
+        self.assertEqual(sap.READING_GAIN_TEXT, self.GAIN.strip())
+        self.assertEqual(sap.READING_NOISE_TEXT, self.NOISE.strip())
+        self.assertEqual(sap.READING_MODEL_LIMIT_TEXT, self.MODEL_LIMIT.strip())
 
     def test_word_for_word_in_their_places_in_every_regime(self):
         seen = set()
@@ -718,13 +743,15 @@ class TestReadingLines(unittest.TestCase):
             self.assertEqual(lines[start + 2:start + 4], [self.U2, self.U1])
             self.assertEqual(lines[start + 4], "")
             check = next(i for i, x in enumerate(lines) if x.startswith("  check, disagreement-first minus random"))
-            self.assertEqual(lines[check + 1:check + 8],
-                             [self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP, ""])
+            self.assertEqual(lines[check + 1:check + 9],
+                             [self.GAIN, self.NOISE, self.MODEL_LIMIT, self.SHARED, self.NEGATIVE, self.SEPARATE,
+                              self.FLIP, ""])
         self.assertEqual(seen, REGIMES)
 
     def test_each_is_printed_once_and_states_no_number(self):
         txt = sap.describe_report(next(report_panels()), EXPOSURE)
-        for line in (self.U2, self.U1, self.GAIN, self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP):
+        for line in (self.U2, self.U1, self.GAIN, self.NOISE, self.MODEL_LIMIT, self.SHARED, self.NEGATIVE,
+                     self.SEPARATE, self.FLIP):
             self.assertEqual(txt.count(line), 1, line)
             self.assertIsNone(re.search(r"\d", re.sub(r"\b(U2|U1|A1)\b", "", line)), line)
 
@@ -735,9 +762,12 @@ class TestReadingLines(unittest.TestCase):
             txt = sap.describe_report(d, EXPOSURE)
             self.assertNotIn("relatively more common", txt)
             self.assertNotIn("freezes that direction", txt)
+            self.assertNotIn("part of any gain is built in", txt)
+            self.assertNotIn("Averaged over redraws of the calls", txt)
+            self.assertNotIn("is zero only if B is always right", txt)
 
     def test_the_readings_never_use_the_word_the_plan_leaves_out(self):
-        for line in (self.NOISE, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP):
+        for line in (self.GAIN, self.NOISE, self.MODEL_LIMIT, self.SHARED, self.NEGATIVE, self.SEPARATE, self.FLIP):
             self.assertEqual(plan_unused_words_in(line), [], line)
         self.assertNotIn("fragil", self.FLIP.lower())
 
