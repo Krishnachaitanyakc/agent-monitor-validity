@@ -25,6 +25,7 @@ These commitments exist because the mentor is the sole author of AgentTelemetry,
 - `samples/`: two synthetic sample traces and instructions for the applicant screening exercise. Not part of the study corpus.
 - `scripts/collect_traces.py`: trace-collection stub implementing the written inclusion rules.
 - `datapath/`, `scripts/arb_datapath.py`, `tests/`: the AgentRewardBench data path (fetch, normalize, dev-only labels, validation, leakage checks). See `docs/DATA_PATH.md`.
+- `analysis/`: the statistical analysis and its synthetic tests. See `analysis/README.md`.
 
 ## References
 
